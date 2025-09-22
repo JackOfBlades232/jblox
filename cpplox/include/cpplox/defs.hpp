@@ -5,12 +5,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cassert>
 #include <sys/types.h>
 
 #include <utility>
 #include <iostream>
 #include <print>
 #include <span>
+#include <variant>
+#include <optional>
+#include <vector>
+#include <unordered_map>
 
 #include <version.hpp>
 

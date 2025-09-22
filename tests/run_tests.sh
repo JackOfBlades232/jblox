@@ -23,3 +23,7 @@ run_all_tests
 INTERP=../reference/craftinginterpreters/clox
 echo -e "\nclox (reference):\n"
 run_all_tests
+
+INTERP=../cpplox/build/cpplox
+echo -e "\njb-cpplox:\n"
+run_all_tests
