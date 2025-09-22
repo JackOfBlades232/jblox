@@ -1,0 +1,25 @@
+// this is a oneline comment
+print "A";
+/* this is a c-style comment*/
+print "B";
+/*
+this is a c-style comment
+on many lines    */
+print "C";
+/*
+this is a c-style comment
+on many lines with nested oneline ones // here
+// and
+  /// there
+*/
+print "D";
+print /* this is a c-style comment inside a line */ "E";
+print // oneliner too
+ "F";
+
+ /* This is a nested comment /*this*/
+    /**
+     is also /*a*/
+     **/
+*/
+print "G";

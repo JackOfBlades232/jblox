@@ -14,6 +14,7 @@ function run_all_tests {
     run_test variables.lox
     run_test closures.lox
     run_test objects.lox
+    run_test comments.lox
 }
 
 INTERP=../reference/craftinginterpreters/jlox

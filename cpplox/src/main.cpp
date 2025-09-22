@@ -204,6 +204,17 @@ bool match(scanner_t &scanner, char expected)
     return true;
 }
 
+int match_n(scanner_t &scanner, string_view cs)
+{
+    int count = 0;
+    for (char c : cs) {
+        if (!match(scanner, c))
+            break;
+        ++count;
+    }
+    return count;
+}
+
 char peek(const scanner_t &scanner)
 {
     return done(scanner) ? '\0' : scanner.source[scanner.current];
@@ -224,6 +235,34 @@ string_view cur_lexeme(const scanner_t &scanner)
 void add_token(scanner_t &scanner, token_type_t tt, LoxObject lit = {})
 {
     scanner.tokens.push_back({tt, cur_lexeme(scanner), lit, scanner.line});
+}
+
+void skip_oneline_comment(scanner_t &scanner)
+{
+    while (peek(scanner) != '\n' && !done(scanner))
+        advance(scanner);
+}
+
+void skip_multiline_comment(scanner_t &scanner)
+{
+    int balance = 1;
+
+    while (balance > 0 && !done(scanner)) {
+        if (int matches = match_n(scanner, "/*"); matches > 0) {
+            if (matches == 2)
+                ++balance;
+            continue;
+        }
+        if (int matches = match_n(scanner, "*/"); matches > 0) {
+            if (matches == 2)
+                --balance;
+            continue;
+        }
+
+        if (peek(scanner) == '\n')
+            ++scanner.line;
+        advance(scanner);
+    }
 }
 
 void scan_string(scanner_t &scanner)
@@ -312,7 +351,9 @@ void scan_one_token(scanner_t &scanner)
 
     case '/':
         if (match(scanner, '/'))
-            while (peek(scanner) != '\n' && !done(scanner)) advance(scanner);
+            skip_oneline_comment(scanner);
+        else if (match(scanner, '*'))
+            skip_multiline_comment(scanner);
         else
             add_token(scanner, e_tt_slash);
 
