@@ -1,0 +1,25 @@
+#!/bin/bash
+cd tests
+
+INTERP=
+
+function run_test {
+    echo $1 ":"
+    $INTERP $1
+    echo
+}
+
+function run_all_tests {
+    run_test hello.lox
+    run_test variables.lox
+    run_test closures.lox
+    run_test objects.lox
+}
+
+INTERP=../reference/craftinginterpreters/jlox
+echo -e "jlox (reference):\n"
+run_all_tests
+
+INTERP=../reference/craftinginterpreters/clox
+echo -e "\nclox (reference):\n"
+run_all_tests

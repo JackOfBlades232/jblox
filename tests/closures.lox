@@ -1,0 +1,24 @@
+fun enclosing() {
+    var a = 1;
+
+    fun closure() {
+        a = a + 1;
+        print a;
+        return a;
+    }
+
+    closure();
+
+    print a;
+
+    return closure;
+}
+
+fun doFunc(func) {
+    func();
+}
+
+var closure = enclosing();
+doFunc(closure);
+doFunc(closure);
+doFunc(closure);

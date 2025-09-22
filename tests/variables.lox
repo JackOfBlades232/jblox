@@ -1,0 +1,39 @@
+var a = 3;
+
+print a;
+
+fun tryIncByRef(a) {
+    a = a + 1;
+}
+
+tryIncByRef(a);
+print a;
+
+fun getIncremented(a) {
+    return a + 1;
+}
+
+a = getIncremented(a);
+print a;
+
+var s = "Me am string";
+print s;
+
+fun tryChangeByRef(s) {
+    s = s + "?";
+}
+
+tryChangeByRef(s);
+print s;
+
+fun getChanged(s) {
+    return s + "?";
+}
+s = getChanged(s);
+print s;
+
+fun justIncrement() {
+    a = a + 1;
+}
+justIncrement();
+print a;

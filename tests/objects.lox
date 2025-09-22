@@ -1,0 +1,72 @@
+class Monster {
+    init(name) {
+        this.name = name;
+    }
+
+    die() {
+        print this.name + " died";
+        return 0;
+    }
+}
+
+var frog = Monster("frog");
+
+class Orc < Monster {
+    init(name, girth) {
+        super.init(name);
+        this.girth = girth;
+    }
+
+    die() {
+        super.die();
+        return this.girth;
+    }
+}
+
+class Hero {
+    init(name) {
+        this.name = name;
+        this.score = 0;
+    }
+
+    report() {
+        print this.name + " now has points:";
+        print this.score;
+    }
+
+    kill(monster) {
+        this.score = this.score + monster.die();
+        this.report();
+    }
+}
+
+var legolas = Hero("Legolas");
+var gimli = Hero("Gimli");
+
+var orc1 = Orc("Ratbag", 1);
+var orc2 = Orc("Grishnakh", 2);
+var orc3 = Orc("Lurtz", 5);
+
+gimli.kill(orc1);
+gimli.kill(orc2);
+gimli.kill(frog);
+legolas.kill(orc3);
+
+var winner;
+if (gimli.score > legolas.score) {
+    winner = gimli;
+} else if (gimli.score < legolas.score) {
+    winner = legolas;
+}
+
+if (winner == nil) {
+    print "Tie!";
+} else {
+    print winner.name + " won!";
+}
+
+// Is winner a ref?
+print "Taking all points from winner";
+winner.score = 0;
+gimli.report();
+legolas.report();
