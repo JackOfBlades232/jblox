@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cassert>
-#include <sys/types.h>
 
 #include <utility>
 #include <iostream>
@@ -15,9 +14,20 @@
 #include <variant>
 #include <optional>
 #include <vector>
+#include <string>
 #include <unordered_map>
 
 #include <version.hpp>
+
+// Don't need all the colonoscopy, and my type naming conventions are already
+// different from the std ones.
+using namespace std;
+
+#ifdef _WIN32
+using ssize_t = make_signed_t<size_t>;
+#else
+#include <sys/types.h>
+#endif
 
 using u8 = uint8_t;
 using u16 = uint16_t;
@@ -34,10 +44,6 @@ using uint = unsigned int;
 using uchar = unsigned char;
 using usize = size_t;
 using isize = ssize_t;
-
-// Don't need all the colonoscopy, and my type naming conventions are already
-// different from the std ones.
-using namespace std;
 
 namespace detail
 {
