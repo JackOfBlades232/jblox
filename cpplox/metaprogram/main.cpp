@@ -1,8 +1,14 @@
 #include <defs.hpp>
 
+enum field_type_t {
+    e_ft_obj,
+    e_ft_ptr
+};
+
 struct field_t {
     string_view type;
     string_view name;
+    field_type_t kind = e_ft_obj;
 };
 
 using ast_def_t = unordered_map<string_view, vector<field_t>>;
@@ -13,14 +19,67 @@ void define_ast(FILE *f, string_view base, ast_def_t &&def)
     println(f, "#include <lox.hpp>");
     println(f, "#include <tokens.hpp>\n");
 
-    println(f, "struct {} : {{", base);
+    for (const auto &[node, _] : def)
+        println(f, "struct {}{};", node, base);
+
+    println(f, "\nstruct IVisitor {{", base);
+    for (const auto &[node, _] : def) {
+        println(f,
+            "    virtual void Visit{}{}(const {}{} &) = 0;",
+            node, base, node, base);
+    }
+    println(f, "}};\n");
+
+    println(f, "struct {} {{", base);
     println(f, "    virtual ~{}() {{}}", base);
+    println(f, "    virtual void Accept(IVisitor &) const = 0;");
     println(f, "}};\n");
 
     for (const auto &[node, fields] : def) {
-        println(f, "struct {} : {} {{", node, base);
-        for (auto [type, name] : fields)
-            println(f, "    {} {};", type, name);
+        println(f, "struct {}{} : {} {{", node, base, base);
+        bool needs_cleanup = false;
+        for (auto [type, name, kind] : fields) {
+            if (kind == e_ft_obj) {
+                println(f, "    {} {};", type, name);
+            } else if (kind == e_ft_ptr) {
+                println(f, "    {} *{};", type, name);
+                needs_cleanup = true;
+            }
+        }
+        print(f, "    {}{}(", node, base);
+        if (!fields.empty()) {
+            auto [type, name, kind] = fields[0];
+            print(f, "{} {}{}", type, kind == e_ft_ptr ? "*" : "&&", name);
+        }
+        for (auto [type, name, kind] : span{fields}.subspan(1))
+            print(f, ", {} {}{}", type, kind == e_ft_ptr ? "*" : "&&", name);
+        println(f, ")");
+        print(f, "        : ");
+        if (!fields.empty()) {
+            auto [_, name, kind] = fields[0];
+            if (kind == e_ft_ptr)
+                print(f, "{}{{{}}}", name, name);
+            else
+                print(f, "{}{{move({})}}", name, name);
+        }
+        for (auto [_, name, kind] : span{fields}.subspan(1)) {
+            if (kind == e_ft_ptr)
+                print(f, ", {}{{{}}}", name, name);
+            else
+                print(f, ", {}{{move({})}}", name, name);
+        }
+        println(f, " {{}}");
+        if (needs_cleanup) {
+            println(f, "    ~{}{}() {{", node, base);
+            for (auto [_, name, kind] : fields) {
+                if (kind == e_ft_ptr)
+                    println(f, "        delete {};", name);
+            }
+            println(f, "    }}");
+        }
+        println(f,
+            "    void Accept(IVisitor &v) const override "
+            "{{ v.Visit{}{}(*this); }}", node, base);
         println(f, "}};\n");
     }
 }
@@ -45,15 +104,15 @@ int main(int argc, char **argv)
     define_ast(astf, "Expr",
         {
             {"Binary", {
-                {"Expr", "left"}, 
-                {"token_t", "operator"}, 
-                {"Expr", "right"}
+                {"Expr", "left", e_ft_ptr}, 
+                {"token_t", "op"}, 
+                {"Expr", "right", e_ft_ptr}
             }},
-            {"Grouping", {{"Expr", "expression"}}},
+            {"Grouping", {{"Expr", "expr", e_ft_ptr}}},
             {"Literal", {{"LoxObject", "value"}}},
             {"Unary", {
-                {"token_t", "operator"},
-                {"Expr", "right"}
+                {"token_t", "op"},
+                {"Expr", "right", e_ft_ptr}
             }}
         });
 }

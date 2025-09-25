@@ -54,6 +54,18 @@ public:
         { return const_cast<LoxObject *>(this)->GetNumber(); }
 };
 
+inline const LoxObject c_nil{};
+
+inline string to_string(const LoxObject &obj)
+{
+    if (obj.IsNil())
+        return "nil";
+    else if (obj.IsString())
+        return obj.GetString();
+    else // number
+        return to_string(obj.GetNumber());
+}
+
 inline void report(
     lox_t &lox, int line, string_view location, string_view message)
 {

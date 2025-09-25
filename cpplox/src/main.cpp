@@ -1,11 +1,86 @@
 #include <lox.hpp>
 #include <tokens.hpp>
+#include <ast.hpp>
 
 enum errc_t {
     e_ec_ok = 0,
     e_ec_arg_error = 1,
     e_ec_sys_error = 2,
     e_ec_code_error = 13,
+};
+
+class AstPrinter : public IVisitor {
+    string accum{};
+
+public:
+    string Print(Expr const &expr) {
+        accum.clear();
+        expr.Accept(*this);
+        return move(accum);
+    }
+
+    void VisitUnaryExpr(const UnaryExpr &unary) override {
+        Parenthesize(unary.op.lexeme, {unary.right});
+    }
+    void VisitGroupingExpr(const GroupingExpr &grouping) override {
+        Parenthesize("group", {grouping.expr});
+    }
+    void VisitLiteralExpr(const LiteralExpr &literal) override {
+        accum.append(to_string(literal.value));
+    }
+    void VisitBinaryExpr(const BinaryExpr &binary) override {
+        Parenthesize(binary.op.lexeme, {binary.left, binary.right});
+    }
+
+private:
+    void Parenthesize(string_view name, initializer_list<Expr const *> exprs) {
+        accum.append("(");
+        accum.append(name);
+        for (Expr const *expr : exprs) {
+            accum.append(" ");
+            expr->Accept(*this);
+        }
+        accum.append(")");
+    }
+};
+
+class RpnAstPrinter : public IVisitor {
+    string accum{};
+
+public:
+    string Print(Expr const &expr) {
+        accum.clear();
+        expr.Accept(*this);
+        return move(accum);
+    }
+
+    void VisitUnaryExpr(const UnaryExpr &unary) override {
+        LiteralExpr zero{0.0};
+        Output({&zero, unary.right}, unary.op.lexeme);
+    }
+    void VisitGroupingExpr(const GroupingExpr &grouping) override {
+        grouping.expr->Accept(*this);
+    }
+    void VisitLiteralExpr(const LiteralExpr &literal) override {
+        accum.append(to_string(literal.value));
+    }
+    void VisitBinaryExpr(const BinaryExpr &binary) override {
+        Output({binary.left, binary.right}, binary.op.lexeme);
+    }
+
+private:
+    void Output(initializer_list<Expr const *> exprs, string_view op) {
+        assert(exprs.size());
+        if (!accum.empty())
+            accum.append(" ");
+        (*exprs.begin())->Accept(*this);
+        for (Expr const *expr : span{exprs}.subspan(1)) {
+            accum.append(" ");
+            expr->Accept(*this);
+        }
+        accum.append(" ");
+        accum.append(op);
+    }
 };
 
 struct scanner_t {
@@ -316,6 +391,19 @@ int main(int argc, char **argv)
     span<char const *const> args{argv + 1, usize(argc - 1)};
 
     lox_t lox{};
+
+    // @TEST
+    Expr const *root = new BinaryExpr{
+        new UnaryExpr{
+            token_t{e_tt_minus, "-", c_nil, 1},
+            new LiteralExpr{123.0}
+        },
+        token_t{e_tt_star, "*", c_nil, 1},
+        new GroupingExpr{new LiteralExpr{45.67}}
+    };
+    DEFER(delete root);
+    println("Example AST:\n{}", AstPrinter{}.Print(*root));
+    println("Example AST in rpn:\n{}", RpnAstPrinter{}.Print(*root));
     
     if (args.size() > 1) {
         show_header();
