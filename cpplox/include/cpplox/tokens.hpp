@@ -1,6 +1,7 @@
 #pragma once
 
 #include "defs.hpp"
+#include "lox.hpp"
 
 enum token_type_t {
     e_tt_eof = 0,
@@ -95,3 +96,14 @@ inline string to_string(token_t tok)
         tok.lexeme, c_tt_debug_names[tok.type], tok.line);
 }
 
+inline void error(lox_t &lox, token_t tok, string_view message)
+{
+    if (tok.type == e_tt_eof) {
+        report(lox, tok.line, " at end", message);
+    } else {
+        report(
+            lox, tok.line,
+            string_view{string{"at '"} + string{tok.lexeme} + string{"'"}},
+            message);
+    }
+}

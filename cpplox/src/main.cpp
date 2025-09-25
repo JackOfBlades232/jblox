@@ -9,80 +9,6 @@ enum errc_t {
     e_ec_code_error = 13,
 };
 
-class AstPrinter : public IVisitor {
-    string accum{};
-
-public:
-    string Print(Expr const &expr) {
-        accum.clear();
-        expr.Accept(*this);
-        return move(accum);
-    }
-
-    void VisitUnaryExpr(const UnaryExpr &unary) override {
-        Parenthesize(unary.op.lexeme, {unary.right});
-    }
-    void VisitGroupingExpr(const GroupingExpr &grouping) override {
-        Parenthesize("group", {grouping.expr});
-    }
-    void VisitLiteralExpr(const LiteralExpr &literal) override {
-        accum.append(to_string(literal.value));
-    }
-    void VisitBinaryExpr(const BinaryExpr &binary) override {
-        Parenthesize(binary.op.lexeme, {binary.left, binary.right});
-    }
-
-private:
-    void Parenthesize(string_view name, initializer_list<Expr const *> exprs) {
-        accum.append("(");
-        accum.append(name);
-        for (Expr const *expr : exprs) {
-            accum.append(" ");
-            expr->Accept(*this);
-        }
-        accum.append(")");
-    }
-};
-
-class RpnAstPrinter : public IVisitor {
-    string accum{};
-
-public:
-    string Print(Expr const &expr) {
-        accum.clear();
-        expr.Accept(*this);
-        return move(accum);
-    }
-
-    void VisitUnaryExpr(const UnaryExpr &unary) override {
-        LiteralExpr zero{0.0};
-        Output({&zero, unary.right}, unary.op.lexeme);
-    }
-    void VisitGroupingExpr(const GroupingExpr &grouping) override {
-        grouping.expr->Accept(*this);
-    }
-    void VisitLiteralExpr(const LiteralExpr &literal) override {
-        accum.append(to_string(literal.value));
-    }
-    void VisitBinaryExpr(const BinaryExpr &binary) override {
-        Output({binary.left, binary.right}, binary.op.lexeme);
-    }
-
-private:
-    void Output(initializer_list<Expr const *> exprs, string_view op) {
-        assert(exprs.size());
-        if (!accum.empty())
-            accum.append(" ");
-        (*exprs.begin())->Accept(*this);
-        for (Expr const *expr : span{exprs}.subspan(1)) {
-            accum.append(" ");
-            expr->Accept(*this);
-        }
-        accum.append(" ");
-        accum.append(op);
-    }
-};
-
 struct scanner_t {
     string_view source;
     vector<token_t> tokens{};
@@ -313,15 +239,254 @@ vector<token_t> scan_tokens(string_view code, lox_t &lox)
     return move(scanner.tokens);
 }
 
+class AstPrinter : public IVisitor {
+    string accum{};
+
+public:
+    string Print(Expr const &expr) {
+        accum.clear();
+        expr.Accept(*this);
+        return move(accum);
+    }
+
+    void VisitUnaryExpr(const UnaryExpr &unary) override {
+        Parenthesize(unary.op.lexeme, {unary.right});
+    }
+    void VisitGroupingExpr(const GroupingExpr &grouping) override {
+        Parenthesize("group", {grouping.expr});
+    }
+    void VisitLiteralExpr(const LiteralExpr &literal) override {
+        accum.append(to_string(literal.value));
+    }
+    void VisitBinaryExpr(const BinaryExpr &binary) override {
+        Parenthesize(binary.op.lexeme, {binary.left, binary.right});
+    }
+
+private:
+    void Parenthesize(string_view name, initializer_list<Expr const *> exprs) {
+        accum.append("(");
+        accum.append(name);
+        for (Expr const *expr : exprs) {
+            accum.append(" ");
+            expr->Accept(*this);
+        }
+        accum.append(")");
+    }
+};
+
+struct parser_t {
+    span<token_t const> tokens;
+    usize current = 0;
+    lox_t *lox;
+};
+
+struct parse_exception_t {};
+
+parse_exception_t error(parser_t &parser, token_t tok, string_view message)
+{
+    error(*parser.lox, tok, message);
+    return parse_exception_t{};
+}
+
+bool done(const parser_t &parser)
+{
+    return parser.current >= parser.tokens.size();
+}
+
+token_t peek(const parser_t &parser)
+{
+    assert(!done(parser));
+    return parser.tokens[parser.current];
+}
+
+token_t previous(const parser_t &parser)
+{
+    assert(parser.current > 0);
+    return parser.tokens[parser.current - 1];
+}
+
+token_t advance(parser_t &parser)
+{
+    if (!done(parser))
+        ++parser.current;
+    return previous(parser);
+}
+
+bool check(const parser_t &parser, token_type_t type)
+{
+    if (done(parser))
+        return false;
+    return peek(parser).type == type;
+}
+
+bool match(parser_t &parser, token_type_t type)
+{
+    if (check(parser, type)) {
+        advance(parser);
+        return true;
+    }
+    return false;
+}
+
+bool match(parser_t &parser, initializer_list<token_type_t> token_types)
+{
+    for (token_type_t type : token_types) {
+        if (check(parser, type)) {
+            advance(parser);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+token_t consume(parser_t &parser, token_type_t type, string_view message)
+{
+    if (check(parser, type))
+        return advance(parser);
+
+    throw error(parser, peek(parser), message);
+}
+
+Expr *parse_expr(parser_t &parser);
+
+Expr *parse_primary(parser_t &parser)
+{
+    if (match(parser, e_tt_false))
+        return new LiteralExpr{false};
+    if (match(parser, e_tt_true))
+        return new LiteralExpr{true};
+    if (match(parser, e_tt_nil))
+        return new LiteralExpr{nil_t{}};
+    if (match(parser, {e_tt_number, e_tt_string}))
+        return new LiteralExpr{previous(parser).literal};
+
+    if (match(parser, e_tt_left_paren)) {
+        Expr *expr = parse_expr(parser);
+        consume(parser, e_tt_right_paren, "Expected ')' after expression.");
+        return new GroupingExpr{expr};
+    }
+
+    throw error(parser, peek(parser), "Expected expression.");
+}
+
+Expr *parse_unary(parser_t &parser)
+{
+    if (match(parser, {e_tt_bang, e_tt_minus})) {
+        token_t op = previous(parser);
+        Expr *right = parse_unary(parser);
+        return new UnaryExpr{op, right};
+    }
+
+    return parse_primary(parser);
+}
+
+template <auto t_child_parser, token_type_t ...t_allowed_ops>
+Expr *parse_left_associative_chain(parser_t &parser)
+{
+    Expr *expr = t_child_parser(parser);
+    
+    while (match(parser, {t_allowed_ops...})) {
+        token_t op = previous(parser);
+        Expr *right = t_child_parser(parser);
+        expr = new BinaryExpr{expr, op, right};
+    }
+
+    return expr;
+}
+
+Expr *parse_factor(parser_t &parser)
+{
+    return parse_left_associative_chain<
+            parse_unary, e_tt_star, e_tt_slash
+        >(parser);
+}
+
+Expr *parse_term(parser_t &parser)
+{
+    return parse_left_associative_chain<
+            parse_factor, e_tt_plus, e_tt_minus
+        >(parser);
+}
+
+Expr *parse_comparison(parser_t &parser)
+{
+    return parse_left_associative_chain<
+            parse_term,
+            e_tt_greater, e_tt_greater_equal, e_tt_less, e_tt_less_equal
+        >(parser);
+}
+
+Expr *parse_equality(parser_t &parser)
+{
+    return parse_left_associative_chain<
+            parse_comparison, e_tt_bang_equal, e_tt_equal_equal
+        >(parser);
+}
+
+Expr *parse_expr(parser_t &parser)
+{
+    return parse_equality(parser);
+}
+
+void sync_parser(parser_t &parser)
+{
+    advance(parser);
+
+    // Sync point is stmt boundry
+    while (!done(parser)) {
+        if (previous(parser).type == e_tt_semicolon)
+            break;
+
+        switch (peek(parser).type) {
+        case e_tt_class:
+        case e_tt_fun:
+        case e_tt_var:
+        case e_tt_for:
+        case e_tt_if:
+        case e_tt_while:
+        case e_tt_print:
+        case e_tt_return:
+            return;
+
+        default:
+            break;
+        }
+
+        advance(parser);
+    }
+}
+
+Expr *parse(span<token_t const> tokens, lox_t &lox)
+{
+    parser_t parser{.tokens = tokens, .lox = &lox};
+
+    try {
+        return parse_expr(parser);
+    } catch (parse_exception_t) {
+        // Here will be a sync point
+        return nullptr;
+    }
+}
+
 errc_t run(string_view code, lox_t &lox)
 {
-    vector<token_t> tokens = scan_tokens(code, lox);
+    vector<token_t> const tokens = scan_tokens(code, lox);
     if (lox.had_error)
         return e_ec_code_error;
-    
+    else if (tokens.size() <= 1) // Only eof
+        return e_ec_ok;
+
     // @TEST
     for (auto const &tok : tokens)
         println("{}", to_string(tok));
+
+    Expr const *ast = parse(tokens, lox);
+    if (lox.had_error)
+        return e_ec_code_error;
+
+    // @TEST
+    println("Expression 'ast': {}", AstPrinter{}.Print(*ast));
 
     return e_ec_ok;
 }
@@ -391,19 +556,6 @@ int main(int argc, char **argv)
     span<char const *const> args{argv + 1, usize(argc - 1)};
 
     lox_t lox{};
-
-    // @TEST
-    Expr const *root = new BinaryExpr{
-        new UnaryExpr{
-            token_t{e_tt_minus, "-", c_nil, 1},
-            new LiteralExpr{123.0}
-        },
-        token_t{e_tt_star, "*", c_nil, 1},
-        new GroupingExpr{new LiteralExpr{45.67}}
-    };
-    DEFER(delete root);
-    println("Example AST:\n{}", AstPrinter{}.Print(*root));
-    println("Example AST in rpn:\n{}", RpnAstPrinter{}.Print(*root));
     
     if (args.size() > 1) {
         show_header();

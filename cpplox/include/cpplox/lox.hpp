@@ -10,7 +10,7 @@ struct nil_t {};
 
 // @WIP
 class LoxObject {
-    variant<nil_t, string, double> m_val{nil_t{}};
+    variant<nil_t, bool, string, double> m_val{nil_t{}};
 
 public:
     LoxObject() = default;
@@ -20,6 +20,16 @@ public:
     LoxObject &operator=(const LoxObject &) = default;
     LoxObject &operator=(LoxObject &&) = default;
 
+    LoxObject(nil_t) : m_val{nil_t{}} {}
+    LoxObject &operator=(nil_t) {
+        m_val = nil_t{};
+        return *this;
+    }
+    LoxObject(bool b) : m_val{b} {}
+    LoxObject &operator=(bool b) {
+        m_val = b;
+        return *this;
+    }
     LoxObject(const string &s) : m_val{s} {}
     LoxObject(string &&s) : m_val{move(s)} {}
     LoxObject &operator=(const string &s) {
@@ -37,20 +47,27 @@ public:
     }
 
     bool IsNil() const { return holds_alternative<nil_t>(m_val); }
+    bool IsBool() const { return holds_alternative<bool>(m_val); }
     bool IsString() const { return holds_alternative<string>(m_val); }
     bool IsNumber() const { return holds_alternative<double>(m_val); }
 
+    bool &GetBool() {
+        assert(IsBool());
+        return get<bool>(m_val);
+    }
+    bool GetBool() const
+        { return const_cast<LoxObject *>(this)->GetBool(); }
     string &GetString() {
         assert(IsString());
         return get<string>(m_val);
     }
-    const string &GetString() const
-        { return const_cast<LoxObject *>(this)->GetString(); }
+    string_view GetString() const
+        { return string_view{const_cast<LoxObject *>(this)->GetString()}; }
     double &GetNumber() {
         assert(IsNumber());
         return get<double>(m_val);
     }
-    const double &GetNumber() const
+    double GetNumber() const
         { return const_cast<LoxObject *>(this)->GetNumber(); }
 };
 
@@ -61,7 +78,7 @@ inline string to_string(const LoxObject &obj)
     if (obj.IsNil())
         return "nil";
     else if (obj.IsString())
-        return obj.GetString();
+        return string{obj.GetString()};
     else // number
         return to_string(obj.GetNumber());
 }

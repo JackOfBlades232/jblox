@@ -37,10 +37,11 @@ void define_ast(FILE *f, string_view base, ast_def_t &&def)
 
     for (const auto &[node, fields] : def) {
         println(f, "struct {}{} : {} {{", node, base, base);
-        bool needs_cleanup = false;
+        bool needs_two_constructors = false, needs_cleanup = false;
         for (auto [type, name, kind] : fields) {
             if (kind == e_ft_obj) {
                 println(f, "    {} {};", type, name);
+                needs_two_constructors = true;
             } else if (kind == e_ft_ptr) {
                 println(f, "    {} *{};", type, name);
                 needs_cleanup = true;
@@ -69,6 +70,31 @@ void define_ast(FILE *f, string_view base, ast_def_t &&def)
                 print(f, ", {}{{move({})}}", name, name);
         }
         println(f, " {{}}");
+        if (needs_two_constructors) {
+            print(f, "    {}{}(", node, base);
+            if (!fields.empty()) {
+                auto [type, name, kind] = fields[0];
+                if (kind == e_ft_obj)
+                    print(f, "const {} &{}", type, name);
+                else
+                    print(f, "{} *{}", type, name);
+            }
+            for (auto [type, name, kind] : span{fields}.subspan(1)) {
+                if (kind == e_ft_obj)
+                    print(f, ", const {} &{}", type, name);
+                else
+                    print(f, ", {} *{}", type, name);
+            }
+            println(f, ")");
+            print(f, "        : ");
+            if (!fields.empty()) {
+                auto [_1, name, _2] = fields[0];
+                print(f, "{}{{{}}}", name, name);
+            }
+            for (auto [_1, name, _2] : span{fields}.subspan(1))
+                print(f, ", {}{{{}}}", name, name);
+            println(f, " {{}}");
+        }
         if (needs_cleanup) {
             println(f, "    ~{}{}() {{", node, base);
             for (auto [_, name, kind] : fields) {
