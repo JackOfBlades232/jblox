@@ -12,6 +12,8 @@ enum token_type_t {
     e_tt_right_brace,
 
     e_tt_comma,
+    e_tt_question,
+    e_tt_colon,
     e_tt_dot,
     e_tt_minus,
     e_tt_plus,
@@ -56,11 +58,12 @@ enum token_type_t {
 inline constexpr string_view c_tt_debug_names[] =
 {
     "EOF", "LEFT-PAREN", "RIGHT-PAREN", "LEFT-BRACE", "RIGHT-BRACE",
-    "COMMA", "DOT", "MINUS", "PLUS", "SEMICOLON", "SLASH", "STAR",
-    "BANG", "BANG-EQUAL", "EQUAL", "EQUAL-EQUAL", "GREATER", "GREATER-EQUAL",
-    "LESS", "LESS-EQUAL", "IDENTIFIER", "STRING", "NUMBER",
-    "AND", "CLASS", "ELSE", "FALSE", "FUN", "FOR", "IF", "NIL", "OR",
-    "PRINT", "RETURN", "SUPER", "THIS", "TRUE", "VAR", "WHILE"
+    "QUESTION MARK", "COLON", "COMMA", "DOT", "MINUS", "PLUS", "SEMICOLON",
+    "SLASH", "STAR", "BANG", "BANG-EQUAL", "EQUAL", "EQUAL-EQUAL",
+    "GREATER", "GREATER-EQUAL", "LESS", "LESS-EQUAL",
+    "IDENTIFIER", "STRING", "NUMBER", "AND", "CLASS", "ELSE", "FALSE",
+    "FUN", "FOR", "IF", "NIL", "OR", "PRINT", "RETURN", "SUPER",
+    "THIS", "TRUE", "VAR", "WHILE"
 };
 
 inline const unordered_map<string_view, token_type_t> c_reserved_id_types{

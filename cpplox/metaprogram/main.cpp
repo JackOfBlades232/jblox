@@ -134,6 +134,13 @@ int main(int argc, char **argv)
                 {"token_t", "op"}, 
                 {"Expr", "right", e_ft_ptr}
             }},
+            {"Ternary", {
+                {"Expr", "first", e_ft_ptr}, 
+                {"token_t", "op0"}, 
+                {"Expr", "second", e_ft_ptr},
+                {"token_t", "op1"}, 
+                {"Expr", "third", e_ft_ptr}
+            }},
             {"Grouping", {{"Expr", "expr", e_ft_ptr}}},
             {"Literal", {{"LoxObject", "value"}}},
             {"Unary", {

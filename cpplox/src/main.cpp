@@ -176,6 +176,8 @@ void scan_one_token(scanner_t &scanner)
     case '-': add_token(scanner, e_tt_minus); break;
     case '+': add_token(scanner, e_tt_plus); break;
     case ';': add_token(scanner, e_tt_semicolon); break;
+    case ':': add_token(scanner, e_tt_colon); break;
+    case '?': add_token(scanner, e_tt_question); break;
     case '*': add_token(scanner, e_tt_star); break;    
 
     case '!':
@@ -260,6 +262,19 @@ public:
     }
     void VisitBinaryExpr(const BinaryExpr &binary) override {
         Parenthesize(binary.op.lexeme, {binary.left, binary.right});
+    }
+    void VisitTernaryExpr(const TernaryExpr &ternary) override {
+        accum.append("(");
+        ternary.first->Accept(*this);
+        accum.append(" ");
+        accum.append(ternary.op0.lexeme);
+        accum.append(" ");
+        ternary.second->Accept(*this);
+        accum.append(" ");
+        accum.append(ternary.op1.lexeme);
+        accum.append(" ");
+        ternary.third->Accept(*this);
+        accum.append(")");
     }
 
 private:
@@ -424,9 +439,25 @@ Expr *parse_equality(parser_t &parser)
         >(parser);
 }
 
+Expr *parse_choice(parser_t &parser)
+{
+    Expr *expr = parse_equality(parser);
+    
+    if (match(parser, e_tt_question)) {
+        token_t op0 = previous(parser);
+        Expr *second = parse_choice(parser);
+        consume(parser, e_tt_colon, "Expected ':' in ternary operator.");
+        token_t op1 = previous(parser);
+        Expr *third = parse_choice(parser);
+        expr = new TernaryExpr{expr, op0, second, op1, third};
+    }
+
+    return expr;
+}
+
 Expr *parse_sequence(parser_t &parser)
 {
-    return parse_left_associative_chain<parse_equality, e_tt_comma>(parser);
+    return parse_left_associative_chain<parse_choice, e_tt_comma>(parser);
 }
 
 Expr *parse_expr(parser_t &parser)
@@ -467,7 +498,15 @@ Expr *parse(span<token_t const> tokens, lox_t &lox)
     parser_t parser{.tokens = tokens, .lox = &lox};
 
     try {
-        return parse_expr(parser);
+        // @TODO: we are leaking ast-s on errors! Fix.
+        Expr *root = parse_expr(parser);
+        if (!root) {
+            return nullptr;
+        } else if (peek(parser).type != e_tt_eof) {
+            error(parser, peek(parser), "Trailing tokens.");
+        } else {
+            return root;
+        }
     } catch (parse_exception_t) {
         // Here will be a sync point
         return nullptr;
