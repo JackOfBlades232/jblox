@@ -424,9 +424,14 @@ Expr *parse_equality(parser_t &parser)
         >(parser);
 }
 
+Expr *parse_sequence(parser_t &parser)
+{
+    return parse_left_associative_chain<parse_equality, e_tt_comma>(parser);
+}
+
 Expr *parse_expr(parser_t &parser)
 {
-    return parse_equality(parser);
+    return parse_sequence(parser);
 }
 
 void sync_parser(parser_t &parser)

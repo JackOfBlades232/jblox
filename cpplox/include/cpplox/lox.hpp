@@ -78,7 +78,9 @@ inline string to_string(const LoxObject &obj)
     if (obj.IsNil())
         return "nil";
     else if (obj.IsString())
-        return string{obj.GetString()};
+        return format("\"{}\"", obj.GetString());
+    else if (obj.IsBool())
+        return obj.GetBool() ? "true" : "false";
     else // number
         return to_string(obj.GetNumber());
 }
