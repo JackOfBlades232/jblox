@@ -1,6 +1,7 @@
 #pragma once
 
 #pragma clang diagnostic ignored "-Wunqualified-std-cast-call"
+#define _CRT_SECURE_NO_WARNINGS
 
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +17,8 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <memory>
+#include <algorithm>
 
 #include <version.hpp>
 

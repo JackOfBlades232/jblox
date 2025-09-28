@@ -6,7 +6,7 @@ enum errc_t {
     e_ec_ok = 0,
     e_ec_arg_error = 1,
     e_ec_sys_error = 2,
-    e_ec_code_error = 13,
+    e_ec_parsing_error = 13,
 };
 
 struct scanner_t {
@@ -278,10 +278,10 @@ public:
     }
 
 private:
-    void Parenthesize(string_view name, initializer_list<Expr const *> exprs) {
+    void Parenthesize(string_view name, initializer_list<expr_ptr_t> exprs) {
         accum.append("(");
         accum.append(name);
-        for (Expr const *expr : exprs) {
+        for (const expr_ptr_t &expr : exprs) {
             accum.append(" ");
             expr->Accept(*this);
         }
@@ -363,68 +363,68 @@ token_t consume(parser_t &parser, token_type_t type, string_view message)
     throw error(parser, peek(parser), message);
 }
 
-Expr *parse_expr(parser_t &parser);
+expr_ptr_t parse_expr(parser_t &parser);
 
-Expr *parse_primary(parser_t &parser)
+expr_ptr_t parse_primary(parser_t &parser)
 {
     if (match(parser, e_tt_false))
-        return new LiteralExpr{false};
+        return make_shared<LiteralExpr>(false);
     if (match(parser, e_tt_true))
-        return new LiteralExpr{true};
+        return make_shared<LiteralExpr>(true);
     if (match(parser, e_tt_nil))
-        return new LiteralExpr{nil_t{}};
+        return make_shared<LiteralExpr>(nil_t{});
     if (match(parser, {e_tt_number, e_tt_string}))
-        return new LiteralExpr{previous(parser).literal};
+        return make_shared<LiteralExpr>(previous(parser).literal);
 
     if (match(parser, e_tt_left_paren)) {
-        Expr *expr = parse_expr(parser);
+        expr_ptr_t expr = parse_expr(parser);
         consume(parser, e_tt_right_paren, "Expected ')' after expression.");
-        return new GroupingExpr{expr};
+        return make_shared<GroupingExpr>(expr);
     }
 
     throw error(parser, peek(parser), "Expected expression.");
 }
 
-Expr *parse_unary(parser_t &parser)
+expr_ptr_t parse_unary(parser_t &parser)
 {
     if (match(parser, {e_tt_bang, e_tt_minus})) {
         token_t op = previous(parser);
-        Expr *right = parse_unary(parser);
-        return new UnaryExpr{op, right};
+        expr_ptr_t right = parse_unary(parser);
+        return make_shared<UnaryExpr>(op, right);
     }
 
     return parse_primary(parser);
 }
 
 template <auto t_child_parser, token_type_t ...t_allowed_ops>
-Expr *parse_left_associative_chain(parser_t &parser)
+expr_ptr_t parse_left_associative_chain(parser_t &parser)
 {
-    Expr *expr = t_child_parser(parser);
+    expr_ptr_t expr = t_child_parser(parser);
     
     while (match(parser, {t_allowed_ops...})) {
         token_t op = previous(parser);
-        Expr *right = t_child_parser(parser);
-        expr = new BinaryExpr{expr, op, right};
+        expr_ptr_t right = t_child_parser(parser);
+        expr = make_shared<BinaryExpr>(expr, op, right);
     }
 
     return expr;
 }
 
-Expr *parse_factor(parser_t &parser)
+expr_ptr_t parse_factor(parser_t &parser)
 {
     return parse_left_associative_chain<
             parse_unary, e_tt_star, e_tt_slash
         >(parser);
 }
 
-Expr *parse_term(parser_t &parser)
+expr_ptr_t parse_term(parser_t &parser)
 {
     return parse_left_associative_chain<
             parse_factor, e_tt_plus, e_tt_minus
         >(parser);
 }
 
-Expr *parse_comparison(parser_t &parser)
+expr_ptr_t parse_comparison(parser_t &parser)
 {
     return parse_left_associative_chain<
             parse_term,
@@ -432,35 +432,35 @@ Expr *parse_comparison(parser_t &parser)
         >(parser);
 }
 
-Expr *parse_equality(parser_t &parser)
+expr_ptr_t parse_equality(parser_t &parser)
 {
     return parse_left_associative_chain<
             parse_comparison, e_tt_bang_equal, e_tt_equal_equal
         >(parser);
 }
 
-Expr *parse_choice(parser_t &parser)
+expr_ptr_t parse_choice(parser_t &parser)
 {
-    Expr *expr = parse_equality(parser);
+    expr_ptr_t expr = parse_equality(parser);
     
     if (match(parser, e_tt_question)) {
         token_t op0 = previous(parser);
-        Expr *second = parse_choice(parser);
+        expr_ptr_t second = parse_choice(parser);
         consume(parser, e_tt_colon, "Expected ':' in ternary operator.");
         token_t op1 = previous(parser);
-        Expr *third = parse_choice(parser);
-        expr = new TernaryExpr{expr, op0, second, op1, third};
+        expr_ptr_t third = parse_choice(parser);
+        expr = make_shared<TernaryExpr>(expr, op0, second, op1, third);
     }
 
     return expr;
 }
 
-Expr *parse_sequence(parser_t &parser)
+expr_ptr_t parse_sequence(parser_t &parser)
 {
     return parse_left_associative_chain<parse_choice, e_tt_comma>(parser);
 }
 
-Expr *parse_expr(parser_t &parser)
+expr_ptr_t parse_expr(parser_t &parser)
 {
     return parse_sequence(parser);
 }
@@ -493,20 +493,15 @@ void sync_parser(parser_t &parser)
     }
 }
 
-Expr *parse(span<token_t const> tokens, lox_t &lox)
+expr_ptr_t parse(span<token_t const> tokens, lox_t &lox)
 {
     parser_t parser{.tokens = tokens, .lox = &lox};
 
     try {
-        // @TODO: we are leaking ast-s on errors! Fix.
-        Expr *root = parse_expr(parser);
-        if (!root) {
-            return nullptr;
-        } else if (peek(parser).type != e_tt_eof) {
-            error(parser, peek(parser), "Trailing tokens.");
-        } else {
-            return root;
-        }
+        expr_ptr_t root = parse_expr(parser);
+        if (root)
+            consume(parser, e_tt_eof, "Trailing tokens.");
+        return root;
     } catch (parse_exception_t) {
         // Here will be a sync point
         return nullptr;
@@ -517,7 +512,7 @@ errc_t run(string_view code, lox_t &lox)
 {
     vector<token_t> const tokens = scan_tokens(code, lox);
     if (lox.had_error)
-        return e_ec_code_error;
+        return e_ec_parsing_error;
     else if (tokens.size() <= 1) // Only eof
         return e_ec_ok;
 
@@ -525,9 +520,9 @@ errc_t run(string_view code, lox_t &lox)
     for (auto const &tok : tokens)
         println("{}", to_string(tok));
 
-    Expr const *ast = parse(tokens, lox);
+    expr_ptr_t const ast = parse(tokens, lox);
     if (lox.had_error)
-        return e_ec_code_error;
+        return e_ec_parsing_error;
 
     // @TEST
     println("Expression 'ast': {}", AstPrinter{}.Print(*ast));

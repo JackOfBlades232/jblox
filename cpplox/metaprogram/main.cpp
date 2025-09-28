@@ -1,23 +1,27 @@
 #include <defs.hpp>
 
-enum field_type_t {
-    e_ft_obj,
-    e_ft_ptr
-};
-
 struct field_t {
     string_view type;
     string_view name;
-    field_type_t kind = e_ft_obj;
 };
 
 using ast_def_t = unordered_map<string_view, vector<field_t>>;
 
-void define_ast(FILE *f, string_view base, ast_def_t &&def)
+void define_header(FILE *f)
 {
     println(f, "#pragma once\n");
+    println(f, "#include <defs.hpp>");
     println(f, "#include <lox.hpp>");
-    println(f, "#include <tokens.hpp>\n");
+    println(f, "#include <tokens.hpp>");
+}
+
+void define_ast(FILE *f, string_view base, ast_def_t &&def)
+{
+    string base_lc{};
+    base_lc.resize(base.size());
+    transform(
+        base.begin(), base.end(), base_lc.begin(),
+        [](char c) { return tolower(c); });
 
     for (const auto &[node, _] : def)
         println(f, "struct {}{};", node, base);
@@ -35,74 +39,24 @@ void define_ast(FILE *f, string_view base, ast_def_t &&def)
     println(f, "    virtual void Accept(IVisitor &) const = 0;");
     println(f, "}};\n");
 
+    println(f, "using {}_ptr_t = shared_ptr<{}>;\n", base_lc, base);
+
     for (const auto &[node, fields] : def) {
         println(f, "struct {}{} : {} {{", node, base, base);
-        bool needs_two_constructors = false, needs_cleanup = false;
-        for (auto [type, name, kind] : fields) {
-            if (kind == e_ft_obj) {
-                println(f, "    {} {};", type, name);
-                needs_two_constructors = true;
-            } else if (kind == e_ft_ptr) {
-                println(f, "    {} *{};", type, name);
-                needs_cleanup = true;
-            }
+        for (auto [type, name] : fields)
+            println(f, "    {} {};", type, name);
+        print(f, "\n    {}{}(", node, base);
+        for (size_t i = 0; auto [type, name] : fields) {
+            print(f, "\n            {} a_{}", type, name);
+            if (i++ != fields.size() - 1)
+                print(f, ",");
         }
-        print(f, "    {}{}(", node, base);
-        if (!fields.empty()) {
-            auto [type, name, kind] = fields[0];
-            print(f, "{} {}{}", type, kind == e_ft_ptr ? "*" : "&&", name);
-        }
-        for (auto [type, name, kind] : span{fields}.subspan(1))
-            print(f, ", {} {}{}", type, kind == e_ft_ptr ? "*" : "&&", name);
-        println(f, ")");
-        print(f, "        : ");
-        if (!fields.empty()) {
-            auto [_, name, kind] = fields[0];
-            if (kind == e_ft_ptr)
-                print(f, "{}{{{}}}", name, name);
-            else
-                print(f, "{}{{move({})}}", name, name);
-        }
-        for (auto [_, name, kind] : span{fields}.subspan(1)) {
-            if (kind == e_ft_ptr)
-                print(f, ", {}{{{}}}", name, name);
-            else
-                print(f, ", {}{{move({})}}", name, name);
+        print(f, ")");
+        for (size_t i = 0; auto [type, name] : fields) {
+            print(f, "\n        {} {}{{move(a_{})}}",
+                i++ == 0 ? ':' : ',', name, name);
         }
         println(f, " {{}}");
-        if (needs_two_constructors) {
-            print(f, "    {}{}(", node, base);
-            if (!fields.empty()) {
-                auto [type, name, kind] = fields[0];
-                if (kind == e_ft_obj)
-                    print(f, "const {} &{}", type, name);
-                else
-                    print(f, "{} *{}", type, name);
-            }
-            for (auto [type, name, kind] : span{fields}.subspan(1)) {
-                if (kind == e_ft_obj)
-                    print(f, ", const {} &{}", type, name);
-                else
-                    print(f, ", {} *{}", type, name);
-            }
-            println(f, ")");
-            print(f, "        : ");
-            if (!fields.empty()) {
-                auto [_1, name, _2] = fields[0];
-                print(f, "{}{{{}}}", name, name);
-            }
-            for (auto [_1, name, _2] : span{fields}.subspan(1))
-                print(f, ", {}{{{}}}", name, name);
-            println(f, " {{}}");
-        }
-        if (needs_cleanup) {
-            println(f, "    ~{}{}() {{", node, base);
-            for (auto [_, name, kind] : fields) {
-                if (kind == e_ft_ptr)
-                    println(f, "        delete {};", name);
-            }
-            println(f, "    }}");
-        }
         println(f,
             "    void Accept(IVisitor &v) const override "
             "{{ v.Visit{}{}(*this); }}", node, base);
@@ -127,25 +81,26 @@ int main(int argc, char **argv)
     }
     DEFER(fclose(astf));
 
+    define_header(astf);
     define_ast(astf, "Expr",
         {
             {"Binary", {
-                {"Expr", "left", e_ft_ptr}, 
+                {"expr_ptr_t", "left"}, 
                 {"token_t", "op"}, 
-                {"Expr", "right", e_ft_ptr}
+                {"expr_ptr_t", "right"}
             }},
             {"Ternary", {
-                {"Expr", "first", e_ft_ptr}, 
+                {"expr_ptr_t", "first"}, 
                 {"token_t", "op0"}, 
-                {"Expr", "second", e_ft_ptr},
+                {"expr_ptr_t", "second"},
                 {"token_t", "op1"}, 
-                {"Expr", "third", e_ft_ptr}
+                {"expr_ptr_t", "third"}
             }},
-            {"Grouping", {{"Expr", "expr", e_ft_ptr}}},
+            {"Grouping", {{"expr_ptr_t", "expr"}}},
             {"Literal", {{"LoxObject", "value"}}},
             {"Unary", {
                 {"token_t", "op"},
-                {"Expr", "right", e_ft_ptr}
+                {"expr_ptr_t", "right"}
             }}
         });
 }

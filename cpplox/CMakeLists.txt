@@ -3,8 +3,10 @@ project(cpplox VERSION 0.1 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-add_compile_options(-stdlib=libc++)
-add_link_options(-stdlib=libc++)
+if(UNIX)
+    add_compile_options(-stdlib=libc++)
+    add_link_options(-stdlib=libc++)
+endif(UNIX)
 
 configure_file(templates/version.hpp include/version.hpp)
 
