@@ -197,6 +197,15 @@ void scan_one_token(scanner_t &scanner)
             scanner, match(scanner, '=') ? e_tt_greater_equal : e_tt_greater);
         break;
 
+    case '|':
+        if (match(scanner, '|'))
+            add_token(scanner, e_tt_or);
+        break;
+    case '&':
+        if (match(scanner, '&'))
+            add_token(scanner, e_tt_and);
+        break;
+
     case '/':
         if (match(scanner, '/'))
             skip_oneline_comment(scanner);
@@ -281,7 +290,7 @@ private:
     void Parenthesize(string_view name, initializer_list<expr_ptr_t> exprs) {
         accum.append("(");
         accum.append(name);
-        for (const expr_ptr_t &expr : exprs) {
+        for (expr_ptr_t const &expr : exprs) {
             accum.append(" ");
             expr->Accept(*this);
         }
@@ -327,7 +336,7 @@ token_t advance(parser_t &parser)
     return previous(parser);
 }
 
-bool check(const parser_t &parser, token_type_t type)
+bool check(parser_t const &parser, token_type_t type)
 {
     if (done(parser))
         return false;
@@ -399,6 +408,11 @@ expr_ptr_t parse_unary(parser_t &parser)
 template <auto t_child_parser, token_type_t ...t_allowed_ops>
 expr_ptr_t parse_left_associative_chain(parser_t &parser)
 {
+    while (!is_unary(peek(parser).type) && is_binary(peek(parser).type)) {
+        error(*parser.lox, peek(parser), "Leading binary operator.");
+        advance(parser);
+    }
+
     expr_ptr_t expr = t_child_parser(parser);
     
     while (match(parser, {t_allowed_ops...})) {
@@ -407,7 +421,7 @@ expr_ptr_t parse_left_associative_chain(parser_t &parser)
         expr = make_shared<BinaryExpr>(expr, op, right);
     }
 
-    return expr;
+    return parser.lox->had_error ? nullptr : expr ;
 }
 
 expr_ptr_t parse_factor(parser_t &parser)
@@ -439,9 +453,19 @@ expr_ptr_t parse_equality(parser_t &parser)
         >(parser);
 }
 
+expr_ptr_t parse_conjunction(parser_t &parser)
+{
+    return parse_left_associative_chain<parse_equality, e_tt_and>(parser);
+}
+
+expr_ptr_t parse_disjunction(parser_t &parser)
+{
+    return parse_left_associative_chain<parse_conjunction, e_tt_or>(parser);
+}
+
 expr_ptr_t parse_choice(parser_t &parser)
 {
-    expr_ptr_t expr = parse_equality(parser);
+    expr_ptr_t expr = parse_disjunction(parser);
     
     if (match(parser, e_tt_question)) {
         token_t op0 = previous(parser);

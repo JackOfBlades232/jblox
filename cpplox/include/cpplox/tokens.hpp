@@ -58,7 +58,7 @@ enum token_type_t {
 inline constexpr string_view c_tt_debug_names[] =
 {
     "EOF", "LEFT-PAREN", "RIGHT-PAREN", "LEFT-BRACE", "RIGHT-BRACE",
-    "QUESTION MARK", "COLON", "COMMA", "DOT", "MINUS", "PLUS", "SEMICOLON",
+    "COMMA", "QUESTION MARK", "COLON", "DOT", "MINUS", "PLUS", "SEMICOLON",
     "SLASH", "STAR", "BANG", "BANG-EQUAL", "EQUAL", "EQUAL-EQUAL",
     "GREATER", "GREATER-EQUAL", "LESS", "LESS-EQUAL",
     "IDENTIFIER", "STRING", "NUMBER", "AND", "CLASS", "ELSE", "FALSE",
@@ -84,6 +84,43 @@ inline const unordered_map<string_view, token_type_t> c_reserved_id_types{
     {"var", e_tt_var},
     {"while", e_tt_while}
 };
+
+inline bool is_unary(token_type_t type)
+{
+    switch (type) {
+    case e_tt_minus:
+    case e_tt_bang:
+        return true;
+
+    default:
+        return false;
+    }
+}
+
+inline bool is_binary(token_type_t type)
+{
+    switch (type) {
+    case e_tt_comma:
+    case e_tt_minus:
+    case e_tt_plus:
+    case e_tt_slash:
+    case e_tt_star:
+    case e_tt_bang:
+    case e_tt_bang_equal:
+    case e_tt_equal:
+    case e_tt_equal_equal:
+    case e_tt_greater:
+    case e_tt_greater_equal:
+    case e_tt_less:
+    case e_tt_less_equal:
+    case e_tt_and:
+    case e_tt_or:
+        return true;
+
+    default:
+        return false;
+    }
+}
 
 struct token_t {
     token_type_t type;
