@@ -11,8 +11,8 @@ void define_header(FILE *f)
 {
     println(f, "#pragma once\n");
     println(f, "#include <defs.hpp>");
-    println(f, "#include <lox.hpp>");
-    println(f, "#include <tokens.hpp>");
+    println(f, "#include <value.hpp>");
+    println(f, "#include <tokens.hpp>\n");
 }
 
 void define_ast(FILE *f, string_view base, ast_def_t &&def)
@@ -29,7 +29,7 @@ void define_ast(FILE *f, string_view base, ast_def_t &&def)
     println(f, "\nstruct IVisitor {{", base);
     for (const auto &[node, _] : def) {
         println(f,
-            "    virtual void Visit{}{}(const {}{} &) = 0;",
+            "    virtual void Visit{}{}({}{} const &) = 0;",
             node, base, node, base);
     }
     println(f, "}};\n");
@@ -97,7 +97,7 @@ int main(int argc, char **argv)
                 {"expr_ptr_t", "third"}
             }},
             {"Grouping", {{"expr_ptr_t", "expr"}}},
-            {"Literal", {{"LoxObject", "value"}}},
+            {"Literal", {{"LoxValue", "value"}}},
             {"Unary", {
                 {"token_t", "op"},
                 {"expr_ptr_t", "right"}

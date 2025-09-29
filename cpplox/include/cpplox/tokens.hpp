@@ -1,7 +1,7 @@
 #pragma once
 
 #include "defs.hpp"
-#include "lox.hpp"
+#include "value.hpp"
 
 enum token_type_t {
     e_tt_eof = 0,
@@ -99,6 +99,7 @@ inline bool is_unary(token_type_t type)
 
 inline bool is_binary(token_type_t type)
 {
+    // @TODO: dot is binary too
     switch (type) {
     case e_tt_comma:
     case e_tt_minus:
@@ -125,7 +126,7 @@ inline bool is_binary(token_type_t type)
 struct token_t {
     token_type_t type;
     string_view lexeme;
-    LoxObject literal;
+    LoxValue literal;
     usize line;
 };
 
@@ -134,16 +135,4 @@ inline string to_string(token_t tok)
     return format(
         "<{}> ({}) : line {}",
         tok.lexeme, c_tt_debug_names[tok.type], tok.line);
-}
-
-inline void error(lox_t &lox, token_t tok, string_view message)
-{
-    if (tok.type == e_tt_eof) {
-        report(lox, tok.line, " at end", message);
-    } else {
-        report(
-            lox, tok.line,
-            string_view{string{"at '"} + string{tok.lexeme} + string{"'"}},
-            message);
-    }
 }

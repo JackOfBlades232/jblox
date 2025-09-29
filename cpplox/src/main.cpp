@@ -1,4 +1,5 @@
 #include <lox.hpp>
+#include <value.hpp>
 #include <tokens.hpp>
 #include <ast.hpp>
 
@@ -7,6 +8,7 @@ enum errc_t {
     e_ec_arg_error = 1,
     e_ec_sys_error = 2,
     e_ec_parsing_error = 13,
+    e_ec_runtime_error = 69,
 };
 
 struct scanner_t {
@@ -78,7 +80,7 @@ string_view cur_lexeme(const scanner_t &scanner)
         scanner.start, scanner.current - scanner.start);
 }
 
-void add_token(scanner_t &scanner, token_type_t tt, LoxObject lit = {})
+void add_token(scanner_t &scanner, token_type_t tt, LoxValue lit = {})
 {
     scanner.tokens.push_back({tt, cur_lexeme(scanner), lit, scanner.line});
 }
@@ -249,54 +251,6 @@ vector<token_t> scan_tokens(string_view code, lox_t &lox)
 
     return move(scanner.tokens);
 }
-
-class AstPrinter : public IVisitor {
-    string accum{};
-
-public:
-    string Print(Expr const &expr) {
-        accum.clear();
-        expr.Accept(*this);
-        return move(accum);
-    }
-
-    void VisitUnaryExpr(const UnaryExpr &unary) override {
-        Parenthesize(unary.op.lexeme, {unary.right});
-    }
-    void VisitGroupingExpr(const GroupingExpr &grouping) override {
-        Parenthesize("group", {grouping.expr});
-    }
-    void VisitLiteralExpr(const LiteralExpr &literal) override {
-        accum.append(to_string(literal.value));
-    }
-    void VisitBinaryExpr(const BinaryExpr &binary) override {
-        Parenthesize(binary.op.lexeme, {binary.left, binary.right});
-    }
-    void VisitTernaryExpr(const TernaryExpr &ternary) override {
-        accum.append("(");
-        ternary.first->Accept(*this);
-        accum.append(" ");
-        accum.append(ternary.op0.lexeme);
-        accum.append(" ");
-        ternary.second->Accept(*this);
-        accum.append(" ");
-        accum.append(ternary.op1.lexeme);
-        accum.append(" ");
-        ternary.third->Accept(*this);
-        accum.append(")");
-    }
-
-private:
-    void Parenthesize(string_view name, initializer_list<expr_ptr_t> exprs) {
-        accum.append("(");
-        accum.append(name);
-        for (expr_ptr_t const &expr : exprs) {
-            accum.append(" ");
-            expr->Accept(*this);
-        }
-        accum.append(")");
-    }
-};
 
 struct parser_t {
     span<token_t const> tokens;
@@ -532,6 +486,64 @@ expr_ptr_t parse(span<token_t const> tokens, lox_t &lox)
     }
 }
 
+class AstPrinter : public IVisitor {
+    string accum{};
+
+public:
+    string Print(Expr const &expr) {
+        accum.clear();
+        expr.Accept(*this);
+        return move(accum);
+    }
+
+    void VisitUnaryExpr(UnaryExpr const &unary) override {
+        Parenthesize(unary.op.lexeme, {unary.right});
+    }
+    void VisitGroupingExpr(GroupingExpr const &grouping) override {
+        Parenthesize("group", {grouping.expr});
+    }
+    void VisitLiteralExpr(LiteralExpr const &literal) override {
+        accum.append(to_dbg_string(literal.value));
+    }
+    void VisitBinaryExpr(BinaryExpr const &binary) override {
+        Parenthesize(binary.op.lexeme, {binary.left, binary.right});
+    }
+    void VisitTernaryExpr(TernaryExpr const &ternary) override {
+        accum.append("(");
+        ternary.first->Accept(*this);
+        accum.append(" ");
+        accum.append(ternary.op0.lexeme);
+        accum.append(" ");
+        ternary.second->Accept(*this);
+        accum.append(" ");
+        accum.append(ternary.op1.lexeme);
+        accum.append(" ");
+        ternary.third->Accept(*this);
+        accum.append(")");
+    }
+
+private:
+    void Parenthesize(string_view name, initializer_list<expr_ptr_t> exprs) {
+        accum.append("(");
+        accum.append(name);
+        for (expr_ptr_t const &expr : exprs) {
+            accum.append(" ");
+            expr->Accept(*this);
+        }
+        accum.append(")");
+    }
+};
+
+void interpret(lox_t &lox, expr_ptr_t const &expr)
+{
+    try {
+        LoxValue const res = lox.interp.Evaluate(*expr);
+        println("{}", to_dbg_string(res));
+    } catch (runtime_error_t err) {
+        rt_error(lox, err);
+    }
+}
+
 errc_t run(string_view code, lox_t &lox)
 {
     vector<token_t> const tokens = scan_tokens(code, lox);
@@ -540,16 +552,21 @@ errc_t run(string_view code, lox_t &lox)
     else if (tokens.size() <= 1) // Only eof
         return e_ec_ok;
 
-    // @TEST
-    for (auto const &tok : tokens)
-        println("{}", to_string(tok));
+    if (lox.config.print_tokens) {
+        for (auto const &tok : tokens)
+            println("{}", to_string(tok));
+    }
 
     expr_ptr_t const ast = parse(tokens, lox);
     if (lox.had_error)
         return e_ec_parsing_error;
 
-    // @TEST
-    println("Expression 'ast': {}", AstPrinter{}.Print(*ast));
+    if (lox.config.print_ast)
+        println("Expression 'ast': {}", AstPrinter{}.Print(*ast));
+
+    interpret(lox, ast);
+    if (lox.had_runtime_error)
+        return e_ec_runtime_error;
 
     return e_ec_ok;
 }
@@ -614,18 +631,44 @@ void show_header()
     println("jb-cpplox, version {}", VERSION);
 }
 
+void show_usage()
+{
+    show_header();
+    println(stderr, "Usage: cpplox [file|args]...");
+    println(stderr, "Args:");
+    println(stderr, "    --print-tokens : print tokenizer output.");
+    println(stderr, "    --print-ast : print parser output in infix notation.");
+    println(stderr, "    --help/-h : print this message and exit.");
+    
+}
+
 int main(int argc, char **argv)
 {
     span<char const *const> args{argv + 1, usize(argc - 1)};
 
     lox_t lox{};
+
+    char const *fn = nullptr;
+
+    for (char const *const a : args) {
+        string_view arg{a};
+        if (arg == "-h" || arg == "--help") {
+            show_usage();
+            return e_ec_ok;
+        } else if (arg == "--print-tokens") {
+            lox.config.print_tokens = true;
+        } else if (arg == "--print-ast") {
+            lox.config.print_ast = true;
+        } else if (!fn) {
+            fn = a;
+        } else {
+            show_usage();
+            return e_ec_arg_error;
+        }
+    }
     
-    if (args.size() > 1) {
-        show_header();
-        println(stderr, "Usage: cpplox [file]");
-        return e_ec_arg_error;
-    } else if (args.size() == 1) {
-        return run_file(args[0], lox);
+    if (fn) {
+        return run_file(fn, lox);
     } else {
         show_header();
         return run_prompt(lox);
