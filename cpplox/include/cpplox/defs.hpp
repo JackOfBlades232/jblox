@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cassert>
+#include <cfloat>
 
 #include <utility>
 #include <iostream>
