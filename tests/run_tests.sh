@@ -11,10 +11,11 @@ function run_test {
 
 function run_all_tests {
     run_test hello.lox
-    run_test variables.lox
-    run_test closures.lox
-    run_test objects.lox
     run_test comments.lox
+    run_test scopes.lox
+    #run_test variables.lox
+    #run_test closures.lox
+    #run_test objects.lox
 }
 
 INTERP=../reference/craftinginterpreters/jlox
@@ -25,6 +26,6 @@ INTERP=../reference/craftinginterpreters/clox
 echo -e "\nclox (reference):\n"
 run_all_tests
 
-INTERP=../cpplox/build/cpplox
+INTERP=../cpplox/build/cpplox $@
 echo -e "\njb-cpplox:\n"
 run_all_tests

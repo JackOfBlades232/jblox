@@ -8,23 +8,70 @@
 
 struct runtime_error_t {
     token_t tok;
-    string_view message;
+    string message;
 };
 
-class Interpreter : public IVisitor {
-    LoxValue *dest = nullptr;
+struct environment_t {
+    environment_t *parent = nullptr;
+    unordered_map<string, LoxValue> values{};
+};
+
+inline void define(environment_t &env, string_view name, LoxValue const &val)
+{
+    env.values.insert_or_assign(string{name}, val);
+}
+
+inline LoxValue lookup(environment_t const &env, token_t name)
+{
+    if (auto it = env.values.find(string{name.lexeme}); it != env.values.end())
+        return it->second;
+    if (env.parent)
+        return lookup(*env.parent, name);
+
+    throw runtime_error_t{name, format("Undefined variable '{}'", name.lexeme)};
+}
+
+inline void assign(environment_t &env, token_t name, LoxValue const &val)
+{
+    if (auto it = env.values.find(string{name.lexeme});
+        it != env.values.end())
+    {
+        it->second = val;
+        return;
+    }
+    if (env.parent) {
+        assign(*env.parent, name, val);
+        return;
+    }
+
+    throw runtime_error_t{name, format("Undefined variable '{}'", name.lexeme)};
+}
+
+class Interpreter : public IExprVisitor, public IStmtVisitor {
+    environment_t m_global_env{};
+
+    environment_t *m_cur_env = &m_global_env;
+    LoxValue *m_dest = nullptr;
 
 public:
     LoxValue Evaluate(Expr const &expr) {
         LoxValue res;
-        dest = &res;
+        m_dest = &res;
         expr.Accept(*this);
         return res;
     }
+    void Execute(Stmt const &stmt) { stmt.Accept(*this); }
 
+    void VisitAssignmentExpr(AssignmentExpr const &assignment) override {
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
+        LoxValue const val = Evaluate(*assignment.val);
+        assign(*m_cur_env, assignment.target, val);
+        *prev_dest = val;
+    }
     void VisitUnaryExpr(UnaryExpr const &unary) override {
-        assert(dest);
-        LoxValue *prev_dest = exchange(dest, nullptr);
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
 
         LoxValue val = Evaluate(*unary.right);
         switch (unary.op.type) {
@@ -42,17 +89,17 @@ public:
         *prev_dest = val;
     }
     void VisitGroupingExpr(GroupingExpr const &grouping) override {
-        assert(dest);
-        LoxValue *prev_dest = exchange(dest, nullptr);
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
         *prev_dest = Evaluate(*grouping.expr);
     }
     void VisitLiteralExpr(LiteralExpr const &literal) override {
-        assert(dest);
-        *dest = literal.value;
+        assert(m_dest);
+        *m_dest = literal.value;
     }
     void VisitBinaryExpr(BinaryExpr const &binary) override {
-        assert(dest);
-        LoxValue *prev_dest = exchange(dest, nullptr);
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
 
         LoxValue const l = Evaluate(*binary.left);
         LoxValue const r = Evaluate(*binary.right);
@@ -131,8 +178,8 @@ public:
         *prev_dest = val;
     }
     void VisitTernaryExpr(TernaryExpr const &ternary) override {
-        assert(dest);
-        LoxValue *prev_dest = exchange(dest, nullptr);
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
 
         assert(
             ternary.op0.type == e_tt_question &&
@@ -144,6 +191,28 @@ public:
             Evaluate(*ternary.third);
 
         *prev_dest = val;
+    }
+    void VisitVariableExpr(VariableExpr const &variable) override {
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
+        LoxValue const val = lookup(*m_cur_env, variable.id);
+        *prev_dest = val;
+    }
+
+    void VisitBlockStmt(BlockStmt const &block) override
+        { ExecuteBlock(block.stmts, environment_t{m_cur_env}); }
+    void VisitExpressionStmt(ExpressionStmt const &expression) override
+        { Evaluate(*expression.expr); }
+    void VisitPrintStmt(PrintStmt const &print) override {
+        LoxValue const val = Evaluate(*print.val);
+        println("{}", to_string(val));
+    }
+    void VisitVarStmt(VarStmt const &var) override {
+        LoxValue val = {};
+        if (var.init)
+            val = Evaluate(*var.init);
+
+        define(*m_cur_env, var.id.lexeme, val);
     }
 
 private:
@@ -158,6 +227,14 @@ private:
         if (l.IsNumber() && r.IsNumber())
             return;
         throw runtime_error_t{tok, "Operands must be numbers."};
+    }
+
+    void ExecuteBlock(span<stmt_ptr_t const> stmts, environment_t &&env) {
+        environment_t *prev = m_cur_env;
+        DEFERM(m_cur_env = prev);
+        m_cur_env = &env;
+        for (auto const &stmt : stmts)
+            Execute(*stmt);
     }
 };
 

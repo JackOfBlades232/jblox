@@ -266,15 +266,16 @@ parse_exception_t error(parser_t &parser, token_t tok, string_view message)
     return parse_exception_t{};
 }
 
-bool done(const parser_t &parser)
-{
-    return parser.current >= parser.tokens.size();
-}
-
 token_t peek(const parser_t &parser)
 {
-    assert(!done(parser));
-    return parser.tokens[parser.current];
+    return parser.current < parser.tokens.size() ?
+        parser.tokens[parser.current] :
+        token_t{e_tt_eof};
+}
+
+bool done(const parser_t &parser)
+{
+    return peek(parser).type == e_tt_eof;
 }
 
 token_t previous(const parser_t &parser)
@@ -338,6 +339,8 @@ expr_ptr_t parse_primary(parser_t &parser)
         return make_shared<LiteralExpr>(nil_t{});
     if (match(parser, {e_tt_number, e_tt_string}))
         return make_shared<LiteralExpr>(previous(parser).literal);
+    if (match(parser, e_tt_identifier))
+        return make_shared<VariableExpr>(previous(parser));
 
     if (match(parser, e_tt_left_paren)) {
         expr_ptr_t expr = parse_expr(parser);
@@ -433,14 +436,82 @@ expr_ptr_t parse_choice(parser_t &parser)
     return expr;
 }
 
+expr_ptr_t parse_assignment(parser_t &parser)
+{
+    expr_ptr_t expr = parse_choice(parser);
+    
+    if (match(parser, e_tt_equal)) {
+        token_t eq = previous(parser);
+        expr_ptr_t value = parse_assignment(parser);
+
+        // @TODO: is_lvalue or smth here, requires more robust AssignmentExpr
+        if (auto *variable = dynamic_cast<VariableExpr *>(expr.get()))
+            return make_shared<AssignmentExpr>(variable->id, value);
+
+        error(parser, eq, "Invalid assignment target.");
+    }
+
+    return expr;
+}
+
 expr_ptr_t parse_sequence(parser_t &parser)
 {
-    return parse_left_associative_chain<parse_choice, e_tt_comma>(parser);
+    return parse_left_associative_chain<parse_assignment, e_tt_comma>(parser);
 }
 
 expr_ptr_t parse_expr(parser_t &parser)
 {
     return parse_sequence(parser);
+}
+
+stmt_ptr_t parse_decl(parser_t &parser);
+
+stmt_ptr_t parse_expression_stmt(parser_t &parser)
+{
+    expr_ptr_t expr = parse_expr(parser);
+    consume(parser, e_tt_semicolon, "Expected ';' after expression.");
+    return make_shared<ExpressionStmt>(expr);
+}
+
+stmt_ptr_t parse_print_stmt(parser_t &parser)
+{
+    expr_ptr_t val = parse_expr(parser);
+    consume(parser, e_tt_semicolon, "Expected ';' after value.");
+    return make_shared<PrintStmt>(val);
+}
+
+stmt_ptr_t parse_block(parser_t &parser)
+{
+    vector<stmt_ptr_t> stmts{};
+
+    while (!done(parser) && !check(parser, e_tt_right_brace))
+        stmts.emplace_back(parse_decl(parser));
+
+    consume(parser, e_tt_right_brace, "Expected '}' after block.");
+    return make_shared<BlockStmt>(move(stmts));
+}
+
+stmt_ptr_t parse_stmt(parser_t &parser)
+{
+    if (match(parser, e_tt_print))
+        return parse_print_stmt(parser);
+    if (match(parser, e_tt_left_brace))
+        return parse_block(parser);
+
+    return parse_expression_stmt(parser);
+}
+
+stmt_ptr_t parse_var_decl(parser_t &parser)
+{
+    token_t const id =
+        consume(parser, e_tt_identifier, "Expected variable name.");
+
+    expr_ptr_t init{};
+    if (match(parser, e_tt_equal))
+        init = parse_expr(parser);
+
+    consume(parser, e_tt_semicolon, "Expected ';' after var declaration.");
+    return make_shared<VarStmt>(id, init);
 }
 
 void sync_parser(parser_t &parser)
@@ -460,7 +531,6 @@ void sync_parser(parser_t &parser)
         case e_tt_if:
         case e_tt_while:
         case e_tt_print:
-        case e_tt_return:
             return;
 
         default:
@@ -471,74 +541,119 @@ void sync_parser(parser_t &parser)
     }
 }
 
-expr_ptr_t parse(span<token_t const> tokens, lox_t &lox)
+stmt_ptr_t parse_decl(parser_t &parser)
 {
-    parser_t parser{.tokens = tokens, .lox = &lox};
-
     try {
-        expr_ptr_t root = parse_expr(parser);
-        if (root)
-            consume(parser, e_tt_eof, "Trailing tokens.");
-        return root;
+        if (match(parser, e_tt_var))
+            return parse_var_decl(parser);
+
+        return parse_stmt(parser);
     } catch (parse_exception_t) {
-        // Here will be a sync point
-        return nullptr;
+        sync_parser(parser);
+        return {};
     }
 }
 
-class AstPrinter : public IVisitor {
-    string accum{};
+vector<stmt_ptr_t> parse(span<token_t const> tokens, lox_t &lox)
+{
+    parser_t parser{.tokens = tokens, .lox = &lox};
+    vector<stmt_ptr_t> stmts{};
+
+    while (!done(parser))
+        stmts.emplace_back(parse_decl(parser));
+
+    return stmts;
+}
+
+class AstPrinter : public IExprVisitor, public IStmtVisitor {
+    string m_accum{};
 
 public:
     string Print(Expr const &expr) {
-        accum.clear();
+        m_accum.clear();
         expr.Accept(*this);
-        return move(accum);
+        return move(m_accum);
+    }
+    string Print(Stmt const &stmt) {
+        m_accum.clear();
+        stmt.Accept(*this);
+        return move(m_accum);
     }
 
-    void VisitUnaryExpr(UnaryExpr const &unary) override {
-        Parenthesize(unary.op.lexeme, {unary.right});
+    void VisitAssignmentExpr(AssignmentExpr const &assignment) override {
+        m_accum.append("(assign ");
+        m_accum.append(assignment.target.lexeme);
+        m_accum.append(" ");
+        assignment.val->Accept(*this);
+        m_accum.append(")");
     }
-    void VisitGroupingExpr(GroupingExpr const &grouping) override {
-        Parenthesize("group", {grouping.expr});
-    }
-    void VisitLiteralExpr(LiteralExpr const &literal) override {
-        accum.append(to_dbg_string(literal.value));
-    }
-    void VisitBinaryExpr(BinaryExpr const &binary) override {
-        Parenthesize(binary.op.lexeme, {binary.left, binary.right});
-    }
+    void VisitUnaryExpr(UnaryExpr const &unary) override
+        { Parenthesize(unary.op.lexeme, {unary.right}); }
+    void VisitGroupingExpr(GroupingExpr const &grouping) override
+        { Parenthesize("group", {grouping.expr}); }
+    void VisitLiteralExpr(LiteralExpr const &literal) override
+        { m_accum.append(to_dbg_string(literal.value)); }
+    void VisitBinaryExpr(BinaryExpr const &binary) override
+        { Parenthesize(binary.op.lexeme, {binary.left, binary.right}); }
     void VisitTernaryExpr(TernaryExpr const &ternary) override {
-        accum.append("(");
+        m_accum.append("(");
         ternary.first->Accept(*this);
-        accum.append(" ");
-        accum.append(ternary.op0.lexeme);
-        accum.append(" ");
+        m_accum.append(" ");
+        m_accum.append(ternary.op0.lexeme);
+        m_accum.append(" ");
         ternary.second->Accept(*this);
-        accum.append(" ");
-        accum.append(ternary.op1.lexeme);
-        accum.append(" ");
+        m_accum.append(" ");
+        m_accum.append(ternary.op1.lexeme);
+        m_accum.append(" ");
         ternary.third->Accept(*this);
-        accum.append(")");
+        m_accum.append(")");
+    }
+    void VisitVariableExpr(VariableExpr const &variable) override
+        { m_accum.append(variable.id.lexeme); }
+
+    void VisitBlockStmt(BlockStmt const &block) override {
+        m_accum.append("{\n");
+        for (auto const &stmt : block.stmts)
+            stmt->Accept(*this);
+        m_accum.append("}\n");
+    }
+    void VisitExpressionStmt(ExpressionStmt const &expression) override {
+        expression.expr->Accept(*this);
+        m_accum.append(";\n");
+    }
+    void VisitPrintStmt(PrintStmt const &print) override {
+        m_accum.append("print (");
+        print.val->Accept(*this);
+        m_accum.append(");\n");
+    }
+    void VisitVarStmt(VarStmt const &var) override {
+        m_accum.append("var decl ");
+        m_accum.append(var.id.lexeme);
+        if (var.init) {
+            m_accum.append(" := (");
+            var.init->Accept(*this);
+            m_accum.append(")");
+        }
+        m_accum.append(";\n");
     }
 
 private:
     void Parenthesize(string_view name, initializer_list<expr_ptr_t> exprs) {
-        accum.append("(");
-        accum.append(name);
+        m_accum.append("(");
+        m_accum.append(name);
         for (expr_ptr_t const &expr : exprs) {
-            accum.append(" ");
+            m_accum.append(" ");
             expr->Accept(*this);
         }
-        accum.append(")");
+        m_accum.append(")");
     }
 };
 
-void interpret(lox_t &lox, expr_ptr_t const &expr)
+void interpret(span<stmt_ptr_t const> stmts, lox_t &lox)
 {
     try {
-        LoxValue const res = lox.interp.Evaluate(*expr);
-        println("{}", to_dbg_string(res));
+        for (auto const &stmt : stmts)
+            lox.interp.Execute(*stmt);
     } catch (runtime_error_t err) {
         rt_error(lox, err);
     }
@@ -557,14 +672,17 @@ errc_t run(string_view code, lox_t &lox)
             println("{}", to_string(tok));
     }
 
-    expr_ptr_t const ast = parse(tokens, lox);
+    vector<stmt_ptr_t> const stmts = parse(tokens, lox);
     if (lox.had_error)
         return e_ec_parsing_error;
 
-    if (lox.config.print_ast)
-        println("Expression 'ast': {}", AstPrinter{}.Print(*ast));
+    if (lox.config.print_ast) {
+        println("Ast:");
+        for (auto const &stmt : stmts)
+            print("{}", AstPrinter{}.Print(*stmt));
+    }
 
-    interpret(lox, ast);
+    interpret(stmts, lox);
     if (lox.had_runtime_error)
         return e_ec_runtime_error;
 
@@ -628,7 +746,7 @@ errc_t run_prompt(lox_t &lox)
 
 void show_header()
 {
-    println("jb-cpplox, version {}", VERSION);
+    println(stderr, "jb-cpplox, version {}", VERSION);
 }
 
 void show_usage()

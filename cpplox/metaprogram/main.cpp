@@ -26,7 +26,7 @@ void define_ast(FILE *f, string_view base, ast_def_t &&def)
     for (const auto &[node, _] : def)
         println(f, "struct {}{};", node, base);
 
-    println(f, "\nstruct IVisitor {{", base);
+    println(f, "\nstruct I{}Visitor {{", base);
     for (const auto &[node, _] : def) {
         println(f,
             "    virtual void Visit{}{}({}{} const &) = 0;",
@@ -36,7 +36,7 @@ void define_ast(FILE *f, string_view base, ast_def_t &&def)
 
     println(f, "struct {} {{", base);
     println(f, "    virtual ~{}() {{}}", base);
-    println(f, "    virtual void Accept(IVisitor &) const = 0;");
+    println(f, "    virtual void Accept(I{}Visitor &) const = 0;", base);
     println(f, "}};\n");
 
     println(f, "using {}_ptr_t = shared_ptr<{}>;\n", base_lc, base);
@@ -58,8 +58,8 @@ void define_ast(FILE *f, string_view base, ast_def_t &&def)
         }
         println(f, " {{}}");
         println(f,
-            "    void Accept(IVisitor &v) const override "
-            "{{ v.Visit{}{}(*this); }}", node, base);
+            "    void Accept(I{}Visitor &v) const override "
+            "{{ v.Visit{}{}(*this); }}", base, node, base);
         println(f, "}};\n");
     }
 }
@@ -84,6 +84,10 @@ int main(int argc, char **argv)
     define_header(astf);
     define_ast(astf, "Expr",
         {
+            {"Assignment", {
+                {"token_t", "target"},
+                {"expr_ptr_t", "val"}
+            }},
             {"Binary", {
                 {"expr_ptr_t", "left"}, 
                 {"token_t", "op"}, 
@@ -101,6 +105,17 @@ int main(int argc, char **argv)
             {"Unary", {
                 {"token_t", "op"},
                 {"expr_ptr_t", "right"}
+            }},
+            {"Variable", {{"token_t", "id"}}}
+        });
+    define_ast(astf, "Stmt",
+        {
+            {"Block", {{"vector<stmt_ptr_t>", "stmts"}}},
+            {"Expression", {{"expr_ptr_t", "expr"}}},
+            {"Print", {{"expr_ptr_t", "val"}}},
+            {"Var", {
+                {"token_t", "id"},
+                {"expr_ptr_t", "init"}
             }}
         });
 }

@@ -49,6 +49,9 @@ using uchar = unsigned char;
 using usize = size_t;
 using isize = ssize_t;
 
+#define CAT_(a_, b_) a_ ## b_
+#define CAT(a_, b_) CAT_(a_, b_)
+
 namespace detail
 {
 
@@ -62,4 +65,7 @@ struct Defer {
 
 }
 
-#define DEFER(stmt_) detail::Defer defer__ ## __COUNTER__ {[&] { stmt_; }}
+#define DEFER(stmt_) \
+    detail::Defer CAT(defer__, __LINE__) {[&] { stmt_; }}
+#define DEFERM(stmt_) \
+    detail::Defer CAT(defer__, __LINE__) {[&, this] { stmt_; }}
