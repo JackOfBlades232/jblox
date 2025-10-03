@@ -33,7 +33,7 @@ bool is_alphanumeric(char c)
     return is_alpha(c) || is_digit(c);
 }
 
-bool done(const scanner_t &scanner)
+bool done(scanner_t const &scanner)
 {
     return scanner.current >= scanner.source.size();
 }
@@ -63,18 +63,18 @@ int match_n(scanner_t &scanner, string_view cs)
     return count;
 }
 
-char peek(const scanner_t &scanner)
+char peek(scanner_t const &scanner)
 {
     return done(scanner) ? '\0' : scanner.source[scanner.current];
 }
 
-char peek_next(const scanner_t &scanner)
+char peek_next(scanner_t const &scanner)
 {
     return scanner.current + 1 >= scanner.source.size() ?
         '\0' : scanner.source[scanner.current + 1];
 }
 
-string_view cur_lexeme(const scanner_t &scanner)
+string_view cur_lexeme(scanner_t const &scanner)
 {
     return scanner.source.substr(
         scanner.start, scanner.current - scanner.start);
@@ -266,19 +266,14 @@ parse_exception_t error(parser_t &parser, token_t tok, string_view message)
     return parse_exception_t{};
 }
 
-token_t peek(const parser_t &parser)
+token_t peek(parser_t const &parser)
 {
     return parser.current < parser.tokens.size() ?
         parser.tokens[parser.current] :
         token_t{e_tt_eof};
 }
 
-bool done(const parser_t &parser)
-{
-    return peek(parser).type == e_tt_eof;
-}
-
-token_t previous(const parser_t &parser)
+token_t previous(parser_t const &parser)
 {
     assert(parser.current > 0);
     return parser.tokens[parser.current - 1];
@@ -286,14 +281,14 @@ token_t previous(const parser_t &parser)
 
 token_t advance(parser_t &parser)
 {
-    if (!done(parser))
+    if (parser.current < parser.tokens.size())
         ++parser.current;
     return previous(parser);
 }
 
 bool check(parser_t const &parser, token_type_t type)
 {
-    if (done(parser))
+    if (parser.current >= parser.tokens.size())
         return false;
     return peek(parser).type == type;
 }
@@ -305,6 +300,11 @@ bool match(parser_t &parser, token_type_t type)
         return true;
     }
     return false;
+}
+
+bool done(parser_t const &parser)
+{
+    return peek(parser).type == e_tt_eof;
 }
 
 bool match(parser_t &parser, initializer_list<token_type_t> token_types)
@@ -469,6 +469,9 @@ stmt_ptr_t parse_decl(parser_t &parser);
 stmt_ptr_t parse_expression_stmt(parser_t &parser)
 {
     expr_ptr_t expr = parse_expr(parser);
+    if (parser.lox->config.is_repl && done(parser))
+        return make_shared<ReplExprStmt>(expr);
+
     consume(parser, e_tt_semicolon, "Expected ';' after expression.");
     return make_shared<ExpressionStmt>(expr);
 }
@@ -636,6 +639,10 @@ public:
         }
         m_accum.append(";\n");
     }
+    void VisitReplExprStmt(ReplExprStmt const &e) override {
+        e.expr->Accept(*this);
+        m_accum.append(" [eval]\n");
+    }
 
 private:
     void Parenthesize(string_view name, initializer_list<expr_ptr_t> exprs) {
@@ -788,6 +795,7 @@ int main(int argc, char **argv)
     if (fn) {
         return run_file(fn, lox);
     } else {
+        lox.config.is_repl = true;
         show_header();
         return run_prompt(lox);
     }

@@ -116,6 +116,7 @@ int main(int argc, char **argv)
             {"Var", {
                 {"token_t", "id"},
                 {"expr_ptr_t", "init"}
-            }}
+            }},
+            {"ReplExpr", {{"expr_ptr_t", "expr"}}},
         });
 }

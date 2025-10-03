@@ -13,6 +13,8 @@ function run_all_tests {
     run_test hello.lox
     run_test comments.lox
     run_test scopes.lox
+    run_test uninit.lox
+    run_test shadowing.lox
     #run_test variables.lox
     #run_test closures.lox
     #run_test objects.lox

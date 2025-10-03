@@ -13,18 +13,28 @@ struct runtime_error_t {
 
 struct environment_t {
     environment_t *parent = nullptr;
-    unordered_map<string, LoxValue> values{};
+    unordered_map<string, optional<LoxValue>> values{};
 };
 
-inline void define(environment_t &env, string_view name, LoxValue const &val)
+inline void define(
+    environment_t &env, string_view name, optional<LoxValue> const &val)
 {
     env.values.insert_or_assign(string{name}, val);
 }
 
 inline LoxValue lookup(environment_t const &env, token_t name)
 {
-    if (auto it = env.values.find(string{name.lexeme}); it != env.values.end())
-        return it->second;
+    if (auto it = env.values.find(string{name.lexeme});
+        it != env.values.end())
+    {
+        if (it->second) {
+            return *it->second;
+        } else {
+            throw runtime_error_t{
+                name,
+                format("Accessing uninitialized variable '{}'", name.lexeme)};
+        }
+    }
     if (env.parent)
         return lookup(*env.parent, name);
 
@@ -208,11 +218,15 @@ public:
         println("{}", to_string(val));
     }
     void VisitVarStmt(VarStmt const &var) override {
-        LoxValue val = {};
+        optional<LoxValue> val{};
         if (var.init)
             val = Evaluate(*var.init);
 
         define(*m_cur_env, var.id.lexeme, val);
+    }
+    void VisitReplExprStmt(ReplExprStmt const &e) override {
+        LoxValue const val = Evaluate(*e.expr);
+        println("{}", to_string(val));
     }
 
 private:
@@ -241,6 +255,7 @@ private:
 struct lox_config_t {
     bool print_tokens : 1 = false;
     bool print_ast : 1 = false;
+    bool is_repl : 1 = false;
 };
 
 struct lox_t {
