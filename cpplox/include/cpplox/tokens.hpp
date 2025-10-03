@@ -52,7 +52,8 @@ enum token_type_t {
     e_tt_this,
     e_tt_true,
     e_tt_var,
-    e_tt_while
+    e_tt_while,
+    e_tt_break,
 };
 
 inline constexpr string_view c_tt_debug_names[] =
@@ -63,7 +64,7 @@ inline constexpr string_view c_tt_debug_names[] =
     "GREATER", "GREATER-EQUAL", "LESS", "LESS-EQUAL",
     "IDENTIFIER", "STRING", "NUMBER", "AND", "CLASS", "ELSE", "FALSE",
     "FUN", "FOR", "IF", "NIL", "OR", "PRINT", "RETURN", "SUPER",
-    "THIS", "TRUE", "VAR", "WHILE"
+    "THIS", "TRUE", "VAR", "WHILE", "BREAK",
 };
 
 inline const unordered_map<string_view, token_type_t> c_reserved_id_types{
@@ -82,7 +83,8 @@ inline const unordered_map<string_view, token_type_t> c_reserved_id_types{
     {"this", e_tt_this},
     {"true", e_tt_true},
     {"var", e_tt_var},
-    {"while", e_tt_while}
+    {"while", e_tt_while},
+    {"break", e_tt_break},
 };
 
 inline bool is_unary(token_type_t type)

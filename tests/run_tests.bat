@@ -7,6 +7,7 @@ echo jb-cpplox:
 ..\cpplox\build\cpplox.exe %* scopes.lox
 ..\cpplox\build\cpplox.exe %* uninit.lox
 ..\cpplox\build\cpplox.exe %* shadowing.lox
+..\cpplox\build\cpplox.exe %* controlflow.lox
 @REM ..\cpplox\build\cpplox.exe %* variables.lox
 @REM ..\cpplox\build\cpplox.exe %* closures.lox
 @REM ..\cpplox\build\cpplox.exe %* objects.lox

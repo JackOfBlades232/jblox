@@ -1,0 +1,53 @@
+var a = 3;
+var b = 6;
+
+if (a == b)
+    print "Unreachable";
+else {
+    print "Not it!";
+}
+
+a = b;
+if (a == b)
+    print a + "(a) == " + b + "(b)";
+
+while (a > 0) {
+    print a;
+    a = a - 1;
+}
+
+var x = 2;
+var y = 4;
+if ((x = 3) || (y = 8))
+    print x + ", " + y;
+if ((y = nil) && (x = 100)) {}
+else print x;
+
+{
+    print "Fib:";
+    var a = 0;
+    var temp;
+    for (var b = 1; a < 10000; b = temp + b) {
+        print a;
+        temp = a;
+        a = b;
+    }
+}
+
+var z = 0;
+while (true) {
+    z = z + 1;
+    print z;
+    if (z == 10)
+        break;
+}
+
+for (var z = 0; z < 100; z = z + 1) {
+    print z;
+    if (z == 10)
+        break;
+}
+
+{
+    // break; // Syntax error
+}

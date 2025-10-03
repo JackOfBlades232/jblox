@@ -255,6 +255,7 @@ vector<token_t> scan_tokens(string_view code, lox_t &lox)
 struct parser_t {
     span<token_t const> tokens;
     usize current = 0;
+    bool in_loop = false;
     lox_t *lox;
 };
 
@@ -465,6 +466,8 @@ expr_ptr_t parse_expr(parser_t &parser)
 }
 
 stmt_ptr_t parse_decl(parser_t &parser);
+stmt_ptr_t parse_stmt(parser_t &parser);
+stmt_ptr_t parse_var_decl(parser_t &parser);
 
 stmt_ptr_t parse_expression_stmt(parser_t &parser)
 {
@@ -474,6 +477,78 @@ stmt_ptr_t parse_expression_stmt(parser_t &parser)
 
     consume(parser, e_tt_semicolon, "Expected ';' after expression.");
     return make_shared<ExpressionStmt>(expr);
+}
+
+stmt_ptr_t parse_for_stmt(parser_t &parser)
+{
+    consume(parser, e_tt_left_paren, "Expected '(' after for.");
+
+    stmt_ptr_t init = {};
+    if (match(parser, e_tt_semicolon))
+        ;
+    else if (match(parser, e_tt_var))
+        init = parse_var_decl(parser);
+    else
+        init = parse_expression_stmt(parser);
+
+    expr_ptr_t cond = {};
+    if (!check(parser, e_tt_semicolon))
+        cond = parse_expr(parser);
+    consume(parser, e_tt_semicolon, "Expected ';' after loop condition");
+
+    expr_ptr_t increment = {};
+    if (!check(parser, e_tt_right_paren))
+        increment = parse_expr(parser);
+
+    consume(parser, e_tt_right_paren, "Expected ')' after for clause.");
+
+    bool const was_in_loop = exchange(parser.in_loop, true);
+    stmt_ptr_t body = parse_stmt(parser);
+    parser.in_loop = was_in_loop;
+
+    // Now, desugar into { init; while (cond) { body; increment; } }
+
+    if (increment) {
+        body = make_shared<BlockStmt>(
+            vector<stmt_ptr_t>{body, make_shared<ExpressionStmt>(increment)});
+    }
+
+    if (!cond)
+        cond = make_shared<LiteralExpr>(true);
+
+    body = make_shared<WhileStmt>(cond, body);
+
+    if (init)
+        body = make_shared<BlockStmt>(vector<stmt_ptr_t>{init, body});
+
+    return body;
+}
+
+stmt_ptr_t parse_if_stmt(parser_t &parser)
+{
+    consume(parser, e_tt_left_paren, "Expected '(' after if.");
+    expr_ptr_t cond = parse_expr(parser);
+    consume(parser, e_tt_right_paren, "Expected ')' after if condition.");
+
+    stmt_ptr_t then_branch = parse_stmt(parser);
+    stmt_ptr_t else_branch = {};
+    if (match(parser, e_tt_else))
+        else_branch = parse_stmt(parser);
+
+    return make_shared<IfStmt>(cond, then_branch, else_branch);
+}
+
+stmt_ptr_t parse_while_stmt(parser_t &parser)
+{
+    consume(parser, e_tt_left_paren, "Expected '(' after while.");
+    expr_ptr_t cond = parse_expr(parser);
+    consume(parser, e_tt_right_paren, "Expected ')' after while condition.");
+
+    bool const was_in_loop = exchange(parser.in_loop, true);
+    stmt_ptr_t body = parse_stmt(parser);
+    parser.in_loop = was_in_loop;
+
+    return make_shared<WhileStmt>(cond, body);
 }
 
 stmt_ptr_t parse_print_stmt(parser_t &parser)
@@ -494,12 +569,28 @@ stmt_ptr_t parse_block(parser_t &parser)
     return make_shared<BlockStmt>(move(stmts));
 }
 
+stmt_ptr_t parse_break(parser_t &parser)
+{
+    if (!parser.in_loop)
+        error(parser, previous(parser), "Encountered 'break' outside a loop.");
+    consume(parser, e_tt_semicolon, "Expected ';' after break.");
+    return make_shared<BreakStmt>();
+}
+
 stmt_ptr_t parse_stmt(parser_t &parser)
 {
+    if (match(parser, e_tt_for))
+        return parse_for_stmt(parser);
+    if (match(parser, e_tt_if))
+        return parse_if_stmt(parser);
+    if (match(parser, e_tt_while))
+        return parse_while_stmt(parser);
     if (match(parser, e_tt_print))
         return parse_print_stmt(parser);
     if (match(parser, e_tt_left_brace))
         return parse_block(parser);
+    if (match(parser, e_tt_break))
+        return parse_break(parser);
 
     return parse_expression_stmt(parser);
 }
@@ -624,11 +715,31 @@ public:
         expression.expr->Accept(*this);
         m_accum.append(";\n");
     }
+    void VisitIfStmt(IfStmt const &if_stmt) override {
+        m_accum.append("if (");
+        if_stmt.cond->Accept(*this);
+        m_accum.append(");\n");
+        if_stmt.then_branch->Accept(*this);
+        if (if_stmt.else_branch) {
+            m_accum.append("else\n");
+            if_stmt.else_branch->Accept(*this);
+        }
+        m_accum.append("endif\n");
+    }
+    void VisitWhileStmt(WhileStmt const &while_stmt) override {
+        m_accum.append("while (");
+        while_stmt.cond->Accept(*this);
+        m_accum.append(");\n");
+        while_stmt.body->Accept(*this);
+        m_accum.append("endwhile\n");
+    }
     void VisitPrintStmt(PrintStmt const &print) override {
         m_accum.append("print (");
         print.val->Accept(*this);
         m_accum.append(");\n");
     }
+    void VisitBreakStmt(BreakStmt const &) override
+        { m_accum.append("break;\n"); }
     void VisitVarStmt(VarStmt const &var) override {
         m_accum.append("var decl ");
         m_accum.append(var.id.lexeme);

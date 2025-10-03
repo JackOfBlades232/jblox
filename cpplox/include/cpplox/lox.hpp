@@ -11,6 +11,8 @@ struct runtime_error_t {
     string message;
 };
 
+struct break_signal_t {};
+
 struct environment_t {
     environment_t *parent = nullptr;
     unordered_map<string, optional<LoxValue>> values{};
@@ -84,6 +86,8 @@ public:
         LoxValue *prev_dest = exchange(m_dest, nullptr);
 
         LoxValue val = Evaluate(*unary.right);
+        DEFERM(*prev_dest = val);
+
         switch (unary.op.type) {
         case e_tt_minus:
             CheckNumberOperand(unary.op, val);
@@ -95,8 +99,6 @@ public:
         default:
             assert(0);
         }
-
-        *prev_dest = val;
     }
     void VisitGroupingExpr(GroupingExpr const &grouping) override {
         assert(m_dest);
@@ -111,9 +113,21 @@ public:
         assert(m_dest);
         LoxValue *prev_dest = exchange(m_dest, nullptr);
 
-        LoxValue const l = Evaluate(*binary.left);
-        LoxValue const r = Evaluate(*binary.right);
         LoxValue val;
+        DEFERM(*prev_dest = val);
+
+        LoxValue const l = Evaluate(*binary.left);
+
+        // Short circuit on logical bin ops
+        if (binary.op.type == e_tt_and && !is_truthy(l)) {
+            val = false;
+            return;
+        } else if (binary.op.type == e_tt_or && is_truthy(l)) {
+            val = true;
+            return;
+        }
+
+        LoxValue const r = Evaluate(*binary.right);
 
         switch (binary.op.type) {
         case e_tt_slash:
@@ -170,11 +184,10 @@ public:
             val = are_equal(l, r);
             break;
 
+        // Here we handle only the non-short-circuit case
         case e_tt_and:
-            val = is_truthy(l) && is_truthy(r);
-            break;
         case e_tt_or:
-            val = is_truthy(l) || is_truthy(r);
+            val = is_truthy(r);
             break;
 
         case e_tt_comma:
@@ -184,8 +197,6 @@ public:
         default:
             assert(0);
         }
-
-        *prev_dest = val;
     }
     void VisitTernaryExpr(TernaryExpr const &ternary) override {
         assert(m_dest);
@@ -205,18 +216,32 @@ public:
     void VisitVariableExpr(VariableExpr const &variable) override {
         assert(m_dest);
         LoxValue *prev_dest = exchange(m_dest, nullptr);
-        LoxValue const val = lookup(*m_cur_env, variable.id);
-        *prev_dest = val;
+        *prev_dest = lookup(*m_cur_env, variable.id);
     }
 
     void VisitBlockStmt(BlockStmt const &block) override
         { ExecuteBlock(block.stmts, environment_t{m_cur_env}); }
     void VisitExpressionStmt(ExpressionStmt const &expression) override
         { Evaluate(*expression.expr); }
-    void VisitPrintStmt(PrintStmt const &print) override {
-        LoxValue const val = Evaluate(*print.val);
-        println("{}", to_string(val));
+    void VisitIfStmt(IfStmt const &if_stmt) override {
+        if (is_truthy(Evaluate(*if_stmt.cond)))
+            Execute(*if_stmt.then_branch);
+        else if (if_stmt.else_branch)
+            Execute(*if_stmt.else_branch);
     }
+    void VisitWhileStmt(WhileStmt const &while_stmt) override {
+        while (is_truthy(Evaluate(*while_stmt.cond))) {
+            try {
+                Execute(*while_stmt.body);
+            } catch (break_signal_t) {
+                break;
+            }
+        }
+    }
+    void VisitPrintStmt(PrintStmt const &print) override
+        { println("{}", to_string(Evaluate(*print.val))); }
+    void VisitBreakStmt(BreakStmt const &) override
+        { throw break_signal_t{}; }
     void VisitVarStmt(VarStmt const &var) override {
         optional<LoxValue> val{};
         if (var.init)
@@ -224,10 +249,8 @@ public:
 
         define(*m_cur_env, var.id.lexeme, val);
     }
-    void VisitReplExprStmt(ReplExprStmt const &e) override {
-        LoxValue const val = Evaluate(*e.expr);
-        println("{}", to_string(val));
-    }
+    void VisitReplExprStmt(ReplExprStmt const &e) override
+        { println("{}", to_string(Evaluate(*e.expr))); }
 
 private:
     void CheckNumberOperand(token_t tok, LoxValue const &operand) const {

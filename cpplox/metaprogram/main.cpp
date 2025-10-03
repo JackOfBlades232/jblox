@@ -112,7 +112,17 @@ int main(int argc, char **argv)
         {
             {"Block", {{"vector<stmt_ptr_t>", "stmts"}}},
             {"Expression", {{"expr_ptr_t", "expr"}}},
+            {"If", {
+                {"expr_ptr_t", "cond"},
+                {"stmt_ptr_t", "then_branch"},
+                {"stmt_ptr_t", "else_branch"},
+            }},
+            {"While", {
+                {"expr_ptr_t", "cond"},
+                {"stmt_ptr_t", "body"}
+            }},
             {"Print", {{"expr_ptr_t", "val"}}},
+            {"Break", {}},
             {"Var", {
                 {"token_t", "id"},
                 {"expr_ptr_t", "init"}
