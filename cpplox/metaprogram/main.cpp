@@ -100,6 +100,11 @@ int main(int argc, char **argv)
                 {"token_t", "op1"}, 
                 {"expr_ptr_t", "third"}
             }},
+            {"Call", {
+                {"expr_ptr_t", "callee"},
+                {"token_t", "paren"},
+                {"vector<expr_ptr_t>", "args"}
+            }},
             {"Grouping", {{"expr_ptr_t", "expr"}}},
             {"Literal", {{"LoxValue", "value"}}},
             {"Unary", {

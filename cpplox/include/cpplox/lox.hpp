@@ -213,6 +213,9 @@ public:
 
         *prev_dest = val;
     }
+    void VisitCallExpr(CallExpr const &call) override {
+        // @TODO
+    }
     void VisitVariableExpr(VariableExpr const &variable) override {
         assert(m_dest);
         LoxValue *prev_dest = exchange(m_dest, nullptr);

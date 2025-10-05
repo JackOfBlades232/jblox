@@ -329,6 +329,7 @@ token_t consume(parser_t &parser, token_type_t type, string_view message)
 }
 
 expr_ptr_t parse_expr(parser_t &parser);
+expr_ptr_t parse_assignment(parser_t &parser);
 
 expr_ptr_t parse_primary(parser_t &parser)
 {
@@ -352,6 +353,43 @@ expr_ptr_t parse_primary(parser_t &parser)
     throw error(parser, peek(parser), "Expected expression.");
 }
 
+expr_ptr_t finish_parsing_call(parser_t &parser, expr_ptr_t callee)
+{
+    vector<expr_ptr_t> args{};
+    if (!check(parser, e_tt_right_paren)) {
+        do {
+            // Disallow >255 args, as that will be a hard limit for clox,
+            // and we want conforming implementations
+            if (args.size() >= 255) {
+                error(*parser.lox, peek(parser),
+                    "Can't pass more than 255 args to a call.");
+            }
+
+            // Not seq, as commas as operators are not accepted here
+            args.emplace_back(parse_assignment(parser));
+        } while (match(parser, e_tt_comma));
+    }
+
+    token_t paren = consume(
+        parser, e_tt_right_paren, "Expected ')' after argument list.");
+
+    return make_shared<CallExpr>(callee, paren, move(args));
+}
+
+expr_ptr_t parse_call(parser_t &parser)
+{
+    expr_ptr_t expr = parse_primary(parser);
+
+    for (;;) {
+        if (match(parser, e_tt_left_paren))
+            expr = finish_parsing_call(parser, expr);
+        else
+            break;
+    }
+
+    return expr;
+}
+
 expr_ptr_t parse_unary(parser_t &parser)
 {
     if (match(parser, {e_tt_bang, e_tt_minus})) {
@@ -360,7 +398,7 @@ expr_ptr_t parse_unary(parser_t &parser)
         return make_shared<UnaryExpr>(op, right);
     }
 
-    return parse_primary(parser);
+    return parse_call(parser);
 }
 
 template <auto t_child_parser, token_type_t ...t_allowed_ops>
@@ -701,6 +739,18 @@ public:
         m_accum.append(" ");
         ternary.third->Accept(*this);
         m_accum.append(")");
+    }
+    void VisitCallExpr(CallExpr const &call) override {
+        m_accum.append("(call ");
+        call.callee->Accept(*this);
+        m_accum.append(" (");
+        bool comma = false;
+        for (auto const &arg : call.args) {
+            if (exchange(comma, true))
+                m_accum.append(", ");
+            arg->Accept(*this);
+        }
+        m_accum.append("))");
     }
     void VisitVariableExpr(VariableExpr const &variable) override
         { m_accum.append(variable.id.lexeme); }
