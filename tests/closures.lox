@@ -15,7 +15,7 @@ fun enclosing() {
 }
 
 fun doFunc(func) {
-    func();
+    print func();
 }
 
 var closure = enclosing();

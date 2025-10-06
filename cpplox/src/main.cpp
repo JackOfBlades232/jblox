@@ -14,7 +14,7 @@ enum errc_t {
 struct scanner_t {
     string_view source;
     vector<token_t> tokens{};
-    usize start = 0, current = 0, line = 0;
+    usize start = 0, current = 0, line = 1;
     lox_t *lox;
 };
 
@@ -146,7 +146,7 @@ void scan_number(scanner_t &scanner)
             advance(scanner);
     }
 
-    double value = stod(string{cur_lexeme(scanner)});
+    f64 value = stod(string{cur_lexeme(scanner)});
     add_token(scanner, e_tt_number, value);  
 }
 
@@ -338,7 +338,7 @@ expr_ptr_t parse_primary(parser_t &parser)
     if (match(parser, e_tt_true))
         return make_shared<LiteralExpr>(true);
     if (match(parser, e_tt_nil))
-        return make_shared<LiteralExpr>(nil_t{});
+        return make_shared<LiteralExpr>(c_nil);
     if (match(parser, {e_tt_number, e_tt_string}))
         return make_shared<LiteralExpr>(previous(parser).literal);
     if (match(parser, e_tt_identifier))
@@ -366,7 +366,7 @@ expr_ptr_t finish_parsing_call(parser_t &parser, expr_ptr_t callee)
             }
 
             // Not seq, as commas as operators are not accepted here
-            args.emplace_back(parse_assignment(parser));
+            args.push_back(parse_assignment(parser));
         } while (match(parser, e_tt_comma));
     }
 
@@ -596,12 +596,23 @@ stmt_ptr_t parse_print_stmt(parser_t &parser)
     return make_shared<PrintStmt>(val);
 }
 
+stmt_ptr_t parse_return_stmt(parser_t &parser)
+{
+    token_t kw = previous(parser);
+    expr_ptr_t val{};
+    if (!check(parser, e_tt_semicolon))
+        val = parse_expr(parser);
+    
+    consume(parser, e_tt_semicolon, "Expected ';' after return value.");
+    return make_shared<ReturnStmt>(kw, val);
+}
+
 stmt_ptr_t parse_block(parser_t &parser)
 {
     vector<stmt_ptr_t> stmts{};
 
     while (!done(parser) && !check(parser, e_tt_right_brace))
-        stmts.emplace_back(parse_decl(parser));
+        stmts.push_back(parse_decl(parser));
 
     consume(parser, e_tt_right_brace, "Expected '}' after block.");
     return make_shared<BlockStmt>(move(stmts));
@@ -625,12 +636,44 @@ stmt_ptr_t parse_stmt(parser_t &parser)
         return parse_while_stmt(parser);
     if (match(parser, e_tt_print))
         return parse_print_stmt(parser);
+    if (match(parser, e_tt_return))
+        return parse_return_stmt(parser);
     if (match(parser, e_tt_left_brace))
         return parse_block(parser);
     if (match(parser, e_tt_break))
         return parse_break(parser);
 
     return parse_expression_stmt(parser);
+}
+
+stmt_ptr_t parse_func_decl(parser_t &parser)
+{
+    token_t name = consume(
+         parser, e_tt_identifier, "Expected function/method name.");
+    consume(
+        parser, e_tt_left_paren, "Expected '(' after function/method name.");
+    
+    vector<token_t> params{};
+    if (!check(parser, e_tt_right_paren)) {
+        do {
+            if (params.size() >= 255) {
+                error(parser, peek(parser),
+                    "Can't define a function/method with more than 255 params.");
+            }
+
+            params.push_back(
+                consume(parser, e_tt_identifier, "Expected parameter name."));
+        } while (match(parser, e_tt_comma));
+    }
+
+    consume(
+        parser, e_tt_right_paren, "Expected ')' after parameter list.");
+
+    consume(
+        parser, e_tt_left_brace, "Expected '{' before function/method body.");
+    auto body =
+        move(static_cast<BlockStmt *>(parse_block(parser).get())->stmts);
+    return make_shared<FuncDeclStmt>(name, move(params), move(body));
 }
 
 stmt_ptr_t parse_var_decl(parser_t &parser)
@@ -676,6 +719,9 @@ void sync_parser(parser_t &parser)
 stmt_ptr_t parse_decl(parser_t &parser)
 {
     try {
+        // @TODO: lookahead here to see if it's has an identifier following
+        if (match(parser, e_tt_fun))
+            return parse_func_decl(parser);
         if (match(parser, e_tt_var))
             return parse_var_decl(parser);
 
@@ -692,7 +738,7 @@ vector<stmt_ptr_t> parse(span<token_t const> tokens, lox_t &lox)
     vector<stmt_ptr_t> stmts{};
 
     while (!done(parser))
-        stmts.emplace_back(parse_decl(parser));
+        stmts.push_back(parse_decl(parser));
 
     return stmts;
 }
@@ -765,6 +811,21 @@ public:
         expression.expr->Accept(*this);
         m_accum.append(";\n");
     }
+    void VisitFuncDeclStmt(FuncDeclStmt const &func_decl) override {
+        m_accum.append("declare function/method ");
+        m_accum.append(func_decl.name.lexeme);
+        m_accum.append(" (");
+        bool comma = false;
+        for (auto const &param : func_decl.params) {
+            if (exchange(comma, true))
+                m_accum.append(", ");
+            m_accum.append(param.lexeme);
+        }
+        m_accum.append(")\n{\n");
+        for (auto const &stmt : func_decl.body)
+            stmt->Accept(*this);
+        m_accum.append("}\n");
+    }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         m_accum.append("if (");
         if_stmt.cond->Accept(*this);
@@ -787,6 +848,11 @@ public:
         m_accum.append("print (");
         print.val->Accept(*this);
         m_accum.append(");\n");
+    }
+    void VisitReturnStmt(ReturnStmt const &ret) override {
+        m_accum.append("return ");
+        ret.value->Accept(*this);
+        m_accum.append(";\n");
     }
     void VisitBreakStmt(BreakStmt const &) override
         { m_accum.append("break;\n"); }

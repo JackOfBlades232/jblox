@@ -21,17 +21,36 @@
 #include <memory>
 #include <algorithm>
 #include <concepts>
+#include <chrono>
 
 #include <version.hpp>
 
 // Don't need all the colonoscopy, and my type naming conventions are already
 // different from the std ones.
 using namespace std;
+using namespace std::chrono;
 
 #ifdef _WIN32
 using ssize_t = make_signed_t<size_t>;
+extern "C"
+{
+union LARGE_INTEGER {
+    struct {
+        unsigned long LowPart;
+        long HighPart;
+    };
+    struct {
+        unsigned long LowPart;
+        long HighPart;
+    } u;
+    long long QuadPart;
+};
+__declspec(dllimport) int __stdcall QueryPerformanceCounter(LARGE_INTEGER *);
+__declspec(dllimport) int __stdcall QueryPerformanceFrequency(LARGE_INTEGER *);
+}
 #else
 #include <sys/types.h>
+#include <time.h>
 #endif
 
 using u8 = uint8_t;
@@ -70,3 +89,39 @@ struct Defer {
     detail::Defer CAT(defer__, __LINE__) {[&] { stmt_; }}
 #define DEFERM(stmt_) \
     detail::Defer CAT(defer__, __LINE__) {[&, this] { stmt_; }}
+
+inline class GlobalHiresTimer {
+#ifdef _WIN32
+    LARGE_INTEGER m_hr_start, m_hr_freq;
+#else
+    struct timespec m_hr_start;
+#endif
+
+public:
+    GlobalHiresTimer() {
+#ifdef _WIN32
+        QueryPerformanceFrequency(&m_hr_freq);
+        QueryPerformanceCounter(&m_hr_start);
+#else
+        clock_gettime(CLOCK_MONOTONIC, &m_hr_start);
+#endif
+    }
+
+    ~GlobalHiresTimer() {}
+
+    f64 MsFromProgramStart() const {
+#ifdef _WIN32
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        return
+            f64(now.QuadPart - m_hr_start.QuadPart) * 1000.0 /
+            f64(m_hr_freq.QuadPart);
+#else
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        return
+            f64(now.tv_sec - m_hr_start.tv_sec) * 1000.0 +
+            f64(now.tv_nsec - m_hr_start.tv_nsec) / 1.0e6;
+#endif
+    }
+} g_hires_timer{};

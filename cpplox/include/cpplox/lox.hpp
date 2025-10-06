@@ -12,11 +12,16 @@ struct runtime_error_t {
 };
 
 struct break_signal_t {};
+struct return_signal_t {
+    LoxValue val;
+};
 
 struct environment_t {
     environment_t *parent = nullptr;
     unordered_map<string, optional<LoxValue>> values{};
 };
+
+using environment_ptr_t = shared_ptr<environment_t>;
 
 inline void define(
     environment_t &env, string_view name, optional<LoxValue> const &val)
@@ -59,13 +64,54 @@ inline void assign(environment_t &env, token_t name, LoxValue const &val)
     throw runtime_error_t{name, format("Undefined variable '{}'", name.lexeme)};
 }
 
-class Interpreter : public IExprVisitor, public IStmtVisitor {
-    environment_t m_global_env{};
+inline environment_ptr_t make_child(environment_ptr_t const &parent)
+{
+    return make_shared<environment_t>(parent.get());
+}
 
-    environment_t *m_cur_env = &m_global_env;
-    LoxValue *m_dest = nullptr;
+class LoxFunction : public ILoxCallable {
+    FuncDeclStmt decl;
 
 public:
+    explicit LoxFunction(FuncDeclStmt const &a_decl) : decl{a_decl} {}
+
+    LoxFunction(LoxFunction const &) = default;
+    LoxFunction(LoxFunction &&) = default;
+    LoxFunction &operator=(LoxFunction const &) = default;
+    LoxFunction &operator=(LoxFunction &&) = default;
+
+    int Arity() const override { return decl.params.size(); }
+    string ToString() const override
+        { return format("<fn {}>", decl.name.lexeme); }
+
+    LoxValue Call(Interpreter &, span<LoxValue>) override;
+};
+
+class Interpreter : public IExprVisitor, public IStmtVisitor {
+    environment_ptr_t m_global_env{};
+    environment_ptr_t m_cur_env{};
+
+    LoxValue *m_dest = nullptr;
+
+    friend class LoxFunction;
+
+    class Clock : public ILoxCallable {
+        LoxValue Call(Interpreter &, span<LoxValue>) override
+            { return g_hires_timer.MsFromProgramStart() / 1000.0; }
+        int Arity() const override { return 0; }
+        string ToString() const override { return "<native fn>"; }
+    };
+
+public:
+    Interpreter()
+        : m_global_env{make_shared<environment_t>()}
+        , m_cur_env{m_global_env}
+    {
+        define(*m_global_env, "clock", make_ent<Clock>());
+    }
+
+    ~Interpreter() {}
+
     LoxValue Evaluate(Expr const &expr) {
         LoxValue res;
         m_dest = &res;
@@ -86,7 +132,7 @@ public:
         LoxValue *prev_dest = exchange(m_dest, nullptr);
 
         LoxValue val = Evaluate(*unary.right);
-        DEFERM(*prev_dest = val);
+        DEFER(*prev_dest = val);
 
         switch (unary.op.type) {
         case e_tt_minus:
@@ -114,7 +160,7 @@ public:
         LoxValue *prev_dest = exchange(m_dest, nullptr);
 
         LoxValue val;
-        DEFERM(*prev_dest = val);
+        DEFER(*prev_dest = val);
 
         LoxValue const l = Evaluate(*binary.left);
 
@@ -214,7 +260,27 @@ public:
         *prev_dest = val;
     }
     void VisitCallExpr(CallExpr const &call) override {
-        // @TODO
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
+
+        LoxValue callee = Evaluate(*call.callee);
+        vector<LoxValue> arg_values{};
+        for (auto const &arg : call.args)
+            arg_values.emplace_back(Evaluate(*arg));
+
+        if (!callee.IsCallable()) {
+            throw runtime_error_t{
+                call.paren, "Can only call functions and classes."};
+        }
+
+        ILoxCallable &callable = callee.GetCallable();
+        if (int const arity = callable.Arity(); arity != arg_values.size()) {
+            throw runtime_error_t{
+                call.paren, "Expected " + to_string(arity) +
+                " args, but got " + to_string(arg_values.size()) + "."};
+        }
+
+        *prev_dest = callable.Call(*this, arg_values);
     }
     void VisitVariableExpr(VariableExpr const &variable) override {
         assert(m_dest);
@@ -223,9 +289,14 @@ public:
     }
 
     void VisitBlockStmt(BlockStmt const &block) override
-        { ExecuteBlock(block.stmts, environment_t{m_cur_env}); }
+        { ExecuteBlock(block.stmts, make_child(m_cur_env)); }
     void VisitExpressionStmt(ExpressionStmt const &expression) override
         { Evaluate(*expression.expr); }
+    void VisitFuncDeclStmt(FuncDeclStmt const &func_decl) override {
+        define(
+            *m_cur_env, func_decl.name.lexeme,
+            make_ent<LoxFunction>(func_decl));
+    }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         if (is_truthy(Evaluate(*if_stmt.cond)))
             Execute(*if_stmt.then_branch);
@@ -243,6 +314,13 @@ public:
     }
     void VisitPrintStmt(PrintStmt const &print) override
         { println("{}", to_string(Evaluate(*print.val))); }
+    void VisitReturnStmt(ReturnStmt const &ret) override {
+        LoxValue retval = c_nil;
+        if (ret.value)
+            retval = Evaluate(*ret.value);
+
+        throw return_signal_t{move(retval)};
+    }
     void VisitBreakStmt(BreakStmt const &) override
         { throw break_signal_t{}; }
     void VisitVarStmt(VarStmt const &var) override {
@@ -269,14 +347,28 @@ private:
         throw runtime_error_t{tok, "Operands must be numbers."};
     }
 
-    void ExecuteBlock(span<stmt_ptr_t const> stmts, environment_t &&env) {
-        environment_t *prev = m_cur_env;
-        DEFERM(m_cur_env = prev);
-        m_cur_env = &env;
+    void ExecuteBlock(span<stmt_ptr_t const> stmts, environment_ptr_t &&env) {
+        environment_ptr_t prev = m_cur_env;
+        DEFERM(m_cur_env = move(prev));
+        m_cur_env = move(env);
         for (auto const &stmt : stmts)
             Execute(*stmt);
     }
 };
+
+inline LoxValue LoxFunction::Call(Interpreter &interp, span<LoxValue> args)
+{
+    environment_ptr_t env = make_child(interp.m_cur_env);
+    for (usize i = 0; auto const &param : decl.params)
+        define(*env, param.lexeme, args[i++]);
+    
+    try {
+        interp.ExecuteBlock(decl.body, move(env));
+        return c_nil;
+    } catch (return_signal_t ret) {
+        return move(ret.val);
+    }
+}
 
 struct lox_config_t {
     bool print_tokens : 1 = false;

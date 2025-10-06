@@ -1,0 +1,6 @@
+var start = clock();
+var calculation = 0.0;
+for (var i = 0; i < 100000; i = i + 1)
+    calculation = calculation * 1.001 + 0.1;
+print "Took " + (clock() - start) + " seconds for 100000 iterations";
+print "Result = " + calculation;

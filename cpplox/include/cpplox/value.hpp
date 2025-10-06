@@ -4,15 +4,32 @@
 
 struct nil_t {};
 
+struct ILoxEntity {
+    virtual ~ILoxEntity() {};
+    virtual string ToString() const = 0;
+};
+
+using lox_entity_ptr_t = shared_ptr<ILoxEntity>;
+
+template <derived_from<ILoxEntity> T, class ...TArgs>
+    requires constructible_from<T, TArgs...>
+inline lox_entity_ptr_t make_ent(TArgs &&...args)
+{
+    return lox_entity_ptr_t{make_shared<T>(forward<TArgs>(args)...)};
+}
+
+struct ILoxCallable;
+struct ILoxObject;
+
 class LoxValue {
-    variant<nil_t, bool, string, double> m_val{nil_t{}};
+    variant<nil_t, bool, string, f64, lox_entity_ptr_t> m_val{nil_t{}};
 
 public:
     LoxValue() = default;
 
-    LoxValue(const LoxValue &) = default;
+    LoxValue(LoxValue const &) = default;
     LoxValue(LoxValue &&) = default;
-    LoxValue &operator=(const LoxValue &) = default;
+    LoxValue &operator=(LoxValue const &) = default;
     LoxValue &operator=(LoxValue &&) = default;
 
     LoxValue(nil_t) : m_val{nil_t{}} {}
@@ -25,9 +42,9 @@ public:
         m_val = b;
         return *this;
     }
-    LoxValue(const string &s) : m_val{s} {}
+    LoxValue(string const &s) : m_val{s} {}
     LoxValue(string &&s) : m_val{move(s)} {}
-    LoxValue &operator=(const string &s) {
+    LoxValue &operator=(string const &s) {
         m_val = s;
         return *this;
     }
@@ -35,16 +52,30 @@ public:
         m_val = move(s);
         return *this;
     }
-    LoxValue(double d) : m_val{d} {}
-    LoxValue &operator=(double d) {
+    LoxValue(f64 d) : m_val{d} {}
+    LoxValue &operator=(f64 d) {
         m_val = d;
+        return *this;
+    }
+    LoxValue(lox_entity_ptr_t const &e) : m_val{e} {}
+    LoxValue(lox_entity_ptr_t &&e) : m_val{move(e)} {}
+    LoxValue &operator=(lox_entity_ptr_t const &e) {
+        m_val = e;
+        return *this;
+    }
+    LoxValue &operator=(lox_entity_ptr_t &&e) {
+        m_val = move(e);
         return *this;
     }
 
     bool IsNil() const { return holds_alternative<nil_t>(m_val); }
     bool IsBool() const { return holds_alternative<bool>(m_val); }
     bool IsString() const { return holds_alternative<string>(m_val); }
-    bool IsNumber() const { return holds_alternative<double>(m_val); }
+    bool IsNumber() const { return holds_alternative<f64>(m_val); }
+    bool IsEntity() const { return holds_alternative<lox_entity_ptr_t>(m_val); }
+
+    bool IsCallable() const;
+    bool IsObject() const;
 
     bool &GetBool() {
         assert(IsBool());
@@ -58,13 +89,57 @@ public:
     }
     string const &GetString() const
         { return const_cast<LoxValue *>(this)->GetString(); }
-    double &GetNumber() {
+    f64 &GetNumber() {
         assert(IsNumber());
-        return get<double>(m_val);
+        return get<f64>(m_val);
     }
-    double GetNumber() const
+    f64 GetNumber() const
         { return const_cast<LoxValue *>(this)->GetNumber(); }
+    lox_entity_ptr_t &GetEntity() {
+        assert(IsEntity());
+        return get<lox_entity_ptr_t>(m_val);
+    }
+    lox_entity_ptr_t const &GetEntity() const
+        { return const_cast<LoxValue *>(this)->GetEntity(); }
+
+    ILoxCallable &GetCallable();
+    ILoxCallable const &GetCallable() const
+        { return const_cast<LoxValue *>(this)->GetCallable(); }
+    ILoxObject &GetObject();
+    ILoxObject const &GetObject() const
+        { return const_cast<LoxValue *>(this)->GetObject(); }
 };
+
+class Interpreter;
+
+struct ILoxCallable : ILoxEntity {
+    virtual LoxValue Call(Interpreter &, span<LoxValue>) = 0;
+    virtual int Arity() const = 0;
+};
+
+struct ILoxObject : ILoxEntity {
+    // @TODO
+};
+
+inline bool LoxValue::IsCallable() const
+{
+    return IsEntity() && dynamic_cast<ILoxCallable const *>(GetEntity().get());
+}
+inline bool LoxValue::IsObject() const
+{
+    return IsEntity() && dynamic_cast<ILoxObject const *>(GetEntity().get());
+}
+
+inline ILoxCallable &LoxValue::GetCallable()
+{
+    assert(IsCallable());
+    return *static_cast<ILoxCallable *>(GetEntity().get());
+}
+inline ILoxObject &LoxValue::GetObject()
+{
+    assert(IsObject());
+    return *static_cast<ILoxObject *>(GetEntity().get());
+}
 
 inline const LoxValue c_nil{};
 
@@ -100,7 +175,7 @@ inline string to_string(LoxValue const &val)
         return val.GetString();
     } else if (val.IsBool()) {
         return val.GetBool() ? "true" : "false";
-    } else {
+    } else if (val.IsNumber()) {
         string s = to_string(val.GetNumber());
         if (s.find('.') != string::npos) {
             size_t nl = s.length();
@@ -111,6 +186,8 @@ inline string to_string(LoxValue const &val)
             s.resize(nl);
         }
         return s;
+    } else { // entity
+        return val.GetEntity()->ToString();
     }
 }
 
