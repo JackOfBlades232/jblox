@@ -16,73 +16,101 @@ struct return_signal_t {
     LoxValue val;
 };
 
-struct environment_t {
-    environment_t *parent = nullptr;
-    unordered_map<string, optional<LoxValue>> values{};
+// @TODO: currently we are leaking environments every time we return a
+// closed function -- it holds a ref to the closure, and the closure holds
+// the environment stack. Do mark and sweep from actual live environment
+// to break strong cycles. This will also be important when objects become
+// a thing.
+// @TODO: separate concept of 'gc-d ref' and 'callable or object' --
+// a LoxValue can hold a callable or and object, not an environment.
+// However, when we do some form of mark & sweep, environments have to
+// participate.
+
+class Environment : public ILoxEntity {
+    lox_entity_ptr_t m_parent{};
+    unordered_map<string, optional<LoxValue>> m_values{};
+
+public:
+    explicit Environment(lox_entity_ptr_t const &parent) : m_parent{parent} {}
+
+    Environment() = default;
+    Environment(Environment const &) = default;
+    Environment(Environment &&) = default;
+    Environment &operator=(Environment const &) = default;
+    Environment &operator=(Environment &&) = default;
+
+    string ToString() const override { return "<environment>"; }
+
+    Environment *Parent() {
+        if (!m_parent)
+            return nullptr;
+        assert(dynamic_cast<Environment *>(m_parent.get()));
+        return static_cast<Environment *>(m_parent.get());
+    }
+    Environment const *Parent() const
+        { return const_cast<Environment *>(this)->Parent(); }
+
+    void Define(string_view name, optional<LoxValue> const &val)
+        { m_values.insert_or_assign(string{name}, val); }
+
+    LoxValue Lookup(token_t name) const {
+        if (auto it = m_values.find(string{name.lexeme});
+            it != m_values.end())
+        {
+            if (it->second) {
+                return *it->second;
+            } else {
+                throw runtime_error_t{name, format(
+                    "Accessing uninitialized variable '{}'", name.lexeme)};
+            }
+        }
+        if (Parent())
+            return Parent()->Lookup(name);
+
+        throw runtime_error_t{
+            name, format("Undefined variable '{}'", name.lexeme)};
+    }
+
+    void Assign(token_t name, LoxValue const &val) {
+        if (auto it = m_values.find(string{name.lexeme});
+            it != m_values.end())
+        {
+            it->second = val;
+            return;
+        }
+        if (Parent()) {
+            Parent()->Assign(name, val);
+            return;
+        }
+
+        throw runtime_error_t{
+            name, format("Undefined variable '{}'", name.lexeme)};
+    }
 };
 
-using environment_ptr_t = shared_ptr<environment_t>;
-
-inline void define(
-    environment_t &env, string_view name, optional<LoxValue> const &val)
-{
-    env.values.insert_or_assign(string{name}, val);
-}
-
-inline LoxValue lookup(environment_t const &env, token_t name)
-{
-    if (auto it = env.values.find(string{name.lexeme});
-        it != env.values.end())
-    {
-        if (it->second) {
-            return *it->second;
-        } else {
-            throw runtime_error_t{
-                name,
-                format("Accessing uninitialized variable '{}'", name.lexeme)};
-        }
-    }
-    if (env.parent)
-        return lookup(*env.parent, name);
-
-    throw runtime_error_t{name, format("Undefined variable '{}'", name.lexeme)};
-}
-
-inline void assign(environment_t &env, token_t name, LoxValue const &val)
-{
-    if (auto it = env.values.find(string{name.lexeme});
-        it != env.values.end())
-    {
-        it->second = val;
-        return;
-    }
-    if (env.parent) {
-        assign(*env.parent, name, val);
-        return;
-    }
-
-    throw runtime_error_t{name, format("Undefined variable '{}'", name.lexeme)};
-}
+using environment_ptr_t = shared_ptr<Environment>;
 
 inline environment_ptr_t make_child(environment_ptr_t const &parent)
 {
-    return make_shared<environment_t>(parent.get());
+    return make_shared<Environment>(parent);
 }
 
 class LoxFunction : public ILoxCallable {
-    FuncDeclStmt decl;
+    FuncDeclStmt m_decl;
+    environment_ptr_t m_closure;
 
 public:
-    explicit LoxFunction(FuncDeclStmt const &a_decl) : decl{a_decl} {}
+    LoxFunction(FuncDeclStmt const &decl, environment_ptr_t const &closure)
+        : m_decl{decl}, m_closure{closure} {}
 
     LoxFunction(LoxFunction const &) = default;
     LoxFunction(LoxFunction &&) = default;
     LoxFunction &operator=(LoxFunction const &) = default;
     LoxFunction &operator=(LoxFunction &&) = default;
 
-    int Arity() const override { return decl.params.size(); }
+    int Arity() const override { return m_decl.params.size(); }
     string ToString() const override
-        { return format("<fn {}>", decl.name.lexeme); }
+        { return format("<fn {}>", m_decl.name.lexeme); }
 
     LoxValue Call(Interpreter &, span<LoxValue>) override;
 };
@@ -104,10 +132,10 @@ class Interpreter : public IExprVisitor, public IStmtVisitor {
 
 public:
     Interpreter()
-        : m_global_env{make_shared<environment_t>()}
+        : m_global_env{make_shared<Environment>()}
         , m_cur_env{m_global_env}
     {
-        define(*m_global_env, "clock", make_ent<Clock>());
+        m_global_env->Define("clock", make_ent<Clock>());
     }
 
     ~Interpreter() {}
@@ -124,7 +152,7 @@ public:
         assert(m_dest);
         LoxValue *prev_dest = exchange(m_dest, nullptr);
         LoxValue const val = Evaluate(*assignment.val);
-        assign(*m_cur_env, assignment.target, val);
+        m_cur_env->Assign(assignment.target, val);
         *prev_dest = val;
     }
     void VisitUnaryExpr(UnaryExpr const &unary) override {
@@ -285,7 +313,7 @@ public:
     void VisitVariableExpr(VariableExpr const &variable) override {
         assert(m_dest);
         LoxValue *prev_dest = exchange(m_dest, nullptr);
-        *prev_dest = lookup(*m_cur_env, variable.id);
+        *prev_dest = m_cur_env->Lookup(variable.id);
     }
 
     void VisitBlockStmt(BlockStmt const &block) override
@@ -293,9 +321,8 @@ public:
     void VisitExpressionStmt(ExpressionStmt const &expression) override
         { Evaluate(*expression.expr); }
     void VisitFuncDeclStmt(FuncDeclStmt const &func_decl) override {
-        define(
-            *m_cur_env, func_decl.name.lexeme,
-            make_ent<LoxFunction>(func_decl));
+        m_cur_env->Define(
+            func_decl.name.lexeme, make_ent<LoxFunction>(func_decl, m_cur_env));
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         if (is_truthy(Evaluate(*if_stmt.cond)))
@@ -328,7 +355,7 @@ public:
         if (var.init)
             val = Evaluate(*var.init);
 
-        define(*m_cur_env, var.id.lexeme, val);
+        m_cur_env->Define(var.id.lexeme, val);
     }
     void VisitReplExprStmt(ReplExprStmt const &e) override
         { println("{}", to_string(Evaluate(*e.expr))); }
@@ -347,7 +374,9 @@ private:
         throw runtime_error_t{tok, "Operands must be numbers."};
     }
 
-    void ExecuteBlock(span<stmt_ptr_t const> stmts, environment_ptr_t &&env) {
+    void ExecuteBlock(
+        span<stmt_ptr_t const> stmts, environment_ptr_t const &env) {
+
         environment_ptr_t prev = m_cur_env;
         DEFERM(m_cur_env = move(prev));
         m_cur_env = move(env);
@@ -358,12 +387,12 @@ private:
 
 inline LoxValue LoxFunction::Call(Interpreter &interp, span<LoxValue> args)
 {
-    environment_ptr_t env = make_child(interp.m_cur_env);
-    for (usize i = 0; auto const &param : decl.params)
-        define(*env, param.lexeme, args[i++]);
+    environment_ptr_t env = make_child(m_closure);
+    for (usize i = 0; auto const &param : m_decl.params)
+        env->Define(param.lexeme, args[i++]);
     
     try {
-        interp.ExecuteBlock(decl.body, move(env));
+        interp.ExecuteBlock(m_decl.body, env);
         return c_nil;
     } catch (return_signal_t ret) {
         return move(ret.val);
