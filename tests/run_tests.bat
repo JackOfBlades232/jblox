@@ -12,6 +12,7 @@ call :RunTest time.lox %*
 call :RunTest variables.lox %*
 call :RunTest fib.lox %*
 call :RunTest closures.lox %*
+call :RunTest lambdas.lox %*
 @REM call :RunTest objects.lox %*
 
 popd

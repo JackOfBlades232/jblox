@@ -96,21 +96,29 @@ inline environment_ptr_t make_child(environment_ptr_t const &parent)
 }
 
 class LoxFunction : public ILoxCallable {
-    FuncDeclStmt m_decl;
+    FunctionalExpr m_def;
     environment_ptr_t m_closure;
+    optional<token_t> m_name{};
 
 public:
     LoxFunction(FuncDeclStmt const &decl, environment_ptr_t const &closure)
-        : m_decl{decl}, m_closure{closure} {}
+        : m_def{*static_cast<FunctionalExpr const *>(decl.func.get())}
+        , m_closure{closure}
+        , m_name{decl.name} {
+
+        assert(dynamic_cast<FunctionalExpr const *>(decl.func.get()));
+    }
+    LoxFunction(FunctionalExpr const &def, environment_ptr_t const &closure)
+        : m_def{def}, m_closure{closure} {}
 
     LoxFunction(LoxFunction const &) = default;
     LoxFunction(LoxFunction &&) = default;
     LoxFunction &operator=(LoxFunction const &) = default;
     LoxFunction &operator=(LoxFunction &&) = default;
 
-    int Arity() const override { return m_decl.params.size(); }
+    int Arity() const override { return m_def.params.size(); }
     string ToString() const override
-        { return format("<fn {}>", m_decl.name.lexeme); }
+        { return m_name ? format("<fn {}>", m_name->lexeme) : "<anon fn>"; }
 
     LoxValue Call(Interpreter &, span<LoxValue>) override;
 };
@@ -315,6 +323,11 @@ public:
         LoxValue *prev_dest = exchange(m_dest, nullptr);
         *prev_dest = m_cur_env->Lookup(variable.id);
     }
+    void VisitFunctionalExpr(FunctionalExpr const &func) override {
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
+        *prev_dest = make_ent<LoxFunction>(func, m_cur_env);
+    }
 
     void VisitBlockStmt(BlockStmt const &block) override
         { ExecuteBlock(block.stmts, make_child(m_cur_env)); }
@@ -388,11 +401,11 @@ private:
 inline LoxValue LoxFunction::Call(Interpreter &interp, span<LoxValue> args)
 {
     environment_ptr_t env = make_child(m_closure);
-    for (usize i = 0; auto const &param : m_decl.params)
+    for (usize i = 0; auto const &param : m_def.params)
         env->Define(param.lexeme, args[i++]);
     
     try {
-        interp.ExecuteBlock(m_decl.body, env);
+        interp.ExecuteBlock(m_def.body, env);
         return c_nil;
     } catch (return_signal_t ret) {
         return move(ret.val);

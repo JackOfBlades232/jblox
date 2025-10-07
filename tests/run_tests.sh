@@ -20,6 +20,7 @@ function run_all_tests {
     run_test variables.lox
     run_test fib.lox
     run_test closures.lox
+    run_test lambdas.lox
     #run_test objects.lox
 }
 

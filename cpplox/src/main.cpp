@@ -320,6 +320,17 @@ bool match(parser_t &parser, initializer_list<token_type_t> token_types)
     return false;
 }
 
+bool check_n(parser_t const &parser, initializer_list<token_type_t> token_types)
+{
+    for (usize i = parser.current; token_type_t type : token_types) {
+        if (i >= parser.tokens.size() || parser.tokens[i].type != type)
+            return false;
+        ++i;
+    }
+
+    return true;
+}
+
 token_t consume(parser_t &parser, token_type_t type, string_view message)
 {
     if (check(parser, type))
@@ -330,6 +341,36 @@ token_t consume(parser_t &parser, token_type_t type, string_view message)
 
 expr_ptr_t parse_expr(parser_t &parser);
 expr_ptr_t parse_assignment(parser_t &parser);
+stmt_ptr_t parse_block(parser_t &parser);
+
+expr_ptr_t parse_functional(parser_t &parser)
+{
+    consume(
+        parser, e_tt_left_paren, "Expected '(' after func/method name.");
+    
+    vector<token_t> params{};
+    if (!check(parser, e_tt_right_paren)) {
+        do {
+            if (params.size() >= 255) {
+                error(parser, peek(parser),
+                    "Can't define a func/method with more than 255 params.");
+            }
+
+            params.push_back(
+                consume(parser, e_tt_identifier, "Expected parameter name."));
+        } while (match(parser, e_tt_comma));
+    }
+
+    consume(
+        parser, e_tt_right_paren, "Expected ')' after parameter list.");
+
+    consume(
+        parser, e_tt_left_brace, "Expected '{' before func/method body.");
+    auto body =
+        move(static_cast<BlockStmt *>(parse_block(parser).get())->stmts);
+
+    return make_shared<FunctionalExpr>(move(params), move(body));
+}
 
 expr_ptr_t parse_primary(parser_t &parser)
 {
@@ -343,6 +384,8 @@ expr_ptr_t parse_primary(parser_t &parser)
         return make_shared<LiteralExpr>(previous(parser).literal);
     if (match(parser, e_tt_identifier))
         return make_shared<VariableExpr>(previous(parser));
+    if (match(parser, e_tt_fun))
+        return parse_functional(parser);
 
     if (match(parser, e_tt_left_paren)) {
         expr_ptr_t expr = parse_expr(parser);
@@ -649,31 +692,9 @@ stmt_ptr_t parse_stmt(parser_t &parser)
 stmt_ptr_t parse_func_decl(parser_t &parser)
 {
     token_t name = consume(
-         parser, e_tt_identifier, "Expected function/method name.");
-    consume(
-        parser, e_tt_left_paren, "Expected '(' after function/method name.");
-    
-    vector<token_t> params{};
-    if (!check(parser, e_tt_right_paren)) {
-        do {
-            if (params.size() >= 255) {
-                error(parser, peek(parser),
-                    "Can't define a function/method with more than 255 params.");
-            }
-
-            params.push_back(
-                consume(parser, e_tt_identifier, "Expected parameter name."));
-        } while (match(parser, e_tt_comma));
-    }
-
-    consume(
-        parser, e_tt_right_paren, "Expected ')' after parameter list.");
-
-    consume(
-        parser, e_tt_left_brace, "Expected '{' before function/method body.");
-    auto body =
-        move(static_cast<BlockStmt *>(parse_block(parser).get())->stmts);
-    return make_shared<FuncDeclStmt>(name, move(params), move(body));
+         parser, e_tt_identifier, "Expected func/method name.");
+    expr_ptr_t func = parse_functional(parser);
+    return make_shared<FuncDeclStmt>(name, func);
 }
 
 stmt_ptr_t parse_var_decl(parser_t &parser)
@@ -719,9 +740,10 @@ void sync_parser(parser_t &parser)
 stmt_ptr_t parse_decl(parser_t &parser)
 {
     try {
-        // @TODO: lookahead here to see if it's has an identifier following
-        if (match(parser, e_tt_fun))
+        if (check_n(parser, {e_tt_fun, e_tt_identifier})) {
+            advance(parser);
             return parse_func_decl(parser);
+        }
         if (match(parser, e_tt_var))
             return parse_var_decl(parser);
 
@@ -800,6 +822,20 @@ public:
     }
     void VisitVariableExpr(VariableExpr const &variable) override
         { m_accum.append(variable.id.lexeme); }
+    void VisitFunctionalExpr(FunctionalExpr const &func) override {
+        m_accum.append("(lambda ");
+        m_accum.append(" (");
+        bool comma = false;
+        for (auto const &param : func.params) {
+            if (exchange(comma, true))
+                m_accum.append(", ");
+            m_accum.append(param.lexeme);
+        }
+        m_accum.append(") {\n");
+        for (auto const &stmt : func.body)
+            stmt->Accept(*this);
+        m_accum.append("})");
+    }
 
     void VisitBlockStmt(BlockStmt const &block) override {
         m_accum.append("{\n");
@@ -812,17 +848,20 @@ public:
         m_accum.append(";\n");
     }
     void VisitFuncDeclStmt(FuncDeclStmt const &func_decl) override {
-        m_accum.append("declare function/method ");
+        m_accum.append("declare func/method ");
         m_accum.append(func_decl.name.lexeme);
+        assert(dynamic_cast<FunctionalExpr const *>(func_decl.func.get()));
+        FunctionalExpr const &func =
+            *static_cast<FunctionalExpr const *>(func_decl.func.get());
         m_accum.append(" (");
         bool comma = false;
-        for (auto const &param : func_decl.params) {
+        for (auto const &param : func.params) {
             if (exchange(comma, true))
                 m_accum.append(", ");
             m_accum.append(param.lexeme);
         }
         m_accum.append(")\n{\n");
-        for (auto const &stmt : func_decl.body)
+        for (auto const &stmt : func.body)
             stmt->Accept(*this);
         m_accum.append("}\n");
     }
