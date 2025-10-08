@@ -21,10 +21,6 @@ struct return_signal_t {
 // the environment stack. Do mark and sweep from actual live environment
 // to break strong cycles. This will also be important when objects become
 // a thing.
-// @TODO: separate concept of 'gc-d ref' and 'callable or object' --
-// a LoxValue can hold a callable or and object, not an environment.
-// However, when we do some form of mark & sweep, environments have to
-// participate.
 
 class Environment : public ILoxEntity {
     lox_entity_ptr_t m_parent{};
@@ -38,8 +34,6 @@ public:
     Environment(Environment &&) = default;
     Environment &operator=(Environment const &) = default;
     Environment &operator=(Environment &&) = default;
-
-    string ToString() const override { return "<environment>"; }
 
     Environment *Parent() {
         if (!m_parent)
@@ -138,7 +132,7 @@ public:
         : m_global_env{make_shared<Environment>()}
         , m_cur_env{m_global_env}
     {
-        m_global_env->Define("clock", make_ent<Clock>());
+        m_global_env->Define("clock", make_object<Clock>());
     }
 
     ~Interpreter() {}
@@ -321,7 +315,7 @@ public:
     void VisitFunctionalExpr(FunctionalExpr const &func) override {
         assert(m_dest);
         LoxValue *prev_dest = exchange(m_dest, nullptr);
-        *prev_dest = make_ent<LoxFunction>(func, m_cur_env);
+        *prev_dest = make_object<LoxFunction>(func, m_cur_env);
     }
 
     void VisitBlockStmt(BlockStmt const &block) override
@@ -330,7 +324,8 @@ public:
         { Evaluate(*expression.expr); }
     void VisitFuncDeclStmt(FuncDeclStmt const &func_decl) override {
         m_cur_env->Define(
-            func_decl.name.lexeme, make_ent<LoxFunction>(func_decl, m_cur_env));
+            func_decl.name.lexeme,
+            make_object<LoxFunction>(func_decl, m_cur_env));
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         if (is_truthy(Evaluate(*if_stmt.cond)))
