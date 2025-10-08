@@ -90,20 +90,6 @@ public:
 
 using environment_ptr_t = shared_ptr<Environment>;
 
-inline environment_ptr_t make_child(environment_ptr_t const &parent)
-{
-    return make_shared<Environment>(parent);
-}
-
-inline environment_ptr_t make_define(
-    environment_ptr_t const &env, string_view name,
-    optional<LoxValue> const &val)
-{
-    auto nenv = make_child(env);
-    nenv->Define(name, val);
-    return nenv;
-}
-
 class LoxFunction : public ILoxCallable {
     FunctionalExpr m_def;
     environment_ptr_t m_closure;
@@ -339,13 +325,12 @@ public:
     }
 
     void VisitBlockStmt(BlockStmt const &block) override
-        { ExecuteBlock(block.stmts, make_child(m_cur_env)); }
+        { ExecuteBlock(block.stmts, make_shared<Environment>(m_cur_env)); }
     void VisitExpressionStmt(ExpressionStmt const &expression) override
         { Evaluate(*expression.expr); }
     void VisitFuncDeclStmt(FuncDeclStmt const &func_decl) override {
-        m_cur_env = make_define(
-            m_cur_env, func_decl.name.lexeme,
-            make_ent<LoxFunction>(func_decl, m_cur_env));
+        m_cur_env->Define(
+            func_decl.name.lexeme, make_ent<LoxFunction>(func_decl, m_cur_env));
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         if (is_truthy(Evaluate(*if_stmt.cond)))
@@ -378,7 +363,7 @@ public:
         if (var.init)
             val = Evaluate(*var.init);
 
-        m_cur_env = make_define(m_cur_env, var.id.lexeme, val);
+        m_cur_env->Define(var.id.lexeme, val);
     }
     void VisitReplExprStmt(ReplExprStmt const &e) override
         { println("{}", to_string(Evaluate(*e.expr))); }
@@ -410,7 +395,7 @@ private:
 
 inline LoxValue LoxFunction::Call(Interpreter &interp, span<LoxValue> args)
 {
-    environment_ptr_t env = make_child(m_closure);
+    environment_ptr_t env = make_shared<Environment>(m_closure);
     for (usize i = 0; auto const &param : m_def.params)
         env->Define(param.lexeme, args[i++]);
     
