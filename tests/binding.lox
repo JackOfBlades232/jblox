@@ -6,4 +6,6 @@ var a = "global";
     showA();
     var a = "block";
     showA();
+
+    print "Sink " + a;
 }

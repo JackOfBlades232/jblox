@@ -128,7 +128,7 @@ int main(int argc, char **argv)
                     {"Expression", {{"expr_ptr_t", "expr"}}},
                     {"FuncDecl", {
                         {"token_t", "name"},
-                        {"expr_ptr_t", "func"},
+                        {"FunctionalExpr", "func"},
                     }},
                     {"If", {
                         {"expr_ptr_t", "cond"},
@@ -144,7 +144,7 @@ int main(int argc, char **argv)
                         {"token_t", "keyword"},
                         {"expr_ptr_t", "value"}
                     }},
-                    {"Break", {}},
+                    {"Break", {{"token_t", "keyword"}}},
                     {"Var", {
                         {"token_t", "id"},
                         {"expr_ptr_t", "init"}

@@ -125,3 +125,9 @@ public:
 #endif
     }
 } g_hires_timer{};
+
+template <class T>
+inline void hash_combine(usize &seed, T const &v)
+{
+  seed ^= hash<T>{}(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+}

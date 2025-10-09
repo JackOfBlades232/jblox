@@ -138,3 +138,30 @@ inline string to_string(token_t tok)
         "<{}> ({}) : line {}",
         tok.lexeme, c_tt_debug_names[tok.type], tok.line);
 }
+
+inline bool operator==(token_t t1, token_t t2) {
+    if (t1.type == t2.type &&
+        t1.lexeme.data() == t2.lexeme.data() &&
+        t1.lexeme.size() == t2.lexeme.size())
+    {
+        // assert(t1.literal == t2.literal);
+        assert(t1.line == t2.line);
+        return true;
+    }
+
+    return false;
+}
+
+namespace std
+{
+template <>
+struct hash<token_t> {
+    usize operator()(token_t tok) const {
+        size_t seed = 0;
+        hash_combine(seed, int(tok.type));
+        hash_combine(seed, u64(tok.lexeme.data()));
+        hash_combine(seed, u64(tok.lexeme.size()));
+        return seed;
+    }
+};
+}

@@ -2,13 +2,15 @@
 #include <value.hpp>
 #include <tokens.hpp>
 #include <ast.hpp>
+#include <semantic.hpp>
 
 enum errc_t {
     e_ec_ok = 0,
     e_ec_arg_error = 1,
     e_ec_sys_error = 2,
     e_ec_parsing_error = 13,
-    e_ec_runtime_error = 69,
+    e_ec_semantic_error = 69,
+    e_ec_runtime_error = 4221,
 };
 
 struct scanner_t {
@@ -663,10 +665,11 @@ stmt_ptr_t parse_block(parser_t &parser)
 
 stmt_ptr_t parse_break(parser_t &parser)
 {
+    token_t kw = previous(parser);
     if (!parser.in_loop)
-        error(parser, previous(parser), "Encountered 'break' outside a loop.");
+        error(parser, kw, "Encountered 'break' outside a loop.");
     consume(parser, e_tt_semicolon, "Expected ';' after break.");
-    return make_shared<BreakStmt>();
+    return make_shared<BreakStmt>(kw);
 }
 
 stmt_ptr_t parse_stmt(parser_t &parser)
@@ -694,7 +697,8 @@ stmt_ptr_t parse_func_decl(parser_t &parser)
     token_t name = consume(
          parser, e_tt_identifier, "Expected func/method name.");
     expr_ptr_t func = parse_functional(parser);
-    return make_shared<FuncDeclStmt>(name, func);
+    return make_shared<FuncDeclStmt>(
+        name, move(*dynamic_cast<FunctionalExpr *>(func.get())));
 }
 
 stmt_ptr_t parse_var_decl(parser_t &parser)
@@ -850,18 +854,15 @@ public:
     void VisitFuncDeclStmt(FuncDeclStmt const &func_decl) override {
         m_accum.append("declare func/method ");
         m_accum.append(func_decl.name.lexeme);
-        assert(dynamic_cast<FunctionalExpr const *>(func_decl.func.get()));
-        FunctionalExpr const &func =
-            *static_cast<FunctionalExpr const *>(func_decl.func.get());
         m_accum.append(" (");
         bool comma = false;
-        for (auto const &param : func.params) {
+        for (auto const &param : func_decl.func.params) {
             if (exchange(comma, true))
                 m_accum.append(", ");
             m_accum.append(param.lexeme);
         }
         m_accum.append(")\n{\n");
-        for (auto const &stmt : func.body)
+        for (auto const &stmt : func_decl.func.body)
             stmt->Accept(*this);
         m_accum.append("}\n");
     }
@@ -954,6 +955,10 @@ errc_t run(string_view code, lox_t &lox)
         for (auto const &stmt : stmts)
             print("{}", AstPrinter{}.Print(*stmt));
     }
+
+    Resolver{&lox.interp, &lox}.Resolve(stmts);
+    if (lox.had_error)
+        return e_ec_semantic_error;
 
     interpret(stmts, lox);
     if (lox.had_runtime_error)
