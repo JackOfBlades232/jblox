@@ -114,7 +114,18 @@ public:
         Declare(class_decl.name);
         Define(class_decl.name);
 
+        // @TODO: separate scope for names of static methods
+        for (auto const &method : class_decl.static_methods) {
+            if (method.name.lexeme == "init" && method.func.params.size()) {
+                error(*m_lox, method.name,
+                    "Static class init can't have arguments.");
+            }
+
+            ResolveFunc(method.func, e_fts_in_function);
+        }
+
         BeginScope();
+
         auto const this_rec = var_record_t{
             .decl = c_implicit_this_tok,
             .id = CurrentScope()->var_id_allocator++,
@@ -123,12 +134,14 @@ public:
         };
         CurrentScope()->vars.emplace("this", this_rec);
         m_interp->ResolveDeclaration(this_rec.decl, this_rec.id);
+
         for (auto const &method : class_decl.methods) {
             ResolveFunc(
                 method.func,
                 method.name.lexeme == "init" ? e_fts_in_initializer :
                     e_fts_in_method);
         }
+
         EndScope();
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {

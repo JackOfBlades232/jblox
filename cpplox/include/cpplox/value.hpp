@@ -124,12 +124,12 @@ public:
 
 class Interpreter;
 
-struct ILoxCallable : ILoxObject {
+struct ILoxCallable : virtual ILoxObject {
     virtual LoxValue Call(Interpreter &, span<LoxValue>) = 0;
     virtual int Arity() const = 0;
 };
 
-struct ILoxInstance : ILoxObject {
+struct ILoxInstance : virtual ILoxObject {
     virtual LoxValue Get(Interpreter &, token_t const &) = 0;
     virtual void Set(token_t const &, LoxValue const &) = 0;
 };
@@ -146,12 +146,12 @@ inline bool LoxValue::IsInstance() const
 inline ILoxCallable &LoxValue::GetCallable()
 {
     assert(IsCallable());
-    return *static_cast<ILoxCallable *>(GetObject().get());
+    return *dynamic_cast<ILoxCallable *>(GetObject().get());
 }
 inline ILoxInstance &LoxValue::GetInstance()
 {
     assert(IsInstance());
-    return *static_cast<ILoxInstance *>(GetObject().get());
+    return *dynamic_cast<ILoxInstance *>(GetObject().get());
 }
 
 inline const LoxValue c_nil{};

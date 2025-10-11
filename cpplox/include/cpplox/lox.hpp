@@ -153,15 +153,30 @@ public:
 
 using lox_function_ptr_t = shared_ptr<LoxFunction>;
 
-class LoxClass : public ILoxCallable, public enable_shared_from_this<LoxClass> {
+class LoxClass
+    : public ILoxCallable
+    , public ILoxInstance
+    , public enable_shared_from_this<LoxClass> {
+
     string_view m_name;
     unordered_map<string_view, lox_function_ptr_t> m_methods{};
+    unordered_map<string_view, lox_function_ptr_t> m_static_methods{};
 
     using method_map_t = decay_t<decltype(m_methods)>;
 
 public:
-    explicit LoxClass(string_view name, method_map_t methods)
-        : m_name{name}, m_methods{move(methods)} {}
+    LoxClass(
+            string_view name,
+            method_map_t methods,
+            method_map_t static_methods,
+            Interpreter &interp)
+        : m_name{name}
+        , m_methods{move(methods)}
+        , m_static_methods{move(static_methods)} {
+
+        if (auto init = FindStaticMethod("init"))
+            init->Call(interp, {});
+    }
 
     string ToString() const override { return string{m_name}; }
     int Arity() const override {
@@ -172,8 +187,19 @@ public:
 
     LoxValue Call(Interpreter &, span<LoxValue>) override;
 
-    lox_function_ptr_t FindMethod(string_view name) const {
-        if (auto it = m_methods.find(name); it != m_methods.end())
+    LoxValue Get(Interpreter &, token_t const &) override;
+    void Set(token_t const &, LoxValue const &) override;
+
+    lox_function_ptr_t FindMethod(string_view name) const
+        { return FindMethodInMap(m_methods, name); }
+    lox_function_ptr_t FindStaticMethod(string_view name) const
+        { return FindMethodInMap(m_static_methods, name); }
+
+public:
+    static lox_function_ptr_t FindMethodInMap(
+        method_map_t const &method_map, string_view name) {
+
+        if (auto it = method_map.find(name); it != method_map.end())
             return it->second;
         return nullptr;
     }
@@ -465,16 +491,28 @@ public:
     }
     void VisitClassDeclStmt(ClassDeclStmt const &class_decl) override {
         unordered_map<string_view, lox_function_ptr_t> methods{};
+        unordered_map<string_view, lox_function_ptr_t> static_methods{};
         for (auto const &method : class_decl.methods) {
             methods.emplace(
                 method.name.lexeme,
                 make_shared<LoxFunction>(
-                    method, m_cur_env, method.name.lexeme == "init"));
+                    method, m_cur_env, method.name.lexeme == "init")
+            );
+        }
+        for (auto const &method : class_decl.static_methods) {
+            static_methods.emplace(
+                method.name.lexeme,
+                make_shared<LoxFunction>(method, m_cur_env, false));
         }
 
         DefineVar(
             class_decl.name,
-            make_object<LoxClass>(class_decl.name.lexeme, move(methods)));
+            make_object<LoxClass>(
+                class_decl.name.lexeme,
+                move(methods),
+                move(static_methods),
+                *this)
+        );
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         if (is_truthy(Evaluate(*if_stmt.cond)))
@@ -557,7 +595,6 @@ inline LoxValue LoxFunction::Call(Interpreter &interp, span<LoxValue> args)
     for (usize i = 0; auto const &param : m_def.params)
         env->Define(interp.m_resolved_local_decls.at(param), args[i++]);
 
-    // This is a hack -- we know that implicit this is always at id 0
     auto findThis = [&, this] {
         return m_closure->Lookup(
             interp.m_resolved_local_decls.at(c_implicit_this_tok), {});
@@ -591,6 +628,20 @@ inline LoxValue LoxClass::Call(Interpreter &interp, span<LoxValue> args)
     if (init)
         init->Bind(interp, inst).GetCallable().Call(interp, args);
     return inst;
+}
+
+inline LoxValue LoxClass::Get(Interpreter &interp, token_t const &name)
+{
+    if (auto m = FindStaticMethod(name.lexeme))
+        return static_pointer_cast<ILoxObject>(m);
+
+    throw runtime_error_t{
+        name, format("Undefined static method '{}'", name.lexeme)};
+}
+
+inline void LoxClass::Set(token_t const &name, LoxValue const &)
+{
+    throw runtime_error_t{name, "Can't define properties on classes."};
 }
 
 inline LoxValue LoxInstance::Get(Interpreter &interp, token_t const &name)

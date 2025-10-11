@@ -715,14 +715,16 @@ stmt_ptr_t parse_class_decl(parser_t &parser)
     consume(parser, e_tt_left_brace, "Expected '{' before class body.");
 
     vector<FuncDeclStmt> methods{};
+    vector<FuncDeclStmt> static_methods{};
     while (!check(parser, e_tt_right_brace) && !done(parser)) {
-        methods.emplace_back(
+        (match(parser, e_tt_class) ? static_methods : methods).emplace_back(
             *dynamic_cast<FuncDeclStmt *>(parse_func_decl(parser).get()));
     }
 
     consume(parser, e_tt_right_brace, "Expected '}' after class body.");
 
-    return make_shared<ClassDeclStmt>(name, move(methods));
+    return make_shared<ClassDeclStmt>(
+        name, move(methods), move(static_methods));
 }
 
 stmt_ptr_t parse_var_decl(parser_t &parser)
@@ -913,6 +915,10 @@ public:
         m_accum.append("declare class ");
         m_accum.append(class_decl.name.lexeme);
         m_accum.append(" {\n");
+        m_accum.append("static:\n");
+        for (auto const &method : class_decl.static_methods)
+            method.Accept(*this);
+        m_accum.append("dynamic:\n");
         for (auto const &method : class_decl.methods)
             method.Accept(*this);
         m_accum.append("}\n");
