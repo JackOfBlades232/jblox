@@ -1,0 +1,39 @@
+class Mordor {
+    invade() {
+        print "Not so fast!";
+        this.f = 1;
+        return this;
+    }
+
+    retry() {
+        this.f = this.f + 1;
+        print this.f;
+    }
+}
+
+print Mordor;
+print Mordor();
+
+var nazghul = Mordor();
+nazghul.ride = "Flying worm";
+print nazghul.ride;
+
+nazghul.invade();
+Mordor().invade();
+
+print nazghul.f;
+nazghul.retry();
+nazghul.retry();
+
+Mordor().invade().retry();
+
+class Hobbit {
+    init(name, surname) {
+        print name + " " + surname + " was born!";
+    }
+}
+
+var frodo = Hobbit("Frodo", "Baggins");
+print Hobbit("Sam", "Gamgee");
+
+print frodo.init("Frodo", "the Ringbearer");

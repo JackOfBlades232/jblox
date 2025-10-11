@@ -101,7 +101,6 @@ inline bool is_unary(token_type_t type)
 
 inline bool is_binary(token_type_t type)
 {
-    // @TODO: dot is binary too
     switch (type) {
     case e_tt_comma:
     case e_tt_minus:
@@ -165,3 +164,6 @@ struct hash<token_t> {
     }
 };
 }
+
+inline const token_t c_implicit_this_tok =
+    token_t{e_tt_this, "this", c_nil, usize(-1)};

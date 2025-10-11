@@ -28,12 +28,7 @@ class Environment : public ILoxEntity {
 
 public:
     explicit Environment(lox_entity_ptr_t const &parent) : m_parent{parent} {}
-
     Environment() = default;
-    Environment(Environment const &) = default;
-    Environment(Environment &&) = default;
-    Environment &operator=(Environment const &) = default;
-    Environment &operator=(Environment &&) = default;
 
     void Define(int id, optional<LoxValue> const &val) {
         if (m_values.size() <= id)
@@ -81,12 +76,6 @@ class GlobalEnvironment : public ILoxEntity {
     unordered_map<string, optional<LoxValue>> m_values{};
 
 public:
-    GlobalEnvironment() = default;
-    GlobalEnvironment(GlobalEnvironment const &) = default;
-    GlobalEnvironment(GlobalEnvironment &&) = default;
-    GlobalEnvironment &operator=(GlobalEnvironment const &) = default;
-    GlobalEnvironment &operator=(GlobalEnvironment &&) = default;
-
     void Define(string_view name, optional<LoxValue> const &val)
         { m_values.insert_or_assign(string{name}, val); }
 
@@ -122,28 +111,94 @@ public:
 using environment_ptr_t = shared_ptr<Environment>;
 using global_environment_ptr_t = shared_ptr<GlobalEnvironment>;
 
+class LoxFunction;
+class LoxClass;
+class LoxInstance;
+
 class LoxFunction : public ILoxCallable {
     FunctionalExpr m_def;
     environment_ptr_t m_closure;
     optional<token_t> m_name{};
+    bool m_init = false;
 
 public:
-    LoxFunction(FuncDeclStmt const &decl, environment_ptr_t const &closure)
-        : m_def{decl.func}, m_closure{closure}, m_name{decl.name} {}
-    LoxFunction(FunctionalExpr const &def, environment_ptr_t const &closure)
-        : m_def{def}, m_closure{closure} {}
-
-    LoxFunction(LoxFunction const &) = default;
-    LoxFunction(LoxFunction &&) = default;
-    LoxFunction &operator=(LoxFunction const &) = default;
-    LoxFunction &operator=(LoxFunction &&) = default;
+    LoxFunction(
+            FuncDeclStmt const &decl,
+            environment_ptr_t const &closure,
+            bool init)
+        : m_def{decl.func}
+        , m_closure{closure}
+        , m_name{decl.name}
+        , m_init{init} {}
+    LoxFunction(
+            FunctionalExpr const &def,
+            environment_ptr_t const &closure,
+            bool init)
+        : m_def{def}, m_closure{closure}, m_init{init} {}
+    LoxFunction(
+            FunctionalExpr const &def,
+            optional<token_t> const &name,
+            environment_ptr_t const &closure,
+            bool init)
+        : m_def{def}, m_name{name}, m_closure{closure}, m_init{init} {}
 
     int Arity() const override { return m_def.params.size(); }
     string ToString() const override
         { return m_name ? format("<fn {}>", m_name->lexeme) : "<anon fn>"; }
 
     LoxValue Call(Interpreter &, span<LoxValue>) override;
+
+    LoxValue Bind(Interpreter &, LoxValue const &);
 };
+
+using lox_function_ptr_t = shared_ptr<LoxFunction>;
+
+class LoxClass : public ILoxCallable, public enable_shared_from_this<LoxClass> {
+    string_view m_name;
+    unordered_map<string_view, lox_function_ptr_t> m_methods{};
+
+    using method_map_t = decay_t<decltype(m_methods)>;
+
+public:
+    explicit LoxClass(string_view name, method_map_t methods)
+        : m_name{name}, m_methods{move(methods)} {}
+
+    string ToString() const override { return string{m_name}; }
+    int Arity() const override {
+        if (auto init = FindMethod("init"))
+            return init->Arity();
+        return 0;
+    }
+
+    LoxValue Call(Interpreter &, span<LoxValue>) override;
+
+    lox_function_ptr_t FindMethod(string_view name) const {
+        if (auto it = m_methods.find(name); it != m_methods.end())
+            return it->second;
+        return nullptr;
+    }
+};
+
+using lox_class_ptr_t = shared_ptr<LoxClass>;
+
+class LoxInstance
+    : public ILoxInstance
+    , public enable_shared_from_this<LoxInstance> {
+
+    lox_class_ptr_t m_class{};
+    unordered_map<string_view, LoxValue> m_fields{};
+
+public:
+    explicit LoxInstance(lox_class_ptr_t const &cls) : m_class{cls} {}
+
+    string ToString() const override
+        { return format("<{} instance>", m_class->ToString()); }
+
+    LoxValue Get(Interpreter &, token_t const &) override;
+    void Set(token_t const &, LoxValue const &) override;
+};
+
+using lox_instance_ptr_t = shared_ptr<LoxInstance>;
 
 class Interpreter : public IExprVisitor, public IStmtVisitor {
     struct resolved_var_t {
@@ -160,6 +215,8 @@ class Interpreter : public IExprVisitor, public IStmtVisitor {
     LoxValue *m_dest = nullptr;
 
     friend class LoxFunction;
+    friend class LoxClass;
+    friend class LoxInstance;
 
     struct Clock : public ILoxCallable {
         LoxValue Call(Interpreter &, span<LoxValue>) override
@@ -357,6 +414,35 @@ public:
 
         *prev_dest = callable.Call(*this, arg_values);
     }
+    void VisitGetExpr(GetExpr const &get) override {
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
+
+        LoxValue obj = Evaluate(*get.obj);
+        if (!obj.IsInstance())
+            throw runtime_error_t{get.name, "Only instances have properties."};
+
+        *prev_dest = obj.GetInstance().Get(*this, get.name);
+    }
+    void VisitSetExpr(SetExpr const &set) override {
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
+
+        LoxValue obj = Evaluate(*set.obj);
+        if (!obj.IsInstance())
+            throw runtime_error_t{set.name, "Only instances have fields."};
+
+        LoxValue const val = Evaluate(*set.value);
+        obj.GetInstance().Set(set.name, val);
+
+        *prev_dest = val;
+    }
+    void VisitThisExpr(ThisExpr const &t) override {
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
+        LoxValue const val = LookupVar(t.keyword, t); 
+        *prev_dest = val;
+    }
     void VisitVariableExpr(VariableExpr const &variable) override {
         assert(m_dest);
         LoxValue *prev_dest = exchange(m_dest, nullptr);
@@ -365,7 +451,7 @@ public:
     void VisitFunctionalExpr(FunctionalExpr const &func) override {
         assert(m_dest);
         LoxValue *prev_dest = exchange(m_dest, nullptr);
-        *prev_dest = make_object<LoxFunction>(func, m_cur_env);
+        *prev_dest = make_object<LoxFunction>(func, m_cur_env, false);
     }
 
     void VisitBlockStmt(BlockStmt const &block) override
@@ -373,15 +459,22 @@ public:
     void VisitExpressionStmt(ExpressionStmt const &expression) override
         { Evaluate(*expression.expr); }
     void VisitFuncDeclStmt(FuncDeclStmt const &func_decl) override {
-        if (!m_cur_env) {
-            m_global_env->Define(
-                func_decl.name.lexeme,
-                make_object<LoxFunction>(func_decl, nullptr));
-        } else {
-            m_cur_env->Define(
-                m_resolved_local_decls.at(func_decl.name),
-                make_object<LoxFunction>(func_decl, m_cur_env));
+        DefineVar(
+            func_decl.name,
+            make_object<LoxFunction>(func_decl, m_cur_env, false));
+    }
+    void VisitClassDeclStmt(ClassDeclStmt const &class_decl) override {
+        unordered_map<string_view, lox_function_ptr_t> methods{};
+        for (auto const &method : class_decl.methods) {
+            methods.emplace(
+                method.name.lexeme,
+                make_shared<LoxFunction>(
+                    method, m_cur_env, method.name.lexeme == "init"));
         }
+
+        DefineVar(
+            class_decl.name,
+            make_object<LoxClass>(class_decl.name.lexeme, move(methods)));
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         if (is_truthy(Evaluate(*if_stmt.cond)))
@@ -413,11 +506,7 @@ public:
         optional<LoxValue> val{};
         if (var.init)
             val = Evaluate(*var.init);
-
-        if (!m_cur_env)
-            m_global_env->Define(var.id.lexeme, val);
-        else
-            m_cur_env->Define(m_resolved_local_decls.at(var.id), val);
+        DefineVar(var.id, val);
     }
     void VisitReplExprStmt(ReplExprStmt const &e) override
         { println("{}", to_string(Evaluate(*e.expr))); }
@@ -453,6 +542,13 @@ private:
         else
             return m_cur_env->LookupAt(it->second.id, it->second.depth, name);
     }
+
+    void DefineVar(token_t name, optional<LoxValue> const &val) {
+        if (!m_cur_env)
+            m_global_env->Define(name.lexeme, val);
+        else
+            m_cur_env->Define(m_resolved_local_decls.at(name), val);
+    }
 };
 
 inline LoxValue LoxFunction::Call(Interpreter &interp, span<LoxValue> args)
@@ -460,13 +556,59 @@ inline LoxValue LoxFunction::Call(Interpreter &interp, span<LoxValue> args)
     environment_ptr_t env = make_shared<Environment>(m_closure);
     for (usize i = 0; auto const &param : m_def.params)
         env->Define(interp.m_resolved_local_decls.at(param), args[i++]);
+
+    // This is a hack -- we know that implicit this is always at id 0
+    auto findThis = [&, this] {
+        return m_closure->Lookup(
+            interp.m_resolved_local_decls.at(c_implicit_this_tok), {});
+    };
     
     try {
         interp.ExecuteBlock(m_def.body, env);
-        return c_nil;
     } catch (return_signal_t ret) {
+        if (m_init)
+            return findThis();
         return move(ret.val);
     }
+
+    return m_init ? findThis() : c_nil;
+}
+
+inline LoxValue LoxFunction::Bind(
+    Interpreter &interp, LoxValue const &inst)
+{
+    environment_ptr_t env = make_shared<Environment>(m_closure);
+    env->Define(
+        interp.m_resolved_local_decls.at(c_implicit_this_tok),
+        inst);
+    return make_object<LoxFunction>(m_def, m_name, env, m_init);
+}
+
+inline LoxValue LoxClass::Call(Interpreter &interp, span<LoxValue> args)
+{
+    auto inst = make_object<LoxInstance>(shared_from_this());
+    auto init = FindMethod("init");
+    if (init)
+        init->Bind(interp, inst).GetCallable().Call(interp, args);
+    return inst;
+}
+
+inline LoxValue LoxInstance::Get(Interpreter &interp, token_t const &name)
+{
+    if (auto it = m_fields.find(name.lexeme); it != m_fields.end())
+        return it->second;
+
+    if (auto m = m_class->FindMethod(name.lexeme)) {
+        return m->Bind(
+            interp, static_pointer_cast<ILoxObject>(shared_from_this()));
+    }
+
+    throw runtime_error_t{name, format("Undefined property '{}'", name.lexeme)};
+}
+
+inline void LoxInstance::Set(token_t const &name, LoxValue const &val)
+{
+    m_fields.insert_or_assign(name.lexeme, val);
 }
 
 struct lox_config_t {

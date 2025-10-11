@@ -14,6 +14,7 @@ call :RunTest fib.lox %*
 call :RunTest closures.lox %*
 call :RunTest lambdas.lox %*
 call :RunTest binding.lox %*
+call :RunTest classes.lox %*
 @REM call :RunTest objects.lox %*
 
 popd

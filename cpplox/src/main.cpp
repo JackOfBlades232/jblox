@@ -386,6 +386,8 @@ expr_ptr_t parse_primary(parser_t &parser)
         return make_shared<LiteralExpr>(previous(parser).literal);
     if (match(parser, e_tt_identifier))
         return make_shared<VariableExpr>(previous(parser));
+    if (match(parser, e_tt_this))
+        return make_shared<ThisExpr>(previous(parser));
     if (match(parser, e_tt_fun))
         return parse_functional(parser);
 
@@ -426,10 +428,15 @@ expr_ptr_t parse_call(parser_t &parser)
     expr_ptr_t expr = parse_primary(parser);
 
     for (;;) {
-        if (match(parser, e_tt_left_paren))
+        if (match(parser, e_tt_left_paren)) {
             expr = finish_parsing_call(parser, expr);
-        else
+        } else if (match(parser, e_tt_dot)) {
+            token_t name = consume(
+                parser, e_tt_identifier, "Expected property name after '.'.");
+            expr = make_shared<GetExpr>(expr, name);
+        } else {
             break;
+        }
     }
 
     return expr;
@@ -528,9 +535,10 @@ expr_ptr_t parse_assignment(parser_t &parser)
         token_t eq = previous(parser);
         expr_ptr_t value = parse_assignment(parser);
 
-        // @TODO: is_lvalue or smth here, requires more robust AssignmentExpr
         if (auto *variable = dynamic_cast<VariableExpr *>(expr.get()))
             return make_shared<AssignmentExpr>(variable->id, value);
+        else if (auto *getter = dynamic_cast<GetExpr *>(expr.get()))
+            return make_shared<SetExpr>(getter->obj, getter->name, value);
 
         error(parser, eq, "Invalid assignment target.");
     }
@@ -701,6 +709,22 @@ stmt_ptr_t parse_func_decl(parser_t &parser)
         name, move(*dynamic_cast<FunctionalExpr *>(func.get())));
 }
 
+stmt_ptr_t parse_class_decl(parser_t &parser)
+{
+    token_t name = consume(parser, e_tt_identifier, "Expected class name.");
+    consume(parser, e_tt_left_brace, "Expected '{' before class body.");
+
+    vector<FuncDeclStmt> methods{};
+    while (!check(parser, e_tt_right_brace) && !done(parser)) {
+        methods.emplace_back(
+            *dynamic_cast<FuncDeclStmt *>(parse_func_decl(parser).get()));
+    }
+
+    consume(parser, e_tt_right_brace, "Expected '}' after class body.");
+
+    return make_shared<ClassDeclStmt>(name, move(methods));
+}
+
 stmt_ptr_t parse_var_decl(parser_t &parser)
 {
     token_t const id =
@@ -748,6 +772,8 @@ stmt_ptr_t parse_decl(parser_t &parser)
             advance(parser);
             return parse_func_decl(parser);
         }
+        if (match(parser, e_tt_class))
+            return parse_class_decl(parser);
         if (match(parser, e_tt_var))
             return parse_var_decl(parser);
 
@@ -824,6 +850,23 @@ public:
         }
         m_accum.append("))");
     }
+    void VisitGetExpr(GetExpr const &get) override {
+        m_accum.append("(get ");
+        m_accum.append(get.name.lexeme);
+        m_accum.append(" from ");
+        get.obj->Accept(*this);
+        m_accum.append(")");
+    }
+    void VisitSetExpr(SetExpr const &set) override {
+        m_accum.append("(set ");
+        m_accum.append(set.name.lexeme);
+        m_accum.append(" from ");
+        set.obj->Accept(*this);
+        m_accum.append(" to ");
+        set.value->Accept(*this);
+        m_accum.append(")");
+    }
+    void VisitThisExpr(ThisExpr const &) override { m_accum.append("this"); }
     void VisitVariableExpr(VariableExpr const &variable) override
         { m_accum.append(variable.id.lexeme); }
     void VisitFunctionalExpr(FunctionalExpr const &func) override {
@@ -864,6 +907,14 @@ public:
         m_accum.append(")\n{\n");
         for (auto const &stmt : func_decl.func.body)
             stmt->Accept(*this);
+        m_accum.append("}\n");
+    }
+    void VisitClassDeclStmt(ClassDeclStmt const &class_decl) override {
+        m_accum.append("declare class ");
+        m_accum.append(class_decl.name.lexeme);
+        m_accum.append(" {\n");
+        for (auto const &method : class_decl.methods)
+            method.Accept(*this);
         m_accum.append("}\n");
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {

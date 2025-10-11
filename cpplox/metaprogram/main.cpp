@@ -5,9 +5,14 @@ struct field_t {
     string_view name;
 };
 
+struct type_t {
+    string_view name;
+    vector<field_t> fields;
+};
+
 struct ast_def_t {
     string_view base;
-    unordered_map<string_view, vector<field_t>> def;
+    vector<type_t> def;
 };
 
 void define_ast(FILE *f, initializer_list<ast_def_t> asts)
@@ -110,6 +115,16 @@ int main(int argc, char **argv)
                         {"token_t", "paren"},
                         {"vector<expr_ptr_t>", "args"}
                     }},
+                    {"Get", {
+                        {"expr_ptr_t", "obj"},
+                        {"token_t", "name"}
+                    }},
+                    {"Set", {
+                        {"expr_ptr_t", "obj"},
+                        {"token_t", "name"},
+                        {"expr_ptr_t", "value"}
+                    }},
+                    {"This", {{"token_t", "keyword"}}},
                     {"Grouping", {{"expr_ptr_t", "expr"}}},
                     {"Literal", {{"LoxValue", "value"}}},
                     {"Unary", {
@@ -129,6 +144,10 @@ int main(int argc, char **argv)
                     {"FuncDecl", {
                         {"token_t", "name"},
                         {"FunctionalExpr", "func"},
+                    }},
+                    {"ClassDecl", {
+                        {"token_t", "name"},
+                        {"vector<FuncDeclStmt>", "methods"},
                     }},
                     {"If", {
                         {"expr_ptr_t", "cond"},

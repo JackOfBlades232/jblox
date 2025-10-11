@@ -31,6 +31,7 @@ inline lox_object_ptr_t make_object(TArgs &&...args)
 
 struct ILoxCallable;
 struct ILoxInstance;
+struct token_t;
 
 class LoxValue {
     variant<nil_t, bool, string, f64, lox_object_ptr_t> m_val{nil_t{}};
@@ -129,7 +130,8 @@ struct ILoxCallable : ILoxObject {
 };
 
 struct ILoxInstance : ILoxObject {
-    // @TODO
+    virtual LoxValue Get(Interpreter &, token_t const &) = 0;
+    virtual void Set(token_t const &, LoxValue const &) = 0;
 };
 
 inline bool LoxValue::IsCallable() const

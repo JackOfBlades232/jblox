@@ -17,7 +17,10 @@ class Resolver : public IExprVisitor, public IStmtVisitor {
         unordered_map<string_view, var_record_t> vars{};
     };
     enum func_traversal_state_t {
-        e_fts_none, e_fts_in_function
+        e_fts_none, e_fts_in_function, e_fts_in_method, e_fts_in_initializer
+    };
+    enum class_traversal_state_t {
+        e_cts_none, e_cts_in_class
     };
     enum loop_traversal_state_t {
         e_lts_none, e_lts_in_while
@@ -25,6 +28,7 @@ class Resolver : public IExprVisitor, public IStmtVisitor {
 
     vector<scope_t> m_scopes{};
     func_traversal_state_t m_func_traversal_state = e_fts_none;
+    class_traversal_state_t m_class_traversal_state = e_cts_none;
     loop_traversal_state_t m_loop_traversal_state = e_lts_none;
     Interpreter *m_interp = nullptr;
     lox_t *m_lox = nullptr;
@@ -67,6 +71,16 @@ public:
         for (auto const &arg : call.args)
             Resolve(*arg);
     }
+    void VisitGetExpr(GetExpr const &get) override { Resolve(*get.obj); }
+    void VisitSetExpr(SetExpr const &set) override {
+        Resolve(*set.obj);
+        Resolve(*set.value);
+    }
+    void VisitThisExpr(ThisExpr const &t) override {
+        if (m_class_traversal_state == e_cts_none)
+            error(*m_lox, t.keyword, "Can't use 'this' outside of a class.");
+        ResolveLocal(t, t.keyword);
+    }
     void VisitVariableExpr(VariableExpr const &variable) override {
         if (auto *scope = CurrentScope()) {
             if (auto it = scope->vars.find(variable.id.lexeme);
@@ -94,6 +108,29 @@ public:
         Define(func_decl.name);
         ResolveFunc(func_decl.func, e_fts_in_function);
     }
+    void VisitClassDeclStmt(ClassDeclStmt const &class_decl) override {
+        STATE_GUARD(m_class_traversal_state, e_cts_in_class);
+
+        Declare(class_decl.name);
+        Define(class_decl.name);
+
+        BeginScope();
+        auto const this_rec = var_record_t{
+            .decl = c_implicit_this_tok,
+            .id = CurrentScope()->var_id_allocator++,
+            .defined = true,
+            .used = true // We don't want unused var reports on 'this'
+        };
+        CurrentScope()->vars.emplace("this", this_rec);
+        m_interp->ResolveDeclaration(this_rec.decl, this_rec.id);
+        for (auto const &method : class_decl.methods) {
+            ResolveFunc(
+                method.func,
+                method.name.lexeme == "init" ? e_fts_in_initializer :
+                    e_fts_in_method);
+        }
+        EndScope();
+    }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         Resolve(*if_stmt.cond);
         Resolve(*if_stmt.then_branch);
@@ -110,6 +147,8 @@ public:
     void VisitReturnStmt(ReturnStmt const &ret) override {
         if (m_func_traversal_state == e_fts_none)
             error(*m_lox, ret.keyword, "Can't return at top level.");
+        if (m_func_traversal_state == e_fts_in_initializer && ret.value)
+            error(*m_lox, ret.keyword, "Can't return a value from init().");
         if (ret.value)
             Resolve(*ret.value);
     }
