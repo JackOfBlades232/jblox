@@ -161,6 +161,7 @@ class LoxClass
     string_view m_name;
     unordered_map<string_view, lox_function_ptr_t> m_methods{};
     unordered_map<string_view, lox_function_ptr_t> m_static_methods{};
+    unordered_map<string_view, lox_function_ptr_t> m_getters{};
 
     using method_map_t = decay_t<decltype(m_methods)>;
 
@@ -169,10 +170,12 @@ public:
             string_view name,
             method_map_t methods,
             method_map_t static_methods,
+            method_map_t getters,
             Interpreter &interp)
         : m_name{name}
         , m_methods{move(methods)}
-        , m_static_methods{move(static_methods)} {
+        , m_static_methods{move(static_methods)}
+        , m_getters{move(getters)} {
 
         if (auto init = FindStaticMethod("init"))
             init->Call(interp, {});
@@ -194,6 +197,8 @@ public:
         { return FindMethodInMap(m_methods, name); }
     lox_function_ptr_t FindStaticMethod(string_view name) const
         { return FindMethodInMap(m_static_methods, name); }
+    lox_function_ptr_t FindGetter(string_view name) const
+        { return FindMethodInMap(m_getters, name); }
 
 public:
     static lox_function_ptr_t FindMethodInMap(
@@ -492,6 +497,7 @@ public:
     void VisitClassDeclStmt(ClassDeclStmt const &class_decl) override {
         unordered_map<string_view, lox_function_ptr_t> methods{};
         unordered_map<string_view, lox_function_ptr_t> static_methods{};
+        unordered_map<string_view, lox_function_ptr_t> getters{};
         for (auto const &method : class_decl.methods) {
             methods.emplace(
                 method.name.lexeme,
@@ -505,12 +511,19 @@ public:
                 make_shared<LoxFunction>(method, m_cur_env, false));
         }
 
+        for (auto const &getter : class_decl.getters) {
+            getters.emplace(
+                getter.name.lexeme,
+                make_shared<LoxFunction>(getter, m_cur_env, false));
+        }
+
         DefineVar(
             class_decl.name,
             make_object<LoxClass>(
                 class_decl.name.lexeme,
                 move(methods),
                 move(static_methods),
+                move(getters),
                 *this)
         );
     }
@@ -652,6 +665,13 @@ inline LoxValue LoxInstance::Get(Interpreter &interp, token_t const &name)
     if (auto m = m_class->FindMethod(name.lexeme)) {
         return m->Bind(
             interp, static_pointer_cast<ILoxObject>(shared_from_this()));
+    }
+
+    if (auto m = m_class->FindGetter(name.lexeme)) {
+        return m->Bind(
+            interp, static_pointer_cast<ILoxObject>(shared_from_this()))
+            .GetCallable()
+            .Call(interp, {});
     }
 
     throw runtime_error_t{name, format("Undefined property '{}'", name.lexeme)};

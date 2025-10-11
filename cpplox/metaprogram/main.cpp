@@ -148,7 +148,8 @@ int main(int argc, char **argv)
                     {"ClassDecl", {
                         {"token_t", "name"},
                         {"vector<FuncDeclStmt>", "methods"},
-                        {"vector<FuncDeclStmt>", "static_methods"}
+                        {"vector<FuncDeclStmt>", "static_methods"},
+                        {"vector<FuncDeclStmt>", "getters"}
                     }},
                     {"If", {
                         {"expr_ptr_t", "cond"},

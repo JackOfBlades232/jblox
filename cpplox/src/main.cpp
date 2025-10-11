@@ -716,15 +716,24 @@ stmt_ptr_t parse_class_decl(parser_t &parser)
 
     vector<FuncDeclStmt> methods{};
     vector<FuncDeclStmt> static_methods{};
+    vector<FuncDeclStmt> getters{};
     while (!check(parser, e_tt_right_brace) && !done(parser)) {
-        (match(parser, e_tt_class) ? static_methods : methods).emplace_back(
-            *dynamic_cast<FuncDeclStmt *>(parse_func_decl(parser).get()));
+        if (check_n(parser, {e_tt_identifier, e_tt_left_brace})) {
+            token_t name = consume(parser, e_tt_identifier, {}); // Can't err
+            consume(parser, e_tt_left_brace, {});
+            auto body = move(
+                static_cast<BlockStmt *>(parse_block(parser).get())->stmts);
+            getters.emplace_back(name, FunctionalExpr{{}, move(body)});
+        } else {
+            (match(parser, e_tt_class) ? static_methods : methods).emplace_back(
+                *dynamic_cast<FuncDeclStmt *>(parse_func_decl(parser).get()));
+        }
     }
 
     consume(parser, e_tt_right_brace, "Expected '}' after class body.");
 
     return make_shared<ClassDeclStmt>(
-        name, move(methods), move(static_methods));
+        name, move(methods), move(static_methods), move(getters));
 }
 
 stmt_ptr_t parse_var_decl(parser_t &parser)
@@ -921,6 +930,9 @@ public:
         m_accum.append("dynamic:\n");
         for (auto const &method : class_decl.methods)
             method.Accept(*this);
+        m_accum.append("getters:\n");
+        for (auto const &getter : class_decl.getters)
+            getter.Accept(*this);
         m_accum.append("}\n");
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {

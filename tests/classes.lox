@@ -38,6 +38,10 @@ class Hobbit {
         this.surname = surname;
     }
 
+    formalName {
+        return "Mr " + this.surname;
+    }
+
     class spawn(clan, index) {
         print "A newborn in the Shire!";
         return Hobbit("Hobbit" + index, clan);
@@ -54,3 +58,4 @@ Hobbit.init();
 var newGuy = Hobbit.spawn("Brandybuck", 1);
 print newGuy.name + " " + newGuy.surname;
 
+print newGuy.formalName;

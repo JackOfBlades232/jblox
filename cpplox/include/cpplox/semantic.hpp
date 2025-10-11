@@ -139,8 +139,12 @@ public:
             ResolveFunc(
                 method.func,
                 method.name.lexeme == "init" ? e_fts_in_initializer :
-                    e_fts_in_method);
+                    e_fts_in_method
+            );
         }
+
+        for (auto const &getter : class_decl.getters)
+            ResolveFunc(getter.func, e_fts_in_method);
 
         EndScope();
     }
