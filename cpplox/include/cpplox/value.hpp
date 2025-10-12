@@ -163,7 +163,7 @@ inline bool is_truthy(LoxValue const &val)
     else if (val.IsBool())
         return val.GetBool();
     else
-        return true; // @HUH: empty string and 0 to false too?
+        return true;
 }
 
 inline bool are_equal(LoxValue const &l, LoxValue const &r)

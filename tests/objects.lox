@@ -59,11 +59,10 @@ if (gimli.score > legolas.score) {
     winner = legolas;
 }
 
-if (winner == nil) {
+if (winner == nil)
     print "Tie!";
-} else {
+else
     print winner.name + " won!";
-}
 
 // Is winner a ref?
 print "Taking all points from winner";

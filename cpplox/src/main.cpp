@@ -824,15 +824,18 @@ vector<stmt_ptr_t> parse(span<token_t const> tokens, lox_t &lox)
 
 class AstPrinter : public IExprVisitor, public IStmtVisitor {
     string m_accum{};
+    int m_depth = 0;
 
 public:
     string Print(Expr const &expr) {
         m_accum.clear();
+        m_depth = 0;
         expr.Accept(*this);
         return move(m_accum);
     }
     string Print(Stmt const &stmt) {
         m_accum.clear();
+        m_depth = 0;
         stmt.Accept(*this);
         return move(m_accum);
     }
@@ -907,22 +910,31 @@ public:
             m_accum.append(param.lexeme);
         }
         m_accum.append(") {\n");
+        ++m_depth;
         for (auto const &stmt : func.body)
             stmt->Accept(*this);
+        --m_depth;
+        Indent();
         m_accum.append("})");
     }
 
     void VisitBlockStmt(BlockStmt const &block) override {
+        Indent();
         m_accum.append("{\n");
+        ++m_depth;
         for (auto const &stmt : block.stmts)
             stmt->Accept(*this);
+        --m_depth;
+        Indent();
         m_accum.append("}\n");
     }
     void VisitExpressionStmt(ExpressionStmt const &expression) override {
+        Indent();
         expression.expr->Accept(*this);
         m_accum.append(";\n");
     }
     void VisitFuncDeclStmt(FuncDeclStmt const &func_decl) override {
+        Indent();
         m_accum.append("declare func/method ");
         m_accum.append(func_decl.name.lexeme);
         m_accum.append(" (");
@@ -932,12 +944,18 @@ public:
                 m_accum.append(", ");
             m_accum.append(param.lexeme);
         }
-        m_accum.append(")\n{\n");
+        m_accum.append(")\n");
+        Indent();
+        m_accum.append("{\n");
+        ++m_depth;
         for (auto const &stmt : func_decl.func.body)
             stmt->Accept(*this);
+        --m_depth;
+        Indent();
         m_accum.append("}\n");
     }
     void VisitClassDeclStmt(ClassDeclStmt const &class_decl) override {
+        Indent();
         m_accum.append("declare class ");
         m_accum.append(class_decl.name.lexeme);
         if (class_decl.superclass) {
@@ -945,48 +963,74 @@ public:
             m_accum.append(class_decl.superclass->id.lexeme);
         }
         m_accum.append(" {\n");
+        Indent();
         m_accum.append("static:\n");
+        ++m_depth;
         for (auto const &method : class_decl.static_methods)
             method.Accept(*this);
+        --m_depth;
+        Indent();
         m_accum.append("dynamic:\n");
+        ++m_depth;
         for (auto const &method : class_decl.methods)
             method.Accept(*this);
+        --m_depth;
+        Indent();
         m_accum.append("getters:\n");
+        ++m_depth;
         for (auto const &getter : class_decl.getters)
             getter.Accept(*this);
+        --m_depth;
+        Indent();
         m_accum.append("}\n");
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {
+        Indent();
         m_accum.append("if (");
         if_stmt.cond->Accept(*this);
         m_accum.append(");\n");
+        ++m_depth;
         if_stmt.then_branch->Accept(*this);
+        --m_depth;
         if (if_stmt.else_branch) {
+            Indent();
             m_accum.append("else\n");
+            ++m_depth;
             if_stmt.else_branch->Accept(*this);
+            --m_depth;
         }
+        Indent();
         m_accum.append("endif\n");
     }
     void VisitWhileStmt(WhileStmt const &while_stmt) override {
+        Indent();
         m_accum.append("while (");
         while_stmt.cond->Accept(*this);
         m_accum.append(");\n");
+        ++m_depth;
         while_stmt.body->Accept(*this);
+        --m_depth;
+        Indent();
         m_accum.append("endwhile\n");
     }
     void VisitPrintStmt(PrintStmt const &print) override {
+        Indent();
         m_accum.append("print (");
         print.val->Accept(*this);
         m_accum.append(");\n");
     }
     void VisitReturnStmt(ReturnStmt const &ret) override {
+        Indent();
         m_accum.append("return ");
         ret.value->Accept(*this);
         m_accum.append(";\n");
     }
-    void VisitBreakStmt(BreakStmt const &) override
-        { m_accum.append("break;\n"); }
+    void VisitBreakStmt(BreakStmt const &) override {
+        Indent();
+        m_accum.append("break;\n");
+    }
     void VisitVarStmt(VarStmt const &var) override {
+        Indent();
         m_accum.append("var decl ");
         m_accum.append(var.id.lexeme);
         if (var.init) {
@@ -997,6 +1041,7 @@ public:
         m_accum.append(";\n");
     }
     void VisitReplExprStmt(ReplExprStmt const &e) override {
+        Indent();
         e.expr->Accept(*this);
         m_accum.append(" [eval]\n");
     }
@@ -1010,6 +1055,10 @@ private:
             expr->Accept(*this);
         }
         m_accum.append(")");
+    }
+    void Indent() {
+        for (int i = 0; i < m_depth; ++i)
+            m_accum.append("  ");
     }
 };
 
