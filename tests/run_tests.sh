@@ -23,7 +23,7 @@ function run_all_tests {
     run_test lambdas.lox
     run_test binding.lox
     run_test classes.lox
-    #run_test objects.lox
+    run_test objects.lox
 }
 
 INTERP=../reference/craftinginterpreters/jlox

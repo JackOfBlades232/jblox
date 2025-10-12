@@ -167,3 +167,5 @@ struct hash<token_t> {
 
 inline const token_t c_implicit_this_tok =
     token_t{e_tt_this, "this", c_nil, usize(-1)};
+inline const token_t c_implicit_super_tok =
+    token_t{e_tt_super, "super", c_nil, usize(-1)};

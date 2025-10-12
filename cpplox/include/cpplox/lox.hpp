@@ -22,12 +22,19 @@ struct return_signal_t {
 // to break strong cycles. This will also be important when objects become
 // a thing.
 
+class Environment;
+class GlobalEnvironment;
+
+using environment_ptr_t = shared_ptr<Environment>;
+using global_environment_ptr_t = shared_ptr<GlobalEnvironment>;
+
 class Environment : public ILoxEntity {
-    lox_entity_ptr_t m_parent{}; // Opaque for self reference + strong ref
+    environment_ptr_t m_parent{};
     vector<optional<LoxValue>> m_values{};
 
 public:
-    explicit Environment(lox_entity_ptr_t const &parent) : m_parent{parent} {}
+    explicit Environment(environment_ptr_t const &parent)
+        : m_parent{parent} {}
     Environment() = default;
 
     void Define(int id, optional<LoxValue> const &val) {
@@ -108,12 +115,13 @@ public:
     }
 };
 
-using environment_ptr_t = shared_ptr<Environment>;
-using global_environment_ptr_t = shared_ptr<GlobalEnvironment>;
-
 class LoxFunction;
 class LoxClass;
 class LoxInstance;
+
+using lox_function_ptr_t = shared_ptr<LoxFunction>;
+using lox_class_ptr_t = shared_ptr<LoxClass>;
+using lox_instance_ptr_t = shared_ptr<LoxInstance>;
 
 class LoxFunction : public ILoxCallable {
     FunctionalExpr m_def;
@@ -151,14 +159,13 @@ public:
     LoxValue Bind(Interpreter &, LoxValue const &);
 };
 
-using lox_function_ptr_t = shared_ptr<LoxFunction>;
-
 class LoxClass
     : public ILoxCallable
     , public ILoxInstance
     , public enable_shared_from_this<LoxClass> {
 
     string_view m_name;
+    lox_class_ptr_t m_superclass{};
     unordered_map<string_view, lox_function_ptr_t> m_methods{};
     unordered_map<string_view, lox_function_ptr_t> m_static_methods{};
     unordered_map<string_view, lox_function_ptr_t> m_getters{};
@@ -168,11 +175,13 @@ class LoxClass
 public:
     LoxClass(
             string_view name,
+            lox_class_ptr_t superclass,
             method_map_t methods,
             method_map_t static_methods,
             method_map_t getters,
             Interpreter &interp)
         : m_name{name}
+        , m_superclass{superclass}
         , m_methods{move(methods)}
         , m_static_methods{move(static_methods)}
         , m_getters{move(getters)} {
@@ -194,23 +203,28 @@ public:
     void Set(token_t const &, LoxValue const &) override;
 
     lox_function_ptr_t FindMethod(string_view name) const
-        { return FindMethodInMap(m_methods, name); }
+        { return FindMethodInMap(&LoxClass::m_methods, name); }
     lox_function_ptr_t FindStaticMethod(string_view name) const
-        { return FindMethodInMap(m_static_methods, name); }
+        { return FindMethodInMap(&LoxClass::m_static_methods, name); }
     lox_function_ptr_t FindGetter(string_view name) const
-        { return FindMethodInMap(m_getters, name); }
+        { return FindMethodInMap(&LoxClass::m_getters, name); }
 
 public:
-    static lox_function_ptr_t FindMethodInMap(
-        method_map_t const &method_map, string_view name) {
+    lox_function_ptr_t FindMethodInMap(
+        method_map_t const LoxClass::*map_member, string_view name) const {
 
-        if (auto it = method_map.find(name); it != method_map.end())
+        if (auto it = (this->*map_member).find(name);
+            it != (this->*map_member).end())
+        {
             return it->second;
+        }
+
+        if (m_superclass)
+            return m_superclass->FindMethodInMap(map_member, name);
+
         return nullptr;
     }
 };
-
-using lox_class_ptr_t = shared_ptr<LoxClass>;
 
 class LoxInstance
     : public ILoxInstance
@@ -228,8 +242,6 @@ public:
     LoxValue Get(Interpreter &, token_t const &) override;
     void Set(token_t const &, LoxValue const &) override;
 };
-
-using lox_instance_ptr_t = shared_ptr<LoxInstance>;
 
 class Interpreter : public IExprVisitor, public IStmtVisitor {
     struct resolved_var_t {
@@ -474,6 +486,39 @@ public:
         LoxValue const val = LookupVar(t.keyword, t); 
         *prev_dest = val;
     }
+    void VisitSuperExpr(SuperExpr const &s) override {
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
+
+        auto [super_id, depth] = m_resolved_local_refs.find(&s)->second;
+        lox_class_ptr_t superclass = dynamic_pointer_cast<LoxClass>(
+            m_cur_env->LookupAt(super_id, depth, s.keyword).GetObject());
+
+        if (auto m = superclass->FindStaticMethod(s.method.lexeme)) {
+            *prev_dest = static_pointer_cast<ILoxObject>(m);
+            return;
+        }
+
+        auto this_id = m_resolved_local_decls.find(c_implicit_this_tok)->second;
+        lox_instance_ptr_t inst = dynamic_pointer_cast<LoxInstance>(
+            m_cur_env->LookupAt(this_id, depth - 1, c_implicit_super_tok)
+                .GetObject()
+        );
+
+        if (auto m = superclass->FindMethod(s.method.lexeme)) {
+            *prev_dest = m->Bind(*this, static_pointer_cast<ILoxObject>(inst));
+            return;
+        }
+        if (auto m = superclass->FindGetter(s.method.lexeme)) {
+            *prev_dest = m->Bind(*this, static_pointer_cast<ILoxObject>(inst))
+                .GetCallable()
+                .Call(*this, {});
+            return;
+        }
+
+        throw runtime_error_t{
+            s.method, format("Undefined property '{}'", s.method.lexeme)};
+    }
     void VisitVariableExpr(VariableExpr const &variable) override {
         assert(m_dest);
         LoxValue *prev_dest = exchange(m_dest, nullptr);
@@ -495,32 +540,59 @@ public:
             make_object<LoxFunction>(func_decl, m_cur_env, false));
     }
     void VisitClassDeclStmt(ClassDeclStmt const &class_decl) override {
+        lox_class_ptr_t superclass{};
+        if (class_decl.superclass) {
+            auto superclass_val = Evaluate(*class_decl.superclass);
+            superclass = superclass_val.IsObject() ?
+                dynamic_pointer_cast<LoxClass>(superclass_val.GetObject()) :
+                nullptr;
+            if (!superclass) {
+                throw runtime_error_t{
+                    class_decl.superclass->id,
+                    "Superclass value must be a class."};
+            }
+        }
+
         unordered_map<string_view, lox_function_ptr_t> methods{};
         unordered_map<string_view, lox_function_ptr_t> static_methods{};
         unordered_map<string_view, lox_function_ptr_t> getters{};
-        for (auto const &method : class_decl.methods) {
-            methods.emplace(
-                method.name.lexeme,
-                make_shared<LoxFunction>(
-                    method, m_cur_env, method.name.lexeme == "init")
-            );
-        }
-        for (auto const &method : class_decl.static_methods) {
-            static_methods.emplace(
-                method.name.lexeme,
-                make_shared<LoxFunction>(method, m_cur_env, false));
-        }
 
-        for (auto const &getter : class_decl.getters) {
-            getters.emplace(
-                getter.name.lexeme,
-                make_shared<LoxFunction>(getter, m_cur_env, false));
+        {
+            environment_ptr_t prev = m_cur_env;
+            DEFERM(m_cur_env = move(prev));
+            m_cur_env = make_shared<Environment>(m_cur_env);
+
+            if (class_decl.superclass) {
+                m_cur_env->Define(
+                    m_resolved_local_decls.at(c_implicit_super_tok),
+                    static_pointer_cast<ILoxObject>(superclass));
+            }
+
+            for (auto const &method : class_decl.methods) {
+                methods.emplace(
+                    method.name.lexeme,
+                    make_shared<LoxFunction>(
+                        method, m_cur_env, method.name.lexeme == "init")
+                );
+            }
+            for (auto const &method : class_decl.static_methods) {
+                static_methods.emplace(
+                    method.name.lexeme,
+                    make_shared<LoxFunction>(method, m_cur_env, false));
+            }
+
+            for (auto const &getter : class_decl.getters) {
+                getters.emplace(
+                    getter.name.lexeme,
+                    make_shared<LoxFunction>(getter, m_cur_env, false));
+            }
         }
 
         DefineVar(
             class_decl.name,
             make_object<LoxClass>(
                 class_decl.name.lexeme,
+                move(superclass),
                 move(methods),
                 move(static_methods),
                 move(getters),

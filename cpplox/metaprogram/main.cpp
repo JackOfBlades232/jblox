@@ -125,6 +125,10 @@ int main(int argc, char **argv)
                         {"expr_ptr_t", "value"}
                     }},
                     {"This", {{"token_t", "keyword"}}},
+                    {"Super", {
+                        {"token_t", "keyword"},
+                        {"token_t", "method"}
+                    }},
                     {"Grouping", {{"expr_ptr_t", "expr"}}},
                     {"Literal", {{"LoxValue", "value"}}},
                     {"Unary", {
@@ -147,6 +151,7 @@ int main(int argc, char **argv)
                     }},
                     {"ClassDecl", {
                         {"token_t", "name"},
+                        {"optional<VariableExpr>", "superclass"},
                         {"vector<FuncDeclStmt>", "methods"},
                         {"vector<FuncDeclStmt>", "static_methods"},
                         {"vector<FuncDeclStmt>", "getters"}
