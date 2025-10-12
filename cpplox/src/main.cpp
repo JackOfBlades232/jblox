@@ -257,7 +257,6 @@ vector<token_t> scan_tokens(string_view code, lox_t &lox)
 struct parser_t {
     span<token_t const> tokens;
     usize current = 0;
-    bool in_loop = false;
     lox_t *lox;
 };
 
@@ -601,9 +600,7 @@ stmt_ptr_t parse_for_stmt(parser_t &parser)
 
     consume(parser, e_tt_right_paren, "Expected ')' after for clause.");
 
-    bool const was_in_loop = exchange(parser.in_loop, true);
     stmt_ptr_t body = parse_stmt(parser);
-    parser.in_loop = was_in_loop;
 
     // Now, desugar into { init; while (cond) { body; increment; } }
 
@@ -643,9 +640,7 @@ stmt_ptr_t parse_while_stmt(parser_t &parser)
     expr_ptr_t cond = parse_expr(parser);
     consume(parser, e_tt_right_paren, "Expected ')' after while condition.");
 
-    bool const was_in_loop = exchange(parser.in_loop, true);
     stmt_ptr_t body = parse_stmt(parser);
-    parser.in_loop = was_in_loop;
 
     return make_shared<WhileStmt>(cond, body);
 }
@@ -682,8 +677,6 @@ stmt_ptr_t parse_block(parser_t &parser)
 stmt_ptr_t parse_break(parser_t &parser)
 {
     token_t kw = previous(parser);
-    if (!parser.in_loop)
-        error(parser, kw, "Encountered 'break' outside a loop.");
     consume(parser, e_tt_semicolon, "Expected ';' after break.");
     return make_shared<BreakStmt>(kw);
 }

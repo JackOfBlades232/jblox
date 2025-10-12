@@ -2,10 +2,14 @@
 
 #include "defs.hpp"
 
-struct nil_t {};
+struct ILoxEntity;
+
+using entity_ref_collection_t = unordered_set<ILoxEntity const *>;
 
 struct ILoxEntity {
     virtual ~ILoxEntity() {};
+    virtual void Mark(entity_ref_collection_t &) const = 0;
+    virtual void Sweep() = 0;
 };
 
 struct ILoxObject : ILoxEntity {
@@ -15,23 +19,11 @@ struct ILoxObject : ILoxEntity {
 using lox_entity_ptr_t = shared_ptr<ILoxEntity>;
 using lox_object_ptr_t = shared_ptr<ILoxObject>;
 
-template <derived_from<ILoxEntity> T, class ...TArgs>
-    requires constructible_from<T, TArgs...>
-inline lox_entity_ptr_t make_ent(TArgs &&...args)
-{
-    return lox_entity_ptr_t{make_shared<T>(forward<TArgs>(args)...)};
-}
-
-template <derived_from<ILoxObject> T, class ...TArgs>
-    requires constructible_from<T, TArgs...>
-inline lox_object_ptr_t make_object(TArgs &&...args)
-{
-    return lox_object_ptr_t{make_shared<T>(forward<TArgs>(args)...)};
-}
-
 struct ILoxCallable;
 struct ILoxInstance;
 struct token_t;
+
+struct nil_t {};
 
 class LoxValue {
     variant<nil_t, bool, string, f64, lox_object_ptr_t> m_val{nil_t{}};
@@ -210,4 +202,27 @@ inline string to_dbg_string(LoxValue const &val)
         return format("\"{}\"", to_string(val));
     else
         return to_string(val);
+}
+
+inline bool register_ref(ILoxEntity const *e, entity_ref_collection_t &refs)
+{
+    return refs.insert(e).second;
+}
+
+inline void mark_val(LoxValue const &val, entity_ref_collection_t &refs)
+{
+    if (val.IsObject())
+        val.GetObject()->Mark(refs);
+}
+
+inline void mark_opt(auto const &opt, entity_ref_collection_t &refs)
+{
+    if (opt)
+        opt->Mark(refs);
+}
+
+inline void mark_map(auto const &map, entity_ref_collection_t &refs)
+{
+    for (auto const &[_, e] : map)
+        e->Mark(refs);
 }

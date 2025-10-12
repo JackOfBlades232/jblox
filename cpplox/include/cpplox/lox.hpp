@@ -16,11 +16,15 @@ struct return_signal_t {
     LoxValue val;
 };
 
-// @TODO: currently we are leaking environments every time we return a
-// closed function -- it holds a ref to the closure, and the closure holds
-// the environment stack. Do mark and sweep from actual live environment
-// to break strong cycles. This will also be important when objects become
-// a thing.
+struct statistics_t {
+    usize gc_invocations = 0;
+    usize total_entities = 0;
+    usize leaked_entities = 0;
+    usize max_live_entities = 0;
+    usize max_sweeped_in_one_call = 0;
+};
+
+inline constexpr usize c_gc_ent_count_threshold = 32;
 
 class Environment;
 class GlobalEnvironment;
@@ -36,6 +40,21 @@ public:
     explicit Environment(environment_ptr_t const &parent)
         : m_parent{parent} {}
     Environment() = default;
+
+    void Mark(entity_ref_collection_t &refs) const override
+    {
+        if (!register_ref(this, refs))
+            return;
+        for (auto const &val : m_values) {
+            if (val)
+                mark_val(*val, refs);
+        }
+        mark_opt(m_parent, refs);
+    }
+    void Sweep() override {
+        m_parent = {};
+        m_values = {};
+    }
 
     void Define(int id, optional<LoxValue> const &val) {
         if (m_values.size() <= id)
@@ -69,6 +88,7 @@ private:
     }
     Environment const *Parent() const
         { return const_cast<Environment *>(this)->Parent(); }
+
     Environment *Ancestor(int depth) {
         auto *env = this;
         for (; depth > 0 && Parent(); --depth)
@@ -83,6 +103,17 @@ class GlobalEnvironment : public ILoxEntity {
     unordered_map<string, optional<LoxValue>> m_values{};
 
 public:
+    void Mark(entity_ref_collection_t &refs) const override
+    {
+        if (!register_ref(this, refs))
+            return;
+        for (auto const &[_, val] : m_values) {
+            if (val)
+                mark_val(*val, refs);
+        }
+    }
+    void Sweep() override { m_values = {}; }
+
     void Define(string_view name, optional<LoxValue> const &val)
         { m_values.insert_or_assign(string{name}, val); }
 
@@ -123,7 +154,10 @@ using lox_function_ptr_t = shared_ptr<LoxFunction>;
 using lox_class_ptr_t = shared_ptr<LoxClass>;
 using lox_instance_ptr_t = shared_ptr<LoxInstance>;
 
-class LoxFunction : public ILoxCallable {
+class LoxFunction
+    : public ILoxCallable
+    , public enable_shared_from_this<LoxFunction> {
+
     FunctionalExpr m_def;
     environment_ptr_t m_closure;
     optional<token_t> m_name{};
@@ -149,6 +183,14 @@ public:
             environment_ptr_t const &closure,
             bool init)
         : m_def{def}, m_name{name}, m_closure{closure}, m_init{init} {}
+
+    void Mark(entity_ref_collection_t &refs) const override
+    {
+        if (!register_ref(this, refs))
+            return;
+        mark_opt(m_closure, refs);
+    }
+    void Sweep() override { m_closure = {}; }
 
     int Arity() const override { return m_def.params.size(); }
     string ToString() const override
@@ -184,10 +226,22 @@ public:
         , m_superclass{superclass}
         , m_methods{move(methods)}
         , m_static_methods{move(static_methods)}
-        , m_getters{move(getters)} {
+        , m_getters{move(getters)} {}
 
-        if (auto init = FindStaticMethod("init"))
-            init->Call(interp, {});
+    void Mark(entity_ref_collection_t &refs) const override
+    {
+        if (!register_ref(this, refs))
+            return;
+        mark_opt(m_superclass, refs);
+        mark_map(m_methods, refs);
+        mark_map(m_static_methods, refs);
+        mark_map(m_getters, refs);
+    }
+    void Sweep() override {
+        m_superclass = {};
+        m_methods = {};
+        m_static_methods = {};
+        m_getters = {};
     }
 
     string ToString() const override { return string{m_name}; }
@@ -236,6 +290,19 @@ class LoxInstance
 public:
     explicit LoxInstance(lox_class_ptr_t const &cls) : m_class{cls} {}
 
+    void Mark(entity_ref_collection_t &refs) const override
+    {
+        if (!register_ref(this, refs))
+            return;
+        mark_opt(m_class, refs);
+        for (auto const &[_, f] : m_fields)
+            mark_val(f, refs);
+    }
+    void Sweep() override {
+        m_class = {};
+        m_fields = {};
+    }
+
     string ToString() const override
         { return format("<{} instance>", m_class->ToString()); }
 
@@ -249,11 +316,16 @@ class Interpreter : public IExprVisitor, public IStmtVisitor {
         int depth;
     };
 
+    vector<lox_entity_ptr_t> m_live_entities{};
+
     global_environment_ptr_t m_global_env{};
     environment_ptr_t m_cur_env{};
+    vector<lox_entity_ptr_t> m_suspended_entities{};
 
     unordered_map<Expr const *, resolved_var_t> m_resolved_local_refs{};
     unordered_map<token_t, int> m_resolved_local_decls{};
+
+    statistics_t m_stats{};
 
     LoxValue *m_dest = nullptr;
 
@@ -265,15 +337,37 @@ class Interpreter : public IExprVisitor, public IStmtVisitor {
         LoxValue Call(Interpreter &, span<LoxValue>) override
             { return g_hires_timer.MsFromProgramStart() / 1000.0; }
         int Arity() const override { return 0; }
+        void Mark(entity_ref_collection_t &refs) const override
+            { register_ref(this, refs); }
+        void Sweep() override {}
         string ToString() const override { return "<native fn>"; }
     };
 
 public:
     Interpreter()
-        : m_global_env{make_shared<GlobalEnvironment>()}
-        { m_global_env->Define("clock", make_object<Clock>()); }
+        : m_global_env{MakeEnt<GlobalEnvironment>()}
+        { m_global_env->Define("clock", MakeObj<Clock>()); }
 
-    ~Interpreter() {}
+    ~Interpreter() {
+        m_cur_env = {};
+        m_global_env = {};
+        CollectGarbage(true);
+
+        m_stats.total_entities += m_live_entities.size();
+        m_stats.leaked_entities = m_live_entities.size();
+
+        println(stderr, "Stats:");
+        println(stderr, "  Total {} entities ever live.",
+            m_stats.total_entities);
+        println(stderr, "  Leaked {} entities.",
+            m_stats.leaked_entities);
+        println(stderr, "  Max {} concurrent live entities.",
+            m_stats.max_live_entities);
+        println(stderr, "  Total {} GC invocations.",
+            m_stats.gc_invocations);
+        println(stderr, "  Max {} collected entities in one GC invocation.",
+            m_stats.max_sweeped_in_one_call);
+    }
 
     LoxValue Evaluate(Expr const &expr) {
         LoxValue res;
@@ -281,7 +375,10 @@ public:
         expr.Accept(*this);
         return res;
     }
-    void Execute(Stmt const &stmt) { stmt.Accept(*this); }
+    void Execute(Stmt const &stmt) {
+        stmt.Accept(*this);
+        CollectGarbage();
+    }
 
     void ResolveReference(Expr const &e, int depth, int id) {
         m_resolved_local_refs.insert_or_assign(&e, resolved_var_t{id, depth});
@@ -439,6 +536,7 @@ public:
         LoxValue *prev_dest = exchange(m_dest, nullptr);
 
         LoxValue callee = Evaluate(*call.callee);
+
         vector<LoxValue> arg_values{};
         for (auto const &arg : call.args)
             arg_values.emplace_back(Evaluate(*arg));
@@ -527,17 +625,17 @@ public:
     void VisitFunctionalExpr(FunctionalExpr const &func) override {
         assert(m_dest);
         LoxValue *prev_dest = exchange(m_dest, nullptr);
-        *prev_dest = make_object<LoxFunction>(func, m_cur_env, false);
+        *prev_dest = MakeObj<LoxFunction>(func, m_cur_env, false);
     }
 
     void VisitBlockStmt(BlockStmt const &block) override
-        { ExecuteBlock(block.stmts, make_shared<Environment>(m_cur_env)); }
+        { ExecuteBlock(block.stmts, MakeEnt<Environment>(m_cur_env)); }
     void VisitExpressionStmt(ExpressionStmt const &expression) override
         { Evaluate(*expression.expr); }
     void VisitFuncDeclStmt(FuncDeclStmt const &func_decl) override {
         DefineVar(
             func_decl.name,
-            make_object<LoxFunction>(func_decl, m_cur_env, false));
+            MakeObj<LoxFunction>(func_decl, m_cur_env, false));
     }
     void VisitClassDeclStmt(ClassDeclStmt const &class_decl) override {
         lox_class_ptr_t superclass{};
@@ -560,7 +658,7 @@ public:
         {
             environment_ptr_t prev = m_cur_env;
             DEFERM(m_cur_env = move(prev));
-            m_cur_env = make_shared<Environment>(m_cur_env);
+            m_cur_env = MakeEnt<Environment>(m_cur_env);
 
             if (class_decl.superclass) {
                 m_cur_env->Define(
@@ -571,33 +669,33 @@ public:
             for (auto const &method : class_decl.methods) {
                 methods.emplace(
                     method.name.lexeme,
-                    make_shared<LoxFunction>(
+                    MakeEnt<LoxFunction>(
                         method, m_cur_env, method.name.lexeme == "init")
                 );
             }
             for (auto const &method : class_decl.static_methods) {
                 static_methods.emplace(
                     method.name.lexeme,
-                    make_shared<LoxFunction>(method, m_cur_env, false));
+                    MakeEnt<LoxFunction>(method, m_cur_env, false));
             }
 
             for (auto const &getter : class_decl.getters) {
                 getters.emplace(
                     getter.name.lexeme,
-                    make_shared<LoxFunction>(getter, m_cur_env, false));
+                    MakeEnt<LoxFunction>(getter, m_cur_env, false));
             }
         }
 
-        DefineVar(
-            class_decl.name,
-            make_object<LoxClass>(
-                class_decl.name.lexeme,
-                move(superclass),
-                move(methods),
-                move(static_methods),
-                move(getters),
-                *this)
-        );
+        auto cls = MakeObj<LoxClass>(
+            class_decl.name.lexeme, move(superclass), move(methods),
+            move(static_methods), move(getters), *this);
+        DefineVar(class_decl.name, cls);
+
+        if (auto init =
+            dynamic_pointer_cast<LoxClass>(cls)->FindStaticMethod("init"))
+        {
+            init->Call(*this, {}); 
+        }
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         if (is_truthy(Evaluate(*if_stmt.cond)))
@@ -672,11 +770,58 @@ private:
         else
             m_cur_env->Define(m_resolved_local_decls.at(name), val);
     }
+
+    template <class T, class ...TArgs>
+        requires constructible_from<T, TArgs...> && derived_from<T, ILoxEntity>
+    shared_ptr<T> MakeEnt(TArgs &&...args) {
+        auto ptr = make_shared<T>(forward<TArgs>(args)...);
+        m_live_entities.push_back(ptr);
+        return ptr;
+    }
+
+    template <class T, class ...TArgs>
+        requires constructible_from<T, TArgs...> && derived_from<T, ILoxObject>
+    lox_object_ptr_t MakeObj(TArgs &&...args) {
+        return lox_object_ptr_t{MakeEnt<T>(forward<TArgs>(args)...)};
+    }
+    
+    void CollectGarbage(bool force = false) {
+        if (m_live_entities.size() < c_gc_ent_count_threshold && !force)
+            return;
+
+        ++m_stats.gc_invocations;
+        m_stats.max_live_entities =
+            max(m_stats.max_live_entities, m_live_entities.size());
+
+        entity_ref_collection_t reachables{};
+        mark_opt(m_cur_env, reachables);
+        mark_opt(m_global_env, reachables);
+        for (auto const &ent : m_suspended_entities)
+            mark_opt(ent, reachables);
+
+        usize sweeped = 0;
+        for (auto &ent : m_live_entities) {
+            if (!reachables.contains(ent.get())) {
+                ++sweeped;
+                ent->Sweep();
+            }
+        }
+
+        m_stats.max_sweeped_in_one_call =
+            max(m_stats.max_sweeped_in_one_call, sweeped);
+        m_stats.total_entities += sweeped;
+
+        auto end = remove_if(
+            m_live_entities.begin(), m_live_entities.end(),
+            [&](auto const &ent) { return ent.use_count() <= 1; });
+
+        m_live_entities.resize(end - m_live_entities.begin());
+    }
 };
 
 inline LoxValue LoxFunction::Call(Interpreter &interp, span<LoxValue> args)
 {
-    environment_ptr_t env = make_shared<Environment>(m_closure);
+    environment_ptr_t env = interp.MakeEnt<Environment>(m_closure);
     for (usize i = 0; auto const &param : m_def.params)
         env->Define(interp.m_resolved_local_decls.at(param), args[i++]);
 
@@ -684,6 +829,11 @@ inline LoxValue LoxFunction::Call(Interpreter &interp, span<LoxValue> args)
         return m_closure->Lookup(
             interp.m_resolved_local_decls.at(c_implicit_this_tok), {});
     };
+
+    interp.m_suspended_entities.push_back(interp.m_cur_env);
+    interp.m_suspended_entities.push_back(shared_from_this());
+    DEFER(interp.m_suspended_entities.pop_back());
+    DEFER(interp.m_suspended_entities.pop_back());
     
     try {
         interp.ExecuteBlock(m_def.body, env);
@@ -699,16 +849,16 @@ inline LoxValue LoxFunction::Call(Interpreter &interp, span<LoxValue> args)
 inline LoxValue LoxFunction::Bind(
     Interpreter &interp, LoxValue const &inst)
 {
-    environment_ptr_t env = make_shared<Environment>(m_closure);
+    environment_ptr_t env = interp.MakeEnt<Environment>(m_closure);
     env->Define(
         interp.m_resolved_local_decls.at(c_implicit_this_tok),
         inst);
-    return make_object<LoxFunction>(m_def, m_name, env, m_init);
+    return interp.MakeObj<LoxFunction>(m_def, m_name, env, m_init);
 }
 
 inline LoxValue LoxClass::Call(Interpreter &interp, span<LoxValue> args)
 {
-    auto inst = make_object<LoxInstance>(shared_from_this());
+    auto inst = interp.MakeObj<LoxInstance>(shared_from_this());
     auto init = FindMethod("init");
     if (init)
         init->Bind(interp, inst).GetCallable().Call(interp, args);
