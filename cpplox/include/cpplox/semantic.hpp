@@ -20,7 +20,7 @@ class Resolver : public IExprVisitor, public IStmtVisitor {
         e_fts_none, e_fts_in_function, e_fts_in_method, e_fts_in_initializer
     };
     enum class_traversal_state_t {
-        e_cts_none, e_cts_in_class, e_cts_in_subclass
+        e_cts_none, e_cts_in_class, e_cts_in_subclass, e_cts_in_inv_subclass
     };
     enum loop_traversal_state_t {
         e_lts_none, e_lts_in_while
@@ -88,8 +88,17 @@ public:
         } else if (m_class_traversal_state == e_cts_in_class) {
             error(*m_lox, s.keyword,
                 "Can't use 'super' in a class with no superclass.");
+        } else if (m_class_traversal_state == e_cts_in_inv_subclass) {
+            error(*m_lox, s.keyword,
+                "Can't use 'super' in an inverted subclass. "
+                "Use inner in parent.");
         }
         ResolveLocal(s, s.keyword);
+    }
+    void VisitInnerExpr(InnerExpr const &i) override {
+        if (m_class_traversal_state == e_cts_none)
+            error(*m_lox, i.keyword, "Can't use 'inner' outside of a class.");
+        ResolveLocal(i, i.keyword);
     }
     void VisitVariableExpr(VariableExpr const &variable) override {
         if (auto *scope = CurrentScope()) {
@@ -133,12 +142,23 @@ public:
 
         STATE_GUARD(
             m_class_traversal_state,
-            class_decl.superclass ? e_cts_in_subclass : e_cts_in_class);
+            class_decl.superclass
+                ? SubclassStateFromInhToken(class_decl.inheritance_keyword)
+                : e_cts_in_class
+        );
 
         BeginScope();
 
-        if (class_decl.superclass)
+        if (class_decl.superclass &&
+            class_decl.inheritance_keyword.type == e_tt_less)
+        {
             DefineImplicitVar(c_implicit_super_tok);
+        }
+
+        BeginScope();
+
+        DefineImplicitVar(c_implicit_this_tok);
+        DefineImplicitVar(c_implicit_inner_tok);
 
         for (auto const &method : class_decl.static_methods) {
             if (method.name.lexeme == "init" && method.func.params.size()) {
@@ -148,10 +168,6 @@ public:
 
             ResolveFunc(method.func, e_fts_in_function);
         }
-
-        BeginScope();
-
-        DefineImplicitVar(c_implicit_this_tok);
 
         for (auto const &method : class_decl.methods) {
             ResolveFunc(
@@ -270,6 +286,13 @@ private:
         };
         CurrentScope()->vars.emplace(tok.lexeme, this_rec);
         m_interp->ResolveDeclaration(this_rec.decl, this_rec.id);
+    }
+
+    static class_traversal_state_t SubclassStateFromInhToken(token_t tok) {
+        assert(tok.type == e_tt_less || tok.type == e_tt_greater);
+        return tok.type == e_tt_less
+            ? e_cts_in_subclass
+            : e_cts_in_inv_subclass;
     }
 
 #undef STATE_GUARD

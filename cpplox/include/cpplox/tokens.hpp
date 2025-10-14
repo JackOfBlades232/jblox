@@ -49,6 +49,7 @@ enum token_type_t {
     e_tt_print,
     e_tt_return,
     e_tt_super,
+    e_tt_inner,
     e_tt_this,
     e_tt_true,
     e_tt_var,
@@ -63,7 +64,7 @@ inline constexpr string_view c_tt_debug_names[] =
     "SLASH", "STAR", "BANG", "BANG-EQUAL", "EQUAL", "EQUAL-EQUAL",
     "GREATER", "GREATER-EQUAL", "LESS", "LESS-EQUAL",
     "IDENTIFIER", "STRING", "NUMBER", "AND", "CLASS", "ELSE", "FALSE",
-    "FUN", "FOR", "IF", "NIL", "OR", "PRINT", "RETURN", "SUPER",
+    "FUN", "FOR", "IF", "NIL", "OR", "PRINT", "RETURN", "SUPER", "INNER",
     "THIS", "TRUE", "VAR", "WHILE", "BREAK",
 };
 
@@ -80,6 +81,7 @@ inline const unordered_map<string_view, token_type_t> c_reserved_id_types{
     {"print", e_tt_print},
     {"return", e_tt_return},
     {"super", e_tt_super},
+    {"inner", e_tt_inner},
     {"this", e_tt_this},
     {"true", e_tt_true},
     {"var", e_tt_var},
@@ -169,3 +171,5 @@ inline const token_t c_implicit_this_tok =
     token_t{e_tt_this, "this", c_nil, usize(-1)};
 inline const token_t c_implicit_super_tok =
     token_t{e_tt_super, "super", c_nil, usize(-1)};
+inline const token_t c_implicit_inner_tok =
+    token_t{e_tt_inner, "inner", c_nil, usize(-1)};

@@ -1,0 +1,49 @@
+class Doughnut {
+    cook() {
+        print "Fry until golden brown.";
+        inner();
+        print "Place in a nice box.";
+    }
+
+    describe() {
+        print "Picture a torus.";
+        inner();
+        print "Forget it and taste the sugar.";
+    }
+}
+
+class BostonCream > Doughnut {
+    cook() {
+        print "Pipe full of custard and coat with chocolate.";
+    }
+
+    notASubclassMethod() { print "Inner does nothing here."; inner(); }
+}
+
+BostonCream().cook();
+BostonCream().describe();
+BostonCream().notASubclassMethod();
+
+class A {
+    m() {
+        print "A";
+    }
+}
+
+class B < A {
+    m() {
+        super.m();
+        print "B";
+        inner();
+    }
+}
+
+class C > B {
+    m() {
+        print "C";
+    }
+}
+
+C().m();
+print "";
+B().m();

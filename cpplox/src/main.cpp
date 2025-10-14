@@ -373,6 +373,30 @@ expr_ptr_t parse_functional(parser_t &parser)
     return make_shared<FunctionalExpr>(move(params), move(body));
 }
 
+template <class TExpr, class TCallee>
+expr_ptr_t finish_parsing_call(parser_t &parser, TCallee callee)
+{
+    vector<expr_ptr_t> args{};
+    if (!check(parser, e_tt_right_paren)) {
+        do {
+            // Disallow >255 args, as that will be a hard limit for clox,
+            // and we want conforming implementations
+            if (args.size() >= 255) {
+                error(*parser.lox, peek(parser),
+                    "Can't pass more than 255 args to a call.");
+            }
+
+            // Not seq, as commas as operators are not accepted here
+            args.push_back(parse_assignment(parser));
+        } while (match(parser, e_tt_comma));
+    }
+
+    token_t paren = consume(
+        parser, e_tt_right_paren, "Expected ')' after argument list.");
+
+    return make_shared<TExpr>(callee, paren, move(args));
+}
+
 expr_ptr_t parse_primary(parser_t &parser)
 {
     if (match(parser, e_tt_false))
@@ -397,6 +421,11 @@ expr_ptr_t parse_primary(parser_t &parser)
             parser, e_tt_identifier, "Expected superclass method name.");
         return make_shared<SuperExpr>(keyword, method);
     }
+    if (match(parser, e_tt_inner)) {
+        token_t keyword = previous(parser);
+        consume(parser, e_tt_left_paren, "Expected '(' after inner.");
+        return finish_parsing_call<InnerExpr>(parser, keyword);
+    }
 
     if (match(parser, e_tt_left_paren)) {
         expr_ptr_t expr = parse_expr(parser);
@@ -407,36 +436,13 @@ expr_ptr_t parse_primary(parser_t &parser)
     throw error(parser, peek(parser), "Expected expression.");
 }
 
-expr_ptr_t finish_parsing_call(parser_t &parser, expr_ptr_t callee)
-{
-    vector<expr_ptr_t> args{};
-    if (!check(parser, e_tt_right_paren)) {
-        do {
-            // Disallow >255 args, as that will be a hard limit for clox,
-            // and we want conforming implementations
-            if (args.size() >= 255) {
-                error(*parser.lox, peek(parser),
-                    "Can't pass more than 255 args to a call.");
-            }
-
-            // Not seq, as commas as operators are not accepted here
-            args.push_back(parse_assignment(parser));
-        } while (match(parser, e_tt_comma));
-    }
-
-    token_t paren = consume(
-        parser, e_tt_right_paren, "Expected ')' after argument list.");
-
-    return make_shared<CallExpr>(callee, paren, move(args));
-}
-
 expr_ptr_t parse_call(parser_t &parser)
 {
     expr_ptr_t expr = parse_primary(parser);
 
     for (;;) {
         if (match(parser, e_tt_left_paren)) {
-            expr = finish_parsing_call(parser, expr);
+            expr = finish_parsing_call<CallExpr>(parser, expr);
         } else if (match(parser, e_tt_dot)) {
             token_t name = consume(
                 parser, e_tt_identifier, "Expected property name after '.'.");
@@ -715,7 +721,9 @@ stmt_ptr_t parse_class_decl(parser_t &parser)
     token_t name = consume(parser, e_tt_identifier, "Expected class name.");
 
     optional<VariableExpr> superclass{};
-    if (match(parser, e_tt_less)) {
+    token_t inh_kw = {};
+    if (match(parser, {e_tt_less, e_tt_greater})) {
+        inh_kw = previous(parser);
         token_t name =
             consume(parser, e_tt_identifier, "Expected superclass name.");
         superclass = VariableExpr{name};
@@ -742,7 +750,8 @@ stmt_ptr_t parse_class_decl(parser_t &parser)
     consume(parser, e_tt_right_brace, "Expected '}' after class body.");
 
     return make_shared<ClassDeclStmt>(
-        name, superclass, move(methods), move(static_methods), move(getters));
+        name, superclass, inh_kw,
+        move(methods), move(static_methods), move(getters));
 }
 
 stmt_ptr_t parse_var_decl(parser_t &parser)
@@ -891,6 +900,16 @@ public:
     }
     void VisitThisExpr(ThisExpr const &) override { m_accum.append("this"); }
     void VisitSuperExpr(SuperExpr const &) override { m_accum.append("super"); }
+    void VisitInnerExpr(InnerExpr const &inner) override {
+        m_accum.append("(inner (");
+        bool comma = false;
+        for (auto const &arg : inner.args) {
+            if (exchange(comma, true))
+                m_accum.append(", ");
+            arg->Accept(*this);
+        }
+        m_accum.append("))");
+    }
     void VisitVariableExpr(VariableExpr const &variable) override
         { m_accum.append(variable.id.lexeme); }
     void VisitFunctionalExpr(FunctionalExpr const &func) override {

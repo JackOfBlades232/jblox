@@ -8,6 +8,8 @@ if(UNIX)
     add_link_options(-stdlib=libc++)
 endif(UNIX)
 
+add_compile_options(-Wno-binding-in-condition)
+
 configure_file(templates/version.hpp include/version.hpp)
 
 add_executable(metaprogram metaprogram/main.cpp)
