@@ -114,6 +114,8 @@ public:
     }
     void VisitFunctionalExpr(FunctionalExpr const &func) override
         { ResolveFunc(func, e_fts_in_function); }
+    void VisitClassyExpr(ClassyExpr const &cls) override
+        { ResolveClass(cls); }
 
     void VisitBlockStmt(BlockStmt const &block) override {
         BeginScope();
@@ -131,57 +133,14 @@ public:
         Declare(class_decl.name);
         Define(class_decl.name);
 
-        if (class_decl.superclass) {
-            if (class_decl.name.lexeme == class_decl.superclass->id.lexeme) {
-                error(*m_lox, class_decl.superclass->id,
-                    "A class can't inherit from itself");
-            }
-
-            Resolve(*class_decl.superclass);
+        if (class_decl.cls.superclass) {
+            auto *var =
+                dynamic_cast<VariableExpr *>(class_decl.cls.superclass.get());
+            if (var && class_decl.name.lexeme == var->id.lexeme)
+                error(*m_lox, var->id, "A class can't inherit from itself");
         }
 
-        STATE_GUARD(
-            m_class_traversal_state,
-            class_decl.superclass
-                ? SubclassStateFromInhToken(class_decl.inheritance_keyword)
-                : e_cts_in_class
-        );
-
-        BeginScope();
-
-        if (class_decl.superclass &&
-            class_decl.inheritance_keyword.type == e_tt_less)
-        {
-            DefineImplicitVar(c_implicit_super_tok);
-        }
-
-        BeginScope();
-
-        DefineImplicitVar(c_implicit_this_tok);
-        DefineImplicitVar(c_implicit_inner_tok);
-
-        for (auto const &method : class_decl.static_methods) {
-            if (method.name.lexeme == "init" && method.func.params.size()) {
-                error(*m_lox, method.name,
-                    "Static class init can't have arguments.");
-            }
-
-            ResolveFunc(method.func, e_fts_in_function);
-        }
-
-        for (auto const &method : class_decl.methods) {
-            ResolveFunc(
-                method.func,
-                method.name.lexeme == "init" ? e_fts_in_initializer :
-                    e_fts_in_method
-            );
-        }
-
-        for (auto const &getter : class_decl.getters)
-            ResolveFunc(getter.func, e_fts_in_method);
-
-        EndScope();
-        EndScope();
+        ResolveClass(class_decl.cls);
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         Resolve(*if_stmt.cond);
@@ -243,6 +202,66 @@ private:
             Define(param);
         }
         Resolve(func.body);
+        EndScope();
+    }
+
+    void ResolveClass(ClassyExpr const &cls) {
+        if (Expr *scls = cls.superclass.get()) {
+            if (auto *name = dynamic_cast<VariableExpr *>(scls))
+                Resolve(*name);
+            else if (auto *anon = dynamic_cast<ClassyExpr *>(scls))
+                ResolveClass(*anon);
+            else
+                assert(0);
+        }
+
+        STATE_GUARD(
+            m_class_traversal_state,
+            cls.superclass
+                ? SubclassStateFromInhToken(cls.inheritance_keyword)
+                : e_cts_in_class
+        );
+
+        BeginScope();
+
+        if (cls.superclass &&
+            m_class_traversal_state == e_cts_in_subclass)
+        {
+            DefineImplicitVar(c_implicit_super_tok);
+        }
+
+        BeginScope();
+
+        DefineImplicitVar(c_implicit_this_tok);
+        DefineImplicitVar(c_implicit_inner_tok);
+
+        for (auto const &method : cls.static_methods) {
+            auto const &m = *static_cast<FuncDeclStmt const *>(method.get());
+            if (m.name.lexeme == "init" && m.func.params.size()) {
+                error(*m_lox, m.name,
+                    "Static class init can't have arguments.");
+            }
+
+            ResolveFunc(m.func, e_fts_in_function);
+        }
+
+        for (auto const &method : cls.methods) {
+            auto const &m = *static_cast<FuncDeclStmt const *>(method.get());
+            ResolveFunc(
+                m.func,
+                m.name.lexeme == "init"
+                    ? e_fts_in_initializer
+                    : e_fts_in_method
+            );
+        }
+
+        for (auto const &getter : cls.getters) {
+            ResolveFunc(
+                static_cast<FuncDeclStmt const *>(getter.get())->func,
+                e_fts_in_method);
+        }
+
+        EndScope();
         EndScope();
     }
 

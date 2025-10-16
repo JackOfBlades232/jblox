@@ -145,6 +145,13 @@ int main(int argc, char **argv)
                         {"vector<token_t>", "params"},
                         {"vector<stmt_ptr_t>", "body"}
                     }},
+                    {"Classy", {
+                        {"expr_ptr_t", "superclass"},
+                        {"token_t", "inheritance_keyword"},
+                        {"vector<stmt_ptr_t>", "methods"},
+                        {"vector<stmt_ptr_t>", "static_methods"},
+                        {"vector<stmt_ptr_t>", "getters"}
+                    }},
                 }},
             {"Stmt",
                 {
@@ -156,11 +163,7 @@ int main(int argc, char **argv)
                     }},
                     {"ClassDecl", {
                         {"token_t", "name"},
-                        {"optional<VariableExpr>", "superclass"},
-                        {"token_t", "inheritance_keyword"},
-                        {"vector<FuncDeclStmt>", "methods"},
-                        {"vector<FuncDeclStmt>", "static_methods"},
-                        {"vector<FuncDeclStmt>", "getters"}
+                        {"ClassyExpr", "cls"}
                     }},
                     {"If", {
                         {"expr_ptr_t", "cond"},

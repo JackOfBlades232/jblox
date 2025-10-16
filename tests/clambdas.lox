@@ -1,0 +1,26 @@
+var myclass = class {
+    init(name) {
+        this.name = name;
+    }
+
+    greet() {
+        print "Hi " + this.name;
+        return this;
+    }
+};
+
+myclass("Mary").greet().greet();
+
+class Truck < class { init() { print "Made car"; } } {
+    init(kind) {
+        this.kind = kind;
+        super.init();
+        print "It is of kind " + this.kind;
+    }
+}
+
+Truck("gazel");
+
+class > class < Truck { init() { super.init("Apoc"); inner(); } } {
+    init() { print "Dakka dakka"; }
+}();

@@ -47,3 +47,31 @@ class C > B {
 C().m();
 print "";
 B().m();
+
+class AA {
+    m() {
+        print "A:" + this.akw;
+        inner();
+    }
+}
+
+class BB > AA {
+    m() {
+        print "B:" + this.bkw;
+        inner();
+    }
+}
+
+class CC > BB {
+    m() {
+        print "C:" + this.ckw;
+        inner();
+    }
+}
+
+var cc = CC();
+cc.ckw = "cig";
+cc.bkw = "deathstick";
+cc.akw = "fag";
+
+cc.m();

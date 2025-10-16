@@ -25,6 +25,7 @@ function run_all_tests {
     run_test classes.lox
     run_test objects.lox
     run_test inner.lox
+    run_test clambdas.lox
 }
 
 INTERP=../reference/craftinginterpreters/jlox

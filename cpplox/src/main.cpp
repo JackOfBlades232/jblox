@@ -343,6 +343,7 @@ token_t consume(parser_t &parser, token_type_t type, string_view message)
 expr_ptr_t parse_expr(parser_t &parser);
 expr_ptr_t parse_assignment(parser_t &parser);
 stmt_ptr_t parse_block(parser_t &parser);
+stmt_ptr_t parse_func_decl(parser_t &parser);
 
 expr_ptr_t parse_functional(parser_t &parser)
 {
@@ -371,6 +372,46 @@ expr_ptr_t parse_functional(parser_t &parser)
         move(static_cast<BlockStmt *>(parse_block(parser).get())->stmts);
 
     return make_shared<FunctionalExpr>(move(params), move(body));
+}
+
+expr_ptr_t parse_classy(parser_t &parser)
+{
+    expr_ptr_t superclass{};
+    token_t inh_kw = {};
+    if (match(parser, {e_tt_less, e_tt_greater})) {
+        inh_kw = previous(parser);
+        if (match(parser, e_tt_class)) {
+            superclass = parse_classy(parser);
+        } else {
+            token_t name =
+                consume(parser, e_tt_identifier, "Expected superclass name.");
+            superclass = make_shared<VariableExpr>(name);
+        }
+    }
+
+    consume(parser, e_tt_left_brace, "Expected '{' before class body.");
+
+    vector<stmt_ptr_t> methods{};
+    vector<stmt_ptr_t> static_methods{};
+    vector<stmt_ptr_t> getters{};
+    while (!check(parser, e_tt_right_brace) && !done(parser)) {
+        if (check_n(parser, {e_tt_identifier, e_tt_left_brace})) {
+            token_t name = consume(parser, e_tt_identifier, {}); // Can't err
+            consume(parser, e_tt_left_brace, {});
+            auto body = move(
+                static_cast<BlockStmt *>(parse_block(parser).get())->stmts);
+            getters.emplace_back(make_shared<FuncDeclStmt>(
+                name, FunctionalExpr{{}, move(body)}));
+        } else {
+            (match(parser, e_tt_class) ? static_methods : methods)
+                .emplace_back(parse_func_decl(parser));
+        }
+    }
+
+    consume(parser, e_tt_right_brace, "Expected '}' after class body.");
+
+    return make_shared<ClassyExpr>(
+        superclass, inh_kw, move(methods), move(static_methods), move(getters));
 }
 
 template <class TExpr, class TCallee>
@@ -413,6 +454,8 @@ expr_ptr_t parse_primary(parser_t &parser)
         return make_shared<ThisExpr>(previous(parser));
     if (match(parser, e_tt_fun))
         return parse_functional(parser);
+    if (match(parser, e_tt_class))
+        return parse_classy(parser);
 
     if (match(parser, e_tt_super)) {
         token_t keyword = previous(parser);
@@ -719,39 +762,9 @@ stmt_ptr_t parse_func_decl(parser_t &parser)
 stmt_ptr_t parse_class_decl(parser_t &parser)
 {
     token_t name = consume(parser, e_tt_identifier, "Expected class name.");
-
-    optional<VariableExpr> superclass{};
-    token_t inh_kw = {};
-    if (match(parser, {e_tt_less, e_tt_greater})) {
-        inh_kw = previous(parser);
-        token_t name =
-            consume(parser, e_tt_identifier, "Expected superclass name.");
-        superclass = VariableExpr{name};
-    }
-
-    consume(parser, e_tt_left_brace, "Expected '{' before class body.");
-
-    vector<FuncDeclStmt> methods{};
-    vector<FuncDeclStmt> static_methods{};
-    vector<FuncDeclStmt> getters{};
-    while (!check(parser, e_tt_right_brace) && !done(parser)) {
-        if (check_n(parser, {e_tt_identifier, e_tt_left_brace})) {
-            token_t name = consume(parser, e_tt_identifier, {}); // Can't err
-            consume(parser, e_tt_left_brace, {});
-            auto body = move(
-                static_cast<BlockStmt *>(parse_block(parser).get())->stmts);
-            getters.emplace_back(name, FunctionalExpr{{}, move(body)});
-        } else {
-            (match(parser, e_tt_class) ? static_methods : methods).emplace_back(
-                *dynamic_cast<FuncDeclStmt *>(parse_func_decl(parser).get()));
-        }
-    }
-
-    consume(parser, e_tt_right_brace, "Expected '}' after class body.");
-
+    expr_ptr_t def = parse_classy(parser);
     return make_shared<ClassDeclStmt>(
-        name, superclass, inh_kw,
-        move(methods), move(static_methods), move(getters));
+        name, move(*dynamic_cast<ClassyExpr *>(def.get())));
 }
 
 stmt_ptr_t parse_var_decl(parser_t &parser)
@@ -801,8 +814,10 @@ stmt_ptr_t parse_decl(parser_t &parser)
             advance(parser);
             return parse_func_decl(parser);
         }
-        if (match(parser, e_tt_class))
+        if (check_n(parser, {e_tt_class, e_tt_identifier})) {
+            advance(parser);
             return parse_class_decl(parser);
+        }
         if (match(parser, e_tt_var))
             return parse_var_decl(parser);
 
@@ -929,6 +944,11 @@ public:
         Indent();
         m_accum.append("})");
     }
+    void VisitClassyExpr(ClassyExpr const &cls) override {
+        m_accum.append("(anon class");
+        OutputClass(cls);
+        m_accum.append(")");
+    }
 
     void VisitBlockStmt(BlockStmt const &block) override {
         Indent();
@@ -970,31 +990,8 @@ public:
         Indent();
         m_accum.append("declare class ");
         m_accum.append(class_decl.name.lexeme);
-        if (class_decl.superclass) {
-            m_accum.append(", superclass ");
-            m_accum.append(class_decl.superclass->id.lexeme);
-        }
-        m_accum.append(" {\n");
-        Indent();
-        m_accum.append("static:\n");
-        ++m_depth;
-        for (auto const &method : class_decl.static_methods)
-            method.Accept(*this);
-        --m_depth;
-        Indent();
-        m_accum.append("dynamic:\n");
-        ++m_depth;
-        for (auto const &method : class_decl.methods)
-            method.Accept(*this);
-        --m_depth;
-        Indent();
-        m_accum.append("getters:\n");
-        ++m_depth;
-        for (auto const &getter : class_decl.getters)
-            getter.Accept(*this);
-        --m_depth;
-        Indent();
-        m_accum.append("}\n");
+        OutputClass(class_decl.cls);
+        m_accum.append("\n");
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         Indent();
@@ -1059,6 +1056,33 @@ public:
     }
 
 private:
+    void OutputClass(ClassyExpr const &cls) {
+        if (cls.superclass) {
+            m_accum.append(", superclass ");
+            cls.superclass->Accept(*this);
+        }
+        m_accum.append(" {\n");
+        Indent();
+        m_accum.append("static:\n");
+        ++m_depth;
+        for (auto const &method : cls.static_methods)
+            method->Accept(*this);
+        --m_depth;
+        Indent();
+        m_accum.append("dynamic:\n");
+        ++m_depth;
+        for (auto const &method : cls.methods)
+            method->Accept(*this);
+        --m_depth;
+        Indent();
+        m_accum.append("getters:\n");
+        ++m_depth;
+        for (auto const &getter : cls.getters)
+            getter->Accept(*this);
+        --m_depth;
+        Indent();
+        m_accum.append("}");
+    }
     void Parenthesize(string_view name, initializer_list<expr_ptr_t> exprs) {
         m_accum.append("(");
         m_accum.append(name);

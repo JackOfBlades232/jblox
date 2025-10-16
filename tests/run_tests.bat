@@ -17,6 +17,7 @@ call :RunTest binding.lox %*
 call :RunTest classes.lox %*
 call :RunTest objects.lox %*
 call :RunTest inner.lox %*
+call :RunTest clambdas.lox %*
 
 popd
 exit /b

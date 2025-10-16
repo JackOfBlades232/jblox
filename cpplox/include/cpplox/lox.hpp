@@ -201,12 +201,12 @@ public:
     LoxValue Bind(
         Interpreter &,
         lox_object_ptr_t const &,
-        lox_function_ptr_t const & = nullptr);
+        span<lox_function_ptr_t const> = {});
 };
 
 struct method_lookup_result_t {
     lox_function_ptr_t main = nullptr;
-    lox_function_ptr_t inner = nullptr;
+    vector<lox_function_ptr_t> inner_chain{};
 
     operator bool() const { return main != nullptr; }
 };
@@ -216,7 +216,7 @@ class LoxClass
     , public ILoxInstance
     , public enable_shared_from_this<LoxClass> {
 
-    string_view m_name;
+    optional<token_t> m_name{};
     lox_class_ptr_t m_superclass{};
     bool m_inverted_inheritance = false;
     unordered_map<string_view, lox_function_ptr_t> m_methods{};
@@ -227,7 +227,7 @@ class LoxClass
 
 public:
     LoxClass(
-            string_view name,
+            optional<token_t> const &name,
             lox_class_ptr_t superclass,
             bool inverted_inheritance,
             method_map_t methods,
@@ -257,7 +257,8 @@ public:
         m_getters = {};
     }
 
-    string ToString() const override { return string{m_name}; }
+    string ToString() const override
+        { return m_name ? string{m_name->lexeme} :  "<anon class>"; }
     int Arity() const override {
         if (auto [init, _] = FindMethod("init"))
             return init->Arity();
@@ -288,12 +289,16 @@ public:
         }
 
         if (m_superclass && m_inverted_inheritance) {
-            if (auto [m, i] = m_superclass->FindMethodInMap(map_member, name))
-                return {m, i ? i : local_method};
+            if (auto [m, i] = m_superclass->FindMethodInMap(map_member, name)) {
+                auto inner_chain = move(i);
+                if (local_method)
+                    inner_chain.emplace_back(local_method);
+                return {m, move(inner_chain)};
+            }
         }
 
         if (local_method)
-            return {local_method, nullptr};
+            return {local_method, {}};
 
         if (m_superclass && !m_inverted_inheritance)
             return m_superclass->FindMethodInMap(map_member, name);
@@ -614,9 +619,9 @@ public:
         lox_class_ptr_t superclass = dynamic_pointer_cast<LoxClass>(
             m_cur_env->LookupAt(super_id, depth, s.keyword).GetObject());
 
-        if (auto [m, i] = superclass->FindStaticMethod(s.method.lexeme)) {
+        if (auto [m, ic] = superclass->FindStaticMethod(s.method.lexeme)) {
             *prev_dest = m->Bind(
-                *this, static_pointer_cast<ILoxObject>(superclass), i);
+                *this, static_pointer_cast<ILoxObject>(superclass), ic);
             return;
         }
 
@@ -626,14 +631,14 @@ public:
                 .GetObject()
         );
 
-        if (auto [m, i] = superclass->FindMethod(s.method.lexeme)) {
+        if (auto [m, ic] = superclass->FindMethod(s.method.lexeme)) {
             *prev_dest = m->Bind(
-                *this, static_pointer_cast<ILoxObject>(inst), i);
+                *this, static_pointer_cast<ILoxObject>(inst), ic);
             return;
         }
-        if (auto [m, i] = superclass->FindGetter(s.method.lexeme)) {
+        if (auto [m, ic] = superclass->FindGetter(s.method.lexeme)) {
             *prev_dest = m
-                ->Bind(*this, static_pointer_cast<ILoxObject>(inst), i)
+                ->Bind(*this, static_pointer_cast<ILoxObject>(inst), ic)
                 .GetCallable()
                 .Call(*this, {});
             return;
@@ -681,6 +686,11 @@ public:
         LoxValue *prev_dest = exchange(m_dest, nullptr);
         *prev_dest = MakeObj<LoxFunction>(func, m_cur_env, false);
     }
+    void VisitClassyExpr(ClassyExpr const &cls) override {
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
+        *prev_dest = EvaluateClass(cls);
+    }
 
     void VisitBlockStmt(BlockStmt const &block) override
         { ExecuteBlock(block.stmts, MakeEnt<Environment>(m_cur_env)); }
@@ -691,69 +701,8 @@ public:
             func_decl.name,
             MakeObj<LoxFunction>(func_decl, m_cur_env, false));
     }
-    void VisitClassDeclStmt(ClassDeclStmt const &class_decl) override {
-        lox_class_ptr_t superclass{};
-        if (class_decl.superclass) {
-            auto superclass_val = Evaluate(*class_decl.superclass);
-            superclass = superclass_val.IsObject() ?
-                dynamic_pointer_cast<LoxClass>(superclass_val.GetObject()) :
-                nullptr;
-            if (!superclass) {
-                throw runtime_error_t{
-                    class_decl.superclass->id,
-                    "Superclass value must be a class."};
-            }
-        }
-
-        unordered_map<string_view, lox_function_ptr_t> methods{};
-        unordered_map<string_view, lox_function_ptr_t> static_methods{};
-        unordered_map<string_view, lox_function_ptr_t> getters{};
-
-        {
-            environment_ptr_t prev = m_cur_env;
-            DEFERM(m_cur_env = move(prev));
-            m_cur_env = MakeEnt<Environment>(m_cur_env);
-
-            if (class_decl.superclass &&
-                class_decl.inheritance_keyword.type == e_tt_less)
-            {
-                m_cur_env->Define(
-                    m_resolved_local_decls.at(c_implicit_super_tok),
-                    static_pointer_cast<ILoxObject>(superclass));
-            }
-
-            for (auto const &method : class_decl.methods) {
-                methods.emplace(
-                    method.name.lexeme,
-                    MakeEnt<LoxFunction>(
-                        method, m_cur_env, method.name.lexeme == "init")
-                );
-            }
-            for (auto const &method : class_decl.static_methods) {
-                static_methods.emplace(
-                    method.name.lexeme,
-                    MakeEnt<LoxFunction>(method, m_cur_env, false));
-            }
-
-            for (auto const &getter : class_decl.getters) {
-                getters.emplace(
-                    getter.name.lexeme,
-                    MakeEnt<LoxFunction>(getter, m_cur_env, false));
-            }
-        }
-
-        auto cls = MakeObj<LoxClass>(
-            class_decl.name.lexeme, move(superclass),
-            class_decl.inheritance_keyword.type == e_tt_greater,
-            move(methods), move(static_methods), move(getters), *this);
-        DefineVar(class_decl.name, cls);
-
-        if (auto [init, inner_init] =
-            dynamic_pointer_cast<LoxClass>(cls)->FindStaticMethod("init"))
-        {
-            init->Bind(*this, cls, inner_init).GetCallable().Call(*this, {}); 
-        }
-    }
+    void VisitClassDeclStmt(ClassDeclStmt const &class_decl) override
+        { EvaluateClass(class_decl.cls, class_decl.name); }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         if (is_truthy(Evaluate(*if_stmt.cond)))
             Execute(*if_stmt.then_branch);
@@ -811,6 +760,81 @@ private:
         m_cur_env = move(env);
         for (auto const &stmt : stmts)
             Execute(*stmt);
+    }
+
+    lox_object_ptr_t EvaluateClass(
+        ClassyExpr const &cls, optional<token_t> name = nullopt) {
+
+        lox_class_ptr_t superclass{};
+        if (cls.superclass) {
+            auto superclass_val = Evaluate(*cls.superclass);
+            superclass = superclass_val.IsObject() ?
+                dynamic_pointer_cast<LoxClass>(superclass_val.GetObject()) :
+                nullptr;
+            if (!superclass) {
+                throw runtime_error_t{
+                    cls.inheritance_keyword,
+                    "Superclass value must be a class."};
+            }
+        }
+
+        unordered_map<string_view, lox_function_ptr_t> methods{};
+        unordered_map<string_view, lox_function_ptr_t> static_methods{};
+        unordered_map<string_view, lox_function_ptr_t> getters{};
+
+        {
+            environment_ptr_t prev = m_cur_env;
+            DEFERM(m_cur_env = move(prev));
+            m_cur_env = MakeEnt<Environment>(m_cur_env);
+
+            if (cls.superclass &&
+                cls.inheritance_keyword.type == e_tt_less)
+            {
+                m_cur_env->Define(
+                    m_resolved_local_decls.at(c_implicit_super_tok),
+                    static_pointer_cast<ILoxObject>(superclass));
+            }
+
+            for (auto const &method : cls.methods) {
+                auto const &m =
+                    *static_cast<FuncDeclStmt const *>(method.get());
+                methods.emplace(
+                    m.name.lexeme,
+                    MakeEnt<LoxFunction>(m, m_cur_env, m.name.lexeme == "init")
+                );
+            }
+            for (auto const &method : cls.static_methods) {
+                auto const &m =
+                    *static_cast<FuncDeclStmt const *>(method.get());
+                static_methods.emplace(
+                    m.name.lexeme, MakeEnt<LoxFunction>(m, m_cur_env, false));
+            }
+
+            for (auto const &getter : cls.getters) {
+                auto const &g =
+                    *static_cast<FuncDeclStmt const *>(getter.get());
+                getters.emplace(
+                    g.name.lexeme, MakeEnt<LoxFunction>(g, m_cur_env, false));
+            }
+        }
+
+        auto cls_value = MakeObj<LoxClass>(
+            name, move(superclass),
+            cls.inheritance_keyword.type == e_tt_greater,
+            move(methods), move(static_methods), move(getters), *this);
+
+        if (name)
+            DefineVar(*name, cls_value);
+
+        if (auto [init, inner_init_chain] =
+            dynamic_pointer_cast<LoxClass>(cls_value)->FindStaticMethod("init"))
+        {
+            init->Bind(*this, cls_value, inner_init_chain)
+                .GetCallable()
+                .Call(*this, {}); 
+        }
+
+        return cls_value;
     }
 
     LoxValue LookupVar(token_t name, Expr const &expr) const {
@@ -906,32 +930,39 @@ inline LoxValue LoxFunction::Call(Interpreter &interp, span<LoxValue> args)
 inline LoxValue LoxFunction::Bind(
     Interpreter &interp,
     lox_object_ptr_t const &inst,
-    lox_function_ptr_t const &inner)
+    span<lox_function_ptr_t const> inner_chain)
 {
     environment_ptr_t env = interp.MakeEnt<Environment>(m_closure);
     env->Define(
         interp.m_resolved_local_decls.at(c_implicit_this_tok),
         inst);
+    auto bound_inner = c_nil;
+    if (inner_chain.size()) {
+        bound_inner = inner_chain.front()->Bind(
+            interp, inst, inner_chain.subspan(1));
+    }
     env->Define(
-        interp.m_resolved_local_decls.at(c_implicit_inner_tok),
-        inner ? LoxValue{dynamic_pointer_cast<ILoxObject>(inner)} : c_nil);
+        interp.m_resolved_local_decls.at(c_implicit_inner_tok), bound_inner);
     return interp.MakeObj<LoxFunction>(m_def, m_name, env, m_init);
 }
 
 inline LoxValue LoxClass::Call(Interpreter &interp, span<LoxValue> args)
 {
     auto inst = interp.MakeObj<LoxInstance>(shared_from_this());
-    auto [init, inner_init] = FindMethod("init");
-    if (init)
-        init->Bind(interp, inst, inner_init).GetCallable().Call(interp, args);
+    auto [init, inner_init_chain] = FindMethod("init");
+    if (init) {
+        init->Bind(interp, inst, inner_init_chain)
+            .GetCallable()
+            .Call(interp, args);
+    }
     return inst;
 }
 
 inline LoxValue LoxClass::Get(Interpreter &interp, token_t const &name)
 {
-    if (auto [m, i] = FindStaticMethod(name.lexeme)) {
+    if (auto [m, ic] = FindStaticMethod(name.lexeme)) {
         return m->Bind(
-            interp, static_pointer_cast<ILoxObject>(shared_from_this()), i);
+            interp, static_pointer_cast<ILoxObject>(shared_from_this()), ic);
     }
 
     throw runtime_error_t{
@@ -948,14 +979,14 @@ inline LoxValue LoxInstance::Get(Interpreter &interp, token_t const &name)
     if (auto it = m_fields.find(name.lexeme); it != m_fields.end())
         return it->second;
 
-    if (auto [m, i] = m_class->FindMethod(name.lexeme)) {
+    if (auto [m, ic] = m_class->FindMethod(name.lexeme)) {
         return m->Bind(
-            interp, static_pointer_cast<ILoxObject>(shared_from_this()), i);
+            interp, static_pointer_cast<ILoxObject>(shared_from_this()), ic);
     }
 
-    if (auto [m, i] = m_class->FindGetter(name.lexeme)) {
+    if (auto [m, ic] = m_class->FindGetter(name.lexeme)) {
         return m->Bind(
-            interp, static_pointer_cast<ILoxObject>(shared_from_this()), i)
+            interp, static_pointer_cast<ILoxObject>(shared_from_this()), ic)
             .GetCallable()
             .Call(interp, {});
     }
