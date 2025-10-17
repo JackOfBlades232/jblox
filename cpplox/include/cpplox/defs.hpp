@@ -92,7 +92,7 @@ struct Defer {
 #define DEFERM(stmt_) \
     detail::Defer CAT(defer__, __LINE__) {[&, this] { stmt_; }}
 
-inline class GlobalHiresTimer {
+class HiresTimer {
 #ifdef _WIN32
     LARGE_INTEGER m_hr_start, m_hr_freq;
 #else
@@ -100,7 +100,7 @@ inline class GlobalHiresTimer {
 #endif
 
 public:
-    GlobalHiresTimer() {
+    HiresTimer() {
 #ifdef _WIN32
         QueryPerformanceFrequency(&m_hr_freq);
         QueryPerformanceCounter(&m_hr_start);
@@ -109,9 +109,9 @@ public:
 #endif
     }
 
-    ~GlobalHiresTimer() {}
+    ~HiresTimer() {}
 
-    f64 MsFromProgramStart() const {
+    f64 MsFromStart() const {
 #ifdef _WIN32
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
@@ -126,7 +126,7 @@ public:
             f64(now.tv_nsec - m_hr_start.tv_nsec) / 1.0e6;
 #endif
     }
-} g_hires_timer{};
+};
 
 template <class T>
 inline void hash_combine(usize &seed, T const &v)

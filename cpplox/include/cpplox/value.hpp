@@ -123,7 +123,7 @@ struct ILoxCallable : virtual ILoxObject {
 
 struct ILoxInstance : virtual ILoxObject {
     virtual LoxValue Get(Interpreter &, token_t const &) = 0;
-    virtual void Set(token_t const &, LoxValue const &) = 0;
+    virtual void Set(Interpreter &, token_t const &, LoxValue const &) = 0;
 };
 
 inline bool LoxValue::IsCallable() const

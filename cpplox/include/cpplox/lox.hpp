@@ -270,7 +270,7 @@ public:
     LoxValue Call(Interpreter &, span<LoxValue>) override;
 
     LoxValue Get(Interpreter &, token_t const &) override;
-    void Set(token_t const &, LoxValue const &) override;
+    void Set(Interpreter &, token_t const &, LoxValue const &) override;
 
     lox_class_ptr_t Clone(Interpreter &) const;
     void Mixin(LoxMixin const &);
@@ -344,7 +344,7 @@ public:
     }
 
     string ToString() const override
-        { return m_name ? string{m_name->lexeme} :  "<anon class>"; }
+        { return m_name ? string{m_name->lexeme} : "<anon class>"; }
 
     span<lox_function_ptr_t const> GetMethods() const
         { return m_methods; }
@@ -352,6 +352,32 @@ public:
         { return m_static_methods; }
     span<lox_function_ptr_t const> GetGetters() const
         { return m_getters; }
+};
+
+class LoxModule : public ILoxInstance {
+
+    optional<token_t> m_name{};
+    environment_ptr_t m_closure{};
+
+public:
+    LoxModule(
+        optional<token_t> const &name,
+        ModuleExpr const &mod,
+        Interpreter &interp);
+
+    void Mark(entity_ref_collection_t &refs) const override
+    {
+        if (!register_ref(this, refs))
+            return;
+        mark_opt(m_closure, refs);
+    }
+    void Sweep() override { m_closure = {}; }
+
+    string ToString() const override
+        { return m_name ? string{m_name->lexeme} : "<anon module>"; }
+
+    LoxValue Get(Interpreter &, token_t const &) override;
+    void Set(Interpreter &, token_t const &, LoxValue const &) override;
 };
 
 class LoxInstance
@@ -381,7 +407,7 @@ public:
         { return format("<{} instance>", m_class->ToString()); }
 
     LoxValue Get(Interpreter &, token_t const &) override;
-    void Set(token_t const &, LoxValue const &) override;
+    void Set(Interpreter &, token_t const &, LoxValue const &) override;
 };
 
 class Interpreter : public IExprVisitor, public IStmtVisitor {
@@ -405,11 +431,16 @@ class Interpreter : public IExprVisitor, public IStmtVisitor {
 
     friend class LoxFunction;
     friend class LoxClass;
+    friend class LoxMixin;
+    friend class LoxModule;
     friend class LoxInstance;
 
-    struct Clock : public ILoxCallable {
+    class Clock : public ILoxCallable {
+        HiresTimer m_timer{};
+
+    public:
         LoxValue Call(Interpreter &, span<LoxValue>) override
-            { return g_hires_timer.MsFromProgramStart() / 1000.0; }
+            { return m_timer.MsFromStart() / 1000.0; }
         int Arity() const override { return 0; }
         void Mark(entity_ref_collection_t &refs) const override
             { register_ref(this, refs); }
@@ -656,7 +687,7 @@ public:
             throw runtime_error_t{set.name, "Only instances have fields."};
 
         LoxValue const val = Evaluate(*set.value);
-        obj.GetInstance().Set(set.name, val);
+        obj.GetInstance().Set(*this, set.name, val);
 
         *prev_dest = val;
     }
@@ -751,6 +782,11 @@ public:
         LoxValue *prev_dest = exchange(m_dest, nullptr);
         *prev_dest = EvaluateMixin(mixin);
     }
+    void VisitModuleExpr(ModuleExpr const &mod) override {
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
+        *prev_dest = MakeObj<LoxModule>(nullopt, mod, *this);
+    }
 
     void VisitBlockStmt(BlockStmt const &block) override
         { ExecuteBlock(block.stmts, MakeEnt<Environment>(m_cur_env)); }
@@ -765,6 +801,11 @@ public:
         { EvaluateClass(class_decl.cls, class_decl.name); }
     void VisitMixinDeclStmt(MixinDeclStmt const &mixin_decl) override
         { EvaluateMixin(mixin_decl.mixin, mixin_decl.name); }
+    void VisitModuleDeclStmt(ModuleDeclStmt const &mod_decl) override {
+        DefineVar(
+            mod_decl.name,
+            MakeObj<LoxModule>(mod_decl.name, mod_decl.mod, *this));
+    }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         if (is_truthy(Evaluate(*if_stmt.cond)))
             Execute(*if_stmt.then_branch);
@@ -1099,7 +1140,8 @@ inline LoxValue LoxClass::Get(Interpreter &interp, token_t const &name)
         name, format("Undefined static method '{}'", name.lexeme)};
 }
 
-inline void LoxClass::Set(token_t const &name, LoxValue const &)
+inline void LoxClass::Set(
+    Interpreter &, token_t const &name, LoxValue const &)
 {
     throw runtime_error_t{name, "Can't define properties on classes."};
 }
@@ -1119,6 +1161,30 @@ inline void LoxClass::Mixin(LoxMixin const &mixin)
         m_static_methods.emplace(method->GetName()->lexeme, method);
     for (auto const &getter : mixin.GetGetters())
         m_getters.emplace(getter->GetName()->lexeme, getter);
+}
+
+inline LoxModule::LoxModule(
+    optional<token_t> const &name, ModuleExpr const &mod, Interpreter &interp)
+{
+    m_closure = interp.MakeEnt<Environment>(interp.m_cur_env);
+    interp.ExecuteBlock(mod.body, m_closure);
+    // @TODO: we need to convert the closure to a proper dict right about
+    // now. This is problematic because of the whole resolved ids stuff.
+    // Hmm...
+}
+
+inline LoxValue LoxModule::Get(Interpreter &interp, token_t const &name)
+{
+    // @TODO: query off of the resolved dict
+    return {};
+}
+
+inline void LoxModule::Set(
+    Interpreter &interp, token_t const &name, LoxValue const &val)
+{
+    // @TODO:
+    // 1) Check that it is a var, and not a func/class/mixin
+    // 2) Set
 }
 
 inline LoxValue LoxInstance::Get(Interpreter &interp, token_t const &name)
@@ -1141,7 +1207,8 @@ inline LoxValue LoxInstance::Get(Interpreter &interp, token_t const &name)
     throw runtime_error_t{name, format("Undefined property '{}'", name.lexeme)};
 }
 
-inline void LoxInstance::Set(token_t const &name, LoxValue const &val)
+inline void LoxInstance::Set(
+    Interpreter &, token_t const &name, LoxValue const &val)
 {
     m_fields.insert_or_assign(name.lexeme, val);
 }

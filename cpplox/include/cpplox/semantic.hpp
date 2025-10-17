@@ -130,6 +130,8 @@ public:
         { ResolveClass(cls); }
     void VisitMixinExpr(MixinExpr const &mixin) override
         { ResolveMixin(mixin); }
+    void VisitModuleExpr(ModuleExpr const &mod) override
+        { ResolveModule(mod); }
 
     void VisitBlockStmt(BlockStmt const &block) override {
         BeginScope();
@@ -160,6 +162,11 @@ public:
         Declare(mixin_decl.name);
         Define(mixin_decl.name);
         ResolveMixin(mixin_decl.mixin);
+    }
+    void VisitModuleDeclStmt(ModuleDeclStmt const &mod_decl) override {
+        Declare(mod_decl.name);
+        Define(mod_decl.name);
+        ResolveModule(mod_decl.mod);
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         Resolve(*if_stmt.cond);
@@ -306,6 +313,16 @@ private:
                 e_fts_in_method);
         }
 
+        EndScope();
+    }
+
+    void ResolveModule(ModuleExpr const &mod) {
+        STATE_GUARD(m_func_traversal_state, e_fts_none);
+        STATE_GUARD(m_class_traversal_state, e_cts_none);
+        STATE_GUARD(m_loop_traversal_state, e_lts_none);
+
+        BeginScope();
+        Resolve(mod.body);
         EndScope();
     }
 

@@ -459,6 +459,16 @@ expr_ptr_t parse_classy(parser_t &parser)
         move(method_decls.getters));
 }
 
+expr_ptr_t parse_module(parser_t &parser)
+{
+    consume(
+        parser, e_tt_left_brace, "Expected '{' before module body.");
+    auto body =
+        move(static_cast<BlockStmt *>(parse_block(parser).get())->stmts);
+
+    return make_shared<ModuleExpr>(move(body));
+}
+
 template <class TExpr, class TCallee>
 expr_ptr_t finish_parsing_call(parser_t &parser, TCallee callee)
 {
@@ -503,6 +513,8 @@ expr_ptr_t parse_primary(parser_t &parser)
         return parse_classy(parser);
     if (match(parser, e_tt_mixin))
         return parse_mixin(parser);
+    if (match(parser, e_tt_module))
+        return parse_module(parser);
 
     if (match(parser, e_tt_super)) {
         token_t keyword = previous(parser);
@@ -827,6 +839,14 @@ stmt_ptr_t parse_mixin_decl(parser_t &parser)
         name, move(*dynamic_cast<MixinExpr *>(def.get())));
 }
 
+stmt_ptr_t parse_module_decl(parser_t &parser)
+{
+    token_t name = consume(parser, e_tt_identifier, "Expected module name.");
+    expr_ptr_t def = parse_module(parser);
+    return make_shared<ModuleDeclStmt>(
+        name, move(*dynamic_cast<ModuleExpr *>(def.get())));
+}
+
 stmt_ptr_t parse_var_decl(parser_t &parser)
 {
     token_t const id =
@@ -851,7 +871,8 @@ void sync_parser(parser_t &parser)
         
         if (check_n(parser, {e_tt_fun, e_tt_identifier}) ||
             check_n(parser, {e_tt_class, e_tt_identifier}) ||
-            check_n(parser, {e_tt_mixin, e_tt_identifier}))
+            check_n(parser, {e_tt_mixin, e_tt_identifier}) ||
+            check_n(parser, {e_tt_module, e_tt_identifier}))
         {
             return;
         }
@@ -886,6 +907,10 @@ stmt_ptr_t parse_decl(parser_t &parser)
         if (check_n(parser, {e_tt_mixin, e_tt_identifier})) {
             advance(parser);
             return parse_mixin_decl(parser);
+        }
+        if (check_n(parser, {e_tt_module, e_tt_identifier})) {
+            advance(parser);
+            return parse_module_decl(parser);
         }
         if (match(parser, e_tt_var))
             return parse_var_decl(parser);
@@ -1023,6 +1048,15 @@ public:
         OutputMethods(mixin.static_methods, mixin.methods, mixin.getters);
         m_accum.append(")");
     }
+    void VisitModuleExpr(ModuleExpr const &mod) override {
+        m_accum.append("(anon module {\n");
+        ++m_depth;
+        for (auto const &stmt : mod.body)
+            stmt->Accept(*this);
+        --m_depth;
+        Indent();
+        m_accum.append("})");
+    }
 
     void VisitBlockStmt(BlockStmt const &block) override {
         Indent();
@@ -1076,6 +1110,18 @@ public:
             mixin_decl.mixin.methods,
             mixin_decl.mixin.getters);
         m_accum.append("\n");
+    }
+    void VisitModuleDeclStmt(ModuleDeclStmt const &mod_decl) override {
+        Indent();
+        m_accum.append("declare module ");
+        m_accum.append(mod_decl.name.lexeme);
+        m_accum.append(" {\n");
+        ++m_depth;
+        for (auto const &stmt : mod_decl.mod.body)
+            stmt->Accept(*this);
+        --m_depth;
+        Indent();
+        m_accum.append("}\n");
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         Indent();

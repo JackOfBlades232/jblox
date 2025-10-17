@@ -159,6 +159,7 @@ int main(int argc, char **argv)
                         {"vector<stmt_ptr_t>", "static_methods"},
                         {"vector<stmt_ptr_t>", "getters"}
                     }},
+                    {"Module", {{"vector<stmt_ptr_t>", "body"}}},
                 }},
             {"Stmt",
                 {
@@ -175,6 +176,10 @@ int main(int argc, char **argv)
                     {"MixinDecl", {
                         {"token_t", "name"},
                         {"MixinExpr", "mixin"}
+                    }},
+                    {"ModuleDecl", {
+                        {"token_t", "name"},
+                        {"ModuleExpr", "mod"}
                     }},
                     {"If", {
                         {"expr_ptr_t", "cond"},
