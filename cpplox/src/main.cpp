@@ -374,6 +374,44 @@ expr_ptr_t parse_functional(parser_t &parser)
     return make_shared<FunctionalExpr>(move(params), move(body));
 }
 
+struct method_decls_t {
+    vector<stmt_ptr_t> methods{};
+    vector<stmt_ptr_t> static_methods{};
+    vector<stmt_ptr_t> getters{};
+};
+
+method_decls_t parse_methods(parser_t &parser)
+{
+    method_decls_t decls = {};
+    while (!check(parser, e_tt_right_brace) && !done(parser)) {
+        if (check_n(parser, {e_tt_identifier, e_tt_left_brace})) {
+            token_t name = consume(parser, e_tt_identifier, {}); // Can't err
+            consume(parser, e_tt_left_brace, {});
+            auto body = move(
+                static_cast<BlockStmt *>(parse_block(parser).get())->stmts);
+            decls.getters.emplace_back(make_shared<FuncDeclStmt>(
+                name, FunctionalExpr{{}, move(body)}));
+        } else {
+            (match(parser, e_tt_class) ? decls.static_methods : decls.methods)
+                .emplace_back(parse_func_decl(parser));
+        }
+    }
+
+    return decls;
+}
+
+expr_ptr_t parse_mixin(parser_t &parser)
+{
+    consume(parser, e_tt_left_brace, "Expected '{' before mixin body.");
+    method_decls_t method_decls = parse_methods(parser);
+    consume(parser, e_tt_right_brace, "Expected '}' after mixin body.");
+
+    return make_shared<MixinExpr>(
+        move(method_decls.methods),
+        move(method_decls.static_methods),
+        move(method_decls.getters));
+}
+
 expr_ptr_t parse_classy(parser_t &parser)
 {
     expr_ptr_t superclass{};
@@ -389,29 +427,36 @@ expr_ptr_t parse_classy(parser_t &parser)
         }
     }
 
-    consume(parser, e_tt_left_brace, "Expected '{' before class body.");
+    vector<expr_ptr_t> mixins{};
+    token_t mixin_kw = {};
+    if (match(parser, e_tt_with)) {
+        mixin_kw = previous(parser);
+        do {
+            if (mixins.size() >= 255) {
+                error(parser, peek(parser),
+                    "Can't define a class with more than 255 mixins.");
+            }
 
-    vector<stmt_ptr_t> methods{};
-    vector<stmt_ptr_t> static_methods{};
-    vector<stmt_ptr_t> getters{};
-    while (!check(parser, e_tt_right_brace) && !done(parser)) {
-        if (check_n(parser, {e_tt_identifier, e_tt_left_brace})) {
-            token_t name = consume(parser, e_tt_identifier, {}); // Can't err
-            consume(parser, e_tt_left_brace, {});
-            auto body = move(
-                static_cast<BlockStmt *>(parse_block(parser).get())->stmts);
-            getters.emplace_back(make_shared<FuncDeclStmt>(
-                name, FunctionalExpr{{}, move(body)}));
-        } else {
-            (match(parser, e_tt_class) ? static_methods : methods)
-                .emplace_back(parse_func_decl(parser));
-        }
+            if (match(parser, e_tt_mixin)) {
+                mixins.emplace_back(parse_mixin(parser));
+            } else {
+                token_t name =
+                    consume(parser, e_tt_identifier, "Expected mixin name.");
+                mixins.emplace_back(make_shared<VariableExpr>(name));
+            }
+        } while (match(parser, e_tt_comma));
     }
 
+    consume(parser, e_tt_left_brace, "Expected '{' before class body.");
+    method_decls_t method_decls = parse_methods(parser);
     consume(parser, e_tt_right_brace, "Expected '}' after class body.");
 
     return make_shared<ClassyExpr>(
-        superclass, inh_kw, move(methods), move(static_methods), move(getters));
+        superclass, inh_kw, mixin_kw,
+        move(mixins),
+        move(method_decls.methods),
+        move(method_decls.static_methods),
+        move(method_decls.getters));
 }
 
 template <class TExpr, class TCallee>
@@ -456,6 +501,8 @@ expr_ptr_t parse_primary(parser_t &parser)
         return parse_functional(parser);
     if (match(parser, e_tt_class))
         return parse_classy(parser);
+    if (match(parser, e_tt_mixin))
+        return parse_mixin(parser);
 
     if (match(parser, e_tt_super)) {
         token_t keyword = previous(parser);
@@ -583,9 +630,14 @@ expr_ptr_t parse_choice(parser_t &parser)
     return expr;
 }
 
+expr_ptr_t parse_with(parser_t &parser)
+{
+    return parse_left_associative_chain<parse_choice, e_tt_with>(parser);
+}
+
 expr_ptr_t parse_assignment(parser_t &parser)
 {
-    expr_ptr_t expr = parse_choice(parser);
+    expr_ptr_t expr = parse_with(parser);
     
     if (match(parser, e_tt_equal)) {
         token_t eq = previous(parser);
@@ -767,6 +819,14 @@ stmt_ptr_t parse_class_decl(parser_t &parser)
         name, move(*dynamic_cast<ClassyExpr *>(def.get())));
 }
 
+stmt_ptr_t parse_mixin_decl(parser_t &parser)
+{
+    token_t name = consume(parser, e_tt_identifier, "Expected mixin name.");
+    expr_ptr_t def = parse_mixin(parser);
+    return make_shared<MixinDeclStmt>(
+        name, move(*dynamic_cast<MixinExpr *>(def.get())));
+}
+
 stmt_ptr_t parse_var_decl(parser_t &parser)
 {
     token_t const id =
@@ -788,10 +848,15 @@ void sync_parser(parser_t &parser)
     while (!done(parser)) {
         if (previous(parser).type == e_tt_semicolon)
             break;
+        
+        if (check_n(parser, {e_tt_fun, e_tt_identifier}) ||
+            check_n(parser, {e_tt_class, e_tt_identifier}) ||
+            check_n(parser, {e_tt_mixin, e_tt_identifier}))
+        {
+            return;
+        }
 
         switch (peek(parser).type) {
-        case e_tt_class:
-        case e_tt_fun:
         case e_tt_var:
         case e_tt_for:
         case e_tt_if:
@@ -817,6 +882,10 @@ stmt_ptr_t parse_decl(parser_t &parser)
         if (check_n(parser, {e_tt_class, e_tt_identifier})) {
             advance(parser);
             return parse_class_decl(parser);
+        }
+        if (check_n(parser, {e_tt_mixin, e_tt_identifier})) {
+            advance(parser);
+            return parse_mixin_decl(parser);
         }
         if (match(parser, e_tt_var))
             return parse_var_decl(parser);
@@ -949,6 +1018,11 @@ public:
         OutputClass(cls);
         m_accum.append(")");
     }
+    void VisitMixinExpr(MixinExpr const &mixin) override {
+        m_accum.append("(anon mixin");
+        OutputMethods(mixin.static_methods, mixin.methods, mixin.getters);
+        m_accum.append(")");
+    }
 
     void VisitBlockStmt(BlockStmt const &block) override {
         Indent();
@@ -991,6 +1065,16 @@ public:
         m_accum.append("declare class ");
         m_accum.append(class_decl.name.lexeme);
         OutputClass(class_decl.cls);
+        m_accum.append("\n");
+    }
+    void VisitMixinDeclStmt(MixinDeclStmt const &mixin_decl) override {
+        Indent();
+        m_accum.append("declare mixin ");
+        m_accum.append(mixin_decl.name.lexeme);
+        OutputMethods(
+            mixin_decl.mixin.static_methods,
+            mixin_decl.mixin.methods,
+            mixin_decl.mixin.getters);
         m_accum.append("\n");
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {
@@ -1061,23 +1145,39 @@ private:
             m_accum.append(", superclass ");
             cls.superclass->Accept(*this);
         }
+        if (cls.mixins.size()) {
+            m_accum.append(", mixins: ");
+            bool comma = false;
+            for (auto const &mixin : cls.mixins) {
+                if (exchange(comma, true))
+                    m_accum.append(", ");
+                mixin->Accept(*this);
+            }
+        }
+        OutputMethods(cls.static_methods, cls.methods, cls.getters);
+    }
+    void OutputMethods(
+        span<stmt_ptr_t const> static_methods,
+        span<stmt_ptr_t const> methods,
+        span<stmt_ptr_t const> getters) {
+
         m_accum.append(" {\n");
         Indent();
         m_accum.append("static:\n");
         ++m_depth;
-        for (auto const &method : cls.static_methods)
+        for (auto const &method : static_methods)
             method->Accept(*this);
         --m_depth;
         Indent();
         m_accum.append("dynamic:\n");
         ++m_depth;
-        for (auto const &method : cls.methods)
+        for (auto const &method : methods)
             method->Accept(*this);
         --m_depth;
         Indent();
         m_accum.append("getters:\n");
         ++m_depth;
-        for (auto const &getter : cls.getters)
+        for (auto const &getter : getters)
             getter->Accept(*this);
         --m_depth;
         Indent();

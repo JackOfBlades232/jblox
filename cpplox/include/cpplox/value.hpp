@@ -221,6 +221,12 @@ inline void mark_opt(auto const &opt, entity_ref_collection_t &refs)
         opt->Mark(refs);
 }
 
+inline void mark_list(auto const &list, entity_ref_collection_t &refs)
+{
+    for (auto const &e : list)
+        e->Mark(refs);
+}
+
 inline void mark_map(auto const &map, entity_ref_collection_t &refs)
 {
     for (auto const &[_, e] : map)

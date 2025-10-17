@@ -1,0 +1,83 @@
+mixin PrintableName {
+    printName() {
+        print "Name: " + this.name;
+    }
+}
+
+class Human with PrintableName {
+    init(name) {
+        this.name = name;
+        print name + " was born";
+    }
+}
+
+mixin Greetable {
+    greet() {
+        print "Hi, " + this.name + "!";
+        return this;
+    }
+
+    init(name) {
+        this.name = name;
+        print "If you weren't properly introduced, " + this.name + " was born!";
+    }
+
+    class helloToAll() {
+        print "Welcome All!";
+    }
+}
+
+class Rat {}
+
+var niceHuman = Human with Greetable;
+
+Human("Petr").printName();
+niceHuman("Alexandra").greet();
+
+var rata = (Rat with Greetable)("Ratatouille");
+rata.greet();
+
+niceHuman.helloToAll();
+
+var civilizedRat = Rat with PrintableName with Greetable;
+civilizedRat("Skavenman").greet().printName();
+
+fun makeAlohaClass(cls) {
+    mixin Alohalable {
+        aloha() {
+            print "Aloha!";
+        }
+    }
+
+    return cls with Alohalable;
+}
+
+var poly = makeAlohaClass(niceHuman);
+poly("MarkHunt").aloha();
+
+class EasternRat < Rat with Greetable, PrintableName {}
+print EasternRat;
+EasternRat("Salladin").greet().printName();
+
+mixin Wrappable {
+    output(text) {
+        print this.leftDelim;
+        inner(text);
+        print this.rightDelim;
+    }
+}
+
+class BlockPrinter with Wrappable {
+    init(l, r) {
+        this.leftDelim = l;
+        this.rightDelim = r;
+    }
+}
+
+class TextBlockPrinter > BlockPrinter {
+    output(text) {
+        print text;
+    }
+}
+
+TextBlockPrinter("{", "}").output("    RAII!");

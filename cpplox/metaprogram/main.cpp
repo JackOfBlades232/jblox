@@ -148,6 +148,13 @@ int main(int argc, char **argv)
                     {"Classy", {
                         {"expr_ptr_t", "superclass"},
                         {"token_t", "inheritance_keyword"},
+                        {"token_t", "mixin_keyword"},
+                        {"vector<expr_ptr_t>", "mixins"},
+                        {"vector<stmt_ptr_t>", "methods"},
+                        {"vector<stmt_ptr_t>", "static_methods"},
+                        {"vector<stmt_ptr_t>", "getters"}
+                    }},
+                    {"Mixin", {
                         {"vector<stmt_ptr_t>", "methods"},
                         {"vector<stmt_ptr_t>", "static_methods"},
                         {"vector<stmt_ptr_t>", "getters"}
@@ -164,6 +171,10 @@ int main(int argc, char **argv)
                     {"ClassDecl", {
                         {"token_t", "name"},
                         {"ClassyExpr", "cls"}
+                    }},
+                    {"MixinDecl", {
+                        {"token_t", "name"},
+                        {"MixinExpr", "mixin"}
                     }},
                     {"If", {
                         {"expr_ptr_t", "cond"},

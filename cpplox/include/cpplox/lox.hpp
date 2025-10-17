@@ -148,6 +148,7 @@ public:
 
 class LoxFunction;
 class LoxClass;
+class LoxMixin;
 class LoxInstance;
 
 using lox_function_ptr_t = shared_ptr<LoxFunction>;
@@ -202,6 +203,8 @@ public:
         Interpreter &,
         lox_object_ptr_t const &,
         span<lox_function_ptr_t const> = {});
+
+    optional<token_t> GetName() const { return m_name; }
 };
 
 struct method_lookup_result_t {
@@ -232,8 +235,7 @@ public:
             bool inverted_inheritance,
             method_map_t methods,
             method_map_t static_methods,
-            method_map_t getters,
-            Interpreter &interp)
+            method_map_t getters)
         : m_name{name}
         , m_superclass{superclass}
         , m_inverted_inheritance{inverted_inheritance}
@@ -270,6 +272,9 @@ public:
     LoxValue Get(Interpreter &, token_t const &) override;
     void Set(token_t const &, LoxValue const &) override;
 
+    lox_class_ptr_t Clone(Interpreter &) const;
+    void Mixin(LoxMixin const &);
+
     method_lookup_result_t FindMethod(string_view name) const
         { return FindMethodInMap(&LoxClass::m_methods, name); }
     method_lookup_result_t FindStaticMethod(string_view name) const
@@ -305,6 +310,48 @@ public:
 
         return {};
     }
+};
+
+class LoxMixin : public ILoxObject {
+    optional<token_t> m_name{};
+    vector<lox_function_ptr_t> m_methods{};
+    vector<lox_function_ptr_t> m_static_methods{};
+    vector<lox_function_ptr_t> m_getters{};
+
+public:
+    LoxMixin(
+            optional<token_t> const &name,
+            vector<lox_function_ptr_t> methods,
+            vector<lox_function_ptr_t> static_methods,
+            vector<lox_function_ptr_t> getters)
+        : m_name{name}
+        , m_methods{move(methods)}
+        , m_static_methods{move(static_methods)}
+        , m_getters{move(getters)} {}
+
+    void Mark(entity_ref_collection_t &refs) const override
+    {
+        if (!register_ref(this, refs))
+            return;
+        mark_list(m_methods, refs);
+        mark_list(m_static_methods, refs);
+        mark_list(m_getters, refs);
+    }
+    void Sweep() override {
+        m_methods = {};
+        m_static_methods = {};
+        m_getters = {};
+    }
+
+    string ToString() const override
+        { return m_name ? string{m_name->lexeme} :  "<anon class>"; }
+
+    span<lox_function_ptr_t const> GetMethods() const
+        { return m_methods; }
+    span<lox_function_ptr_t const> GetStaticMethods() const
+        { return m_static_methods; }
+    span<lox_function_ptr_t const> GetGetters() const
+        { return m_getters; }
 };
 
 class LoxInstance
@@ -535,6 +582,14 @@ public:
             val = is_truthy(r);
             break;
 
+        case e_tt_with: {
+            CheckWithOperands(binary.op, l, r);
+            auto cval =
+                dynamic_cast<LoxClass *>(l.GetObject().get())->Clone(*this);
+            cval->Mixin(*dynamic_cast<LoxMixin *>(r.GetObject().get()));
+            val = static_pointer_cast<ILoxObject>(cval);
+        } break;
+
         case e_tt_comma:
             val = r;
             break;
@@ -691,6 +746,11 @@ public:
         LoxValue *prev_dest = exchange(m_dest, nullptr);
         *prev_dest = EvaluateClass(cls);
     }
+    void VisitMixinExpr(MixinExpr const &mixin) override {
+        assert(m_dest);
+        LoxValue *prev_dest = exchange(m_dest, nullptr);
+        *prev_dest = EvaluateMixin(mixin);
+    }
 
     void VisitBlockStmt(BlockStmt const &block) override
         { ExecuteBlock(block.stmts, MakeEnt<Environment>(m_cur_env)); }
@@ -703,6 +763,8 @@ public:
     }
     void VisitClassDeclStmt(ClassDeclStmt const &class_decl) override
         { EvaluateClass(class_decl.cls, class_decl.name); }
+    void VisitMixinDeclStmt(MixinDeclStmt const &mixin_decl) override
+        { EvaluateMixin(mixin_decl.mixin, mixin_decl.name); }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         if (is_truthy(Evaluate(*if_stmt.cond)))
             Execute(*if_stmt.then_branch);
@@ -750,6 +812,18 @@ private:
         if (l.IsNumber() && r.IsNumber())
             return;
         throw runtime_error_t{tok, "Operands must be numbers."};
+    }
+
+    void CheckWithOperands(
+        token_t tok, LoxValue const &l, LoxValue const &r) const {
+
+        if (l.IsObject() && r.IsObject() &&
+            dynamic_cast<LoxClass *>(l.GetObject().get()) &&
+            dynamic_cast<LoxMixin *>(r.GetObject().get()))
+        {
+            return;
+        }
+        throw runtime_error_t{tok, "Operands must be a class and a mixin."};
     }
 
     void ExecuteBlock(
@@ -809,7 +883,6 @@ private:
                 static_methods.emplace(
                     m.name.lexeme, MakeEnt<LoxFunction>(m, m_cur_env, false));
             }
-
             for (auto const &getter : cls.getters) {
                 auto const &g =
                     *static_cast<FuncDeclStmt const *>(getter.get());
@@ -821,13 +894,28 @@ private:
         auto cls_value = MakeObj<LoxClass>(
             name, move(superclass),
             cls.inheritance_keyword.type == e_tt_greater,
-            move(methods), move(static_methods), move(getters), *this);
+            move(methods), move(static_methods), move(getters));
+        auto cls_concrete = dynamic_pointer_cast<LoxClass>(cls_value);
+
+        for (auto const &mixin_expr : cls.mixins) {
+            auto mixin_val = Evaluate(*mixin_expr);
+            auto mixin = mixin_val.IsObject() ?
+                dynamic_pointer_cast<LoxMixin>(mixin_val.GetObject()) :
+                nullptr;
+            if (!mixin) {
+                throw runtime_error_t{
+                    cls.mixin_keyword,
+                    "Mixin value must be a mixin."};
+            }
+
+            cls_concrete->Mixin(*mixin);
+        }
 
         if (name)
             DefineVar(*name, cls_value);
 
         if (auto [init, inner_init_chain] =
-            dynamic_pointer_cast<LoxClass>(cls_value)->FindStaticMethod("init"))
+            cls_concrete->FindStaticMethod("init"))
         {
             init->Bind(*this, cls_value, inner_init_chain)
                 .GetCallable()
@@ -835,6 +923,48 @@ private:
         }
 
         return cls_value;
+    }
+
+    lox_object_ptr_t EvaluateMixin(
+        MixinExpr const &mixin, optional<token_t> name = nullopt) {
+
+        vector<lox_function_ptr_t> methods{};
+        vector<lox_function_ptr_t> static_methods{};
+        vector<lox_function_ptr_t> getters{};
+
+        {
+            environment_ptr_t prev = m_cur_env;
+            DEFERM(m_cur_env = move(prev));
+            m_cur_env = MakeEnt<Environment>(m_cur_env);
+
+            for (auto const &method : mixin.methods) {
+                auto const &m =
+                    *static_cast<FuncDeclStmt const *>(method.get());
+                methods.emplace_back(
+                    MakeEnt<LoxFunction>(m, m_cur_env, m.name.lexeme == "init")
+                );
+            }
+            for (auto const &method : mixin.static_methods) {
+                auto const &m =
+                    *static_cast<FuncDeclStmt const *>(method.get());
+                static_methods.emplace_back(
+                     MakeEnt<LoxFunction>(m, m_cur_env, false));
+            }
+            for (auto const &getter : mixin.getters) {
+                auto const &g =
+                    *static_cast<FuncDeclStmt const *>(getter.get());
+                getters.emplace_back(
+                    MakeEnt<LoxFunction>(g, m_cur_env, false));
+            }
+        }
+
+        auto mixin_value = MakeObj<LoxMixin>(
+            name, move(methods), move(static_methods), move(getters));
+
+        if (name)
+            DefineVar(*name, mixin_value);
+
+        return mixin_value;
     }
 
     LoxValue LookupVar(token_t name, Expr const &expr) const {
@@ -972,6 +1102,23 @@ inline LoxValue LoxClass::Get(Interpreter &interp, token_t const &name)
 inline void LoxClass::Set(token_t const &name, LoxValue const &)
 {
     throw runtime_error_t{name, "Can't define properties on classes."};
+}
+
+inline lox_class_ptr_t LoxClass::Clone(Interpreter &interp) const
+{
+    LoxClass clone = *this;
+    return dynamic_pointer_cast<LoxClass>(
+        interp.MakeObj<LoxClass>(move(clone)));
+}
+
+inline void LoxClass::Mixin(LoxMixin const &mixin)
+{
+    for (auto const &method : mixin.GetMethods())
+        m_methods.emplace(method->GetName()->lexeme, method);
+    for (auto const &method : mixin.GetStaticMethods())
+        m_static_methods.emplace(method->GetName()->lexeme, method);
+    for (auto const &getter : mixin.GetGetters())
+        m_getters.emplace(getter->GetName()->lexeme, getter);
 }
 
 inline LoxValue LoxInstance::Get(Interpreter &interp, token_t const &name)

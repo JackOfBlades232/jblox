@@ -17,13 +17,21 @@ class Resolver : public IExprVisitor, public IStmtVisitor {
         unordered_map<string_view, var_record_t> vars{};
     };
     enum func_traversal_state_t {
-        e_fts_none, e_fts_in_function, e_fts_in_method, e_fts_in_initializer
+        e_fts_none,
+        e_fts_in_function,
+        e_fts_in_method,
+        e_fts_in_initializer
     };
     enum class_traversal_state_t {
-        e_cts_none, e_cts_in_class, e_cts_in_subclass, e_cts_in_inv_subclass
+        e_cts_none,
+        e_cts_in_class,
+        e_cts_in_subclass,
+        e_cts_in_inv_subclass,
+        e_cts_in_mixin
     };
     enum loop_traversal_state_t {
-        e_lts_none, e_lts_in_while
+        e_lts_none,
+        e_lts_in_while
     };
 
     vector<scope_t> m_scopes{};
@@ -92,6 +100,8 @@ public:
             error(*m_lox, s.keyword,
                 "Can't use 'super' in an inverted subclass. "
                 "Use inner in parent.");
+        } else if (m_class_traversal_state == e_cts_in_mixin) {
+            error(*m_lox, s.keyword, "Can't use 'super' in a mixin.");
         }
         ResolveLocal(s, s.keyword);
     }
@@ -99,6 +109,8 @@ public:
         if (m_class_traversal_state == e_cts_none)
             error(*m_lox, i.keyword, "Can't use 'inner' outside of a class.");
         ResolveLocal(i, i.keyword);
+        for (auto const &arg : i.args)
+            Resolve(*arg);
     }
     void VisitVariableExpr(VariableExpr const &variable) override {
         if (auto *scope = CurrentScope()) {
@@ -116,6 +128,8 @@ public:
         { ResolveFunc(func, e_fts_in_function); }
     void VisitClassyExpr(ClassyExpr const &cls) override
         { ResolveClass(cls); }
+    void VisitMixinExpr(MixinExpr const &mixin) override
+        { ResolveMixin(mixin); }
 
     void VisitBlockStmt(BlockStmt const &block) override {
         BeginScope();
@@ -141,6 +155,11 @@ public:
         }
 
         ResolveClass(class_decl.cls);
+    }
+    void VisitMixinDeclStmt(MixinDeclStmt const &mixin_decl) override {
+        Declare(mixin_decl.name);
+        Define(mixin_decl.name);
+        ResolveMixin(mixin_decl.mixin);
     }
     void VisitIfStmt(IfStmt const &if_stmt) override {
         Resolve(*if_stmt.cond);
@@ -215,6 +234,15 @@ private:
                 assert(0);
         }
 
+        for (auto const &mixin : cls.mixins) {
+            if (auto *name = dynamic_cast<VariableExpr *>(mixin.get()))
+                Resolve(*name);
+            else if (auto *anon = dynamic_cast<MixinExpr *>(mixin.get()))
+                ResolveMixin(*anon);
+            else
+                assert(0);
+        }
+
         STATE_GUARD(
             m_class_traversal_state,
             cls.superclass
@@ -230,12 +258,29 @@ private:
             DefineImplicitVar(c_implicit_super_tok);
         }
 
+        ResolveMethods(cls.static_methods, cls.methods, cls.getters);
+
+        EndScope();
+    }
+
+    void ResolveMixin(MixinExpr const &mixin) {
+        STATE_GUARD(m_class_traversal_state, e_cts_in_mixin);
+        BeginScope();
+        ResolveMethods(mixin.static_methods, mixin.methods, mixin.getters);
+        EndScope();
+    }
+
+    void ResolveMethods(
+        span<stmt_ptr_t const> static_methods,
+        span<stmt_ptr_t const> methods,
+        span<stmt_ptr_t const> getters) {
+
         BeginScope();
 
         DefineImplicitVar(c_implicit_this_tok);
         DefineImplicitVar(c_implicit_inner_tok);
 
-        for (auto const &method : cls.static_methods) {
+        for (auto const &method : static_methods) {
             auto const &m = *static_cast<FuncDeclStmt const *>(method.get());
             if (m.name.lexeme == "init" && m.func.params.size()) {
                 error(*m_lox, m.name,
@@ -245,7 +290,7 @@ private:
             ResolveFunc(m.func, e_fts_in_function);
         }
 
-        for (auto const &method : cls.methods) {
+        for (auto const &method : methods) {
             auto const &m = *static_cast<FuncDeclStmt const *>(method.get());
             ResolveFunc(
                 m.func,
@@ -255,13 +300,12 @@ private:
             );
         }
 
-        for (auto const &getter : cls.getters) {
+        for (auto const &getter : getters) {
             ResolveFunc(
                 static_cast<FuncDeclStmt const *>(getter.get())->func,
                 e_fts_in_method);
         }
 
-        EndScope();
         EndScope();
     }
 

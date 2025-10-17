@@ -38,6 +38,7 @@ enum token_type_t {
 
     e_tt_and,
     e_tt_class,
+    e_tt_mixin,
     e_tt_else,
     e_tt_false,
     e_tt_fun,
@@ -45,6 +46,7 @@ enum token_type_t {
     e_tt_if,
     e_tt_nil,
     e_tt_or,
+    e_tt_with,
 
     e_tt_print,
     e_tt_return,
@@ -63,14 +65,15 @@ inline constexpr string_view c_tt_debug_names[] =
     "COMMA", "QUESTION MARK", "COLON", "DOT", "MINUS", "PLUS", "SEMICOLON",
     "SLASH", "STAR", "BANG", "BANG-EQUAL", "EQUAL", "EQUAL-EQUAL",
     "GREATER", "GREATER-EQUAL", "LESS", "LESS-EQUAL",
-    "IDENTIFIER", "STRING", "NUMBER", "AND", "CLASS", "ELSE", "FALSE",
-    "FUN", "FOR", "IF", "NIL", "OR", "PRINT", "RETURN", "SUPER", "INNER",
-    "THIS", "TRUE", "VAR", "WHILE", "BREAK",
+    "IDENTIFIER", "STRING", "NUMBER", "AND", "CLASS", "MIXIN", "ELSE", "FALSE",
+    "FUN", "FOR", "IF", "NIL", "OR", "WITH", "PRINT", "RETURN",
+    "SUPER", "INNER", "THIS", "TRUE", "VAR", "WHILE", "BREAK",
 };
 
 inline const unordered_map<string_view, token_type_t> c_reserved_id_types{
     {"and", e_tt_and},
     {"class", e_tt_class},
+    {"mixin", e_tt_mixin},
     {"else", e_tt_else},
     {"false", e_tt_false},
     {"for", e_tt_for},
@@ -78,6 +81,7 @@ inline const unordered_map<string_view, token_type_t> c_reserved_id_types{
     {"if", e_tt_if},
     {"nil", e_tt_nil},
     {"or", e_tt_or},
+    {"with", e_tt_with},
     {"print", e_tt_print},
     {"return", e_tt_return},
     {"super", e_tt_super},
@@ -119,6 +123,7 @@ inline bool is_binary(token_type_t type)
     case e_tt_less_equal:
     case e_tt_and:
     case e_tt_or:
+    case e_tt_with:
         return true;
 
     default:
