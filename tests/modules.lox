@@ -1,0 +1,179 @@
+// Courtesy of ChatGpt
+
+module Simple {
+    var greeting = "Hello";
+    fun sayHi() {
+        print greeting + " world!";
+    }
+}
+
+Simple.sayHi();                  // -> Hello world!
+print Simple.greeting;           // -> Hello
+Simple.greeting = "Hi";
+Simple.sayHi();                  // -> Hi world!
+
+
+module Shared {
+    var counter = 0;
+    fun inc() { counter = counter + 1; return counter; }
+}
+
+print Shared.inc();              // -> 1
+print Shared.inc();              // -> 2
+Shared.counter = 10;
+print Shared.inc();              // -> 11
+
+
+fun makeModule(prefix) {
+    module Mod {
+        fun hello(name) { print prefix + name; }
+    }
+    return Mod;
+}
+
+var Greeter = makeModule("Hi ");
+Greeter.hello("there!");         // -> Hi there!
+
+
+fun makePrinter(msg) {
+    module Printer {
+        fun printMsg() { print msg; }
+    }
+    return Printer;
+}
+
+var P = makePrinter("Captured message!");
+P.printMsg();                    // -> Captured message!
+
+
+fun makeShadow(text) {
+    module M {
+        fun show() { print text; }
+        show();                     // before module var declared
+        var text = "Default";
+    }
+    return M;
+}
+
+makeShadow("Outer").show();      // -> Outer, then Default
+
+
+fun makeCounter(start) {
+    module Counter {
+        var value = start;
+        fun inc() { value = value + 1; return value; }
+    }
+    return Counter;
+}
+
+var C = makeCounter(5);
+print C.inc();                   // -> 6
+print C.inc();                   // -> 7
+
+
+module Config {
+    var mode = "normal";
+    fun show() { print "Mode: " + mode; }
+}
+
+Config.show();                   // -> Mode: normal
+Config.mode = "debug";
+Config.show();                   // -> Mode: debug
+
+
+fun outer(value) {
+    module Inner {
+        fun report() { print value; }
+    }
+    Inner.report();                // -> Outer value
+    value = "mutated";
+    Inner.report();                // -> mutated
+}
+
+outer("Outer value");
+
+fun demo() {
+    var x = "outer-x";
+
+    module A {
+        fun show() { print x; }
+        show();                     // before var x declared in A
+
+        var x = "A-x";
+
+        module B {
+            fun show() { print x; }
+            show();                   // before var x declared in B
+
+            var x = "B-x";
+
+            fun all() {
+                print x;                // B’s x
+                module C {
+                    fun showAll() { print x; } // lexically B’s x
+                    showAll();            // before C.x declared
+                    var x = "C-x";
+                    showAll();            // dynamic shadowing of B’s x
+                }
+
+                return C;
+            }
+        }
+
+        B.all();
+    }
+
+    return A;
+}
+
+demo();
+/*
+Expected:
+outer-x
+A-x
+A-x
+B-x
+C-x
+ */
+
+
+fun makeCounterFn(start) {
+    module Counter {
+        var value = start;
+        fun inc() { value = value + 1; return value; }
+    }
+    return Counter.inc;
+}
+
+var c1 = makeCounterFn(10);
+var c2 = makeCounterFn(100);
+
+print c1();                      // -> 11
+print c1();                      // -> 12
+print c2();                      // -> 101
+
+
+fun makeTagged(tag) {
+    module Tagger {
+        fun tagIt(item) {
+            print tag + ": " + item;
+        }
+    }
+    return Tagger;
+}
+
+var Important = makeTagged("Important");
+var Debug = makeTagged("Debug");
+
+Important.tagIt("Initialization complete."); // -> Important: Initialization complete.
+Debug.tagIt("x=42");                         // -> Debug: x=42
+
+
+module State {
+    var x = "old";
+    fun show() { print x; }
+}
+
+State.show();                   // -> old
+State.x = "new";
+State.show();                   // -> new

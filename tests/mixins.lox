@@ -32,7 +32,7 @@ class Rat {}
 var niceHuman = Human with Greetable;
 
 Human("Petr").printName();
-niceHuman("Alexandra").greet();
+niceHuman("Aleksandra").greet();
 
 var rata = (Rat with Greetable)("Ratatouille");
 rata.greet();

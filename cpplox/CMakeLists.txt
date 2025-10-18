@@ -6,9 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 if(UNIX)
     add_compile_options(-stdlib=libc++)
     add_link_options(-stdlib=libc++)
+    add_compile_options(-Wno-binding-in-condition)
+else(UNIX)
+    add_compile_options(-Wno-c++26-extensions)
 endif(UNIX)
-
-add_compile_options(-Wno-binding-in-condition)
 
 configure_file(templates/version.hpp include/version.hpp)
 

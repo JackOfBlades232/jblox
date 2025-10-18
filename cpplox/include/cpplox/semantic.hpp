@@ -13,8 +13,9 @@ class Resolver : public IExprVisitor, public IStmtVisitor {
         bool used : 1 = false;
     };
     struct scope_t {
-        int var_id_allocator = 0;
         unordered_map<string_view, var_record_t> vars{};
+        int var_id_allocator = 0;
+        bool dynamic : 1 = false;
     };
     enum func_traversal_state_t {
         e_fts_none,
@@ -206,14 +207,18 @@ private:
     void Resolve(Expr const &expr) { expr.Accept(*this); }
 
     void ResolveLocal(Expr const &expr, token_t id) {
+        vector<int> dynamic_scope_depths{};
         for (isize i = m_scopes.size() - 1; i >= 0; --i) {
             auto &scope = m_scopes[i];
+            int depth = m_scopes.size() - i - 1;
             if (scope.vars.contains(id.lexeme)) {
                 auto &var = scope.vars.at(id.lexeme);
                 var.used = true;
                 m_interp->ResolveReference(
-                    expr, m_scopes.size() - i - 1, var.id);
+                    expr, depth, var.id, move(dynamic_scope_depths));
                 return;
+            } else if (scope.dynamic) {
+                dynamic_scope_depths.push_back(depth);
             }
         }
     }
@@ -321,9 +326,9 @@ private:
         STATE_GUARD(m_class_traversal_state, e_cts_none);
         STATE_GUARD(m_loop_traversal_state, e_lts_none);
 
-        BeginScope();
+        BeginDynamicScope();
         Resolve(mod.body);
-        EndScope();
+        EndDynamicScope();
     }
 
     void BeginScope() { m_scopes.emplace_back(); }
@@ -334,6 +339,9 @@ private:
         }
         m_scopes.pop_back();
     }
+
+    void BeginDynamicScope() { m_scopes.emplace_back(scope_t{.dynamic = true}); }
+    void EndDynamicScope() { m_scopes.pop_back(); }
 
     scope_t *CurrentScope()
         { return m_scopes.empty() ? nullptr : &m_scopes.back(); }

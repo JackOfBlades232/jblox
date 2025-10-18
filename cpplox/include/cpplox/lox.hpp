@@ -33,12 +33,21 @@ using environment_ptr_t = shared_ptr<Environment>;
 using global_environment_ptr_t = shared_ptr<GlobalEnvironment>;
 
 class Environment : public ILoxEntity {
+    struct dyn_var_record_t {
+        token_t def_token = {};
+        int id = -1;
+    };
+
     environment_ptr_t m_parent{};
     vector<optional<LoxValue>> m_values{};
 
+    // only active if m_dynamic == true
+    unordered_map<string_view, dyn_var_record_t> m_dynamic_ids_map{};
+    bool m_dynamic = false;
+
 public:
-    explicit Environment(environment_ptr_t const &parent)
-        : m_parent{parent} {}
+    explicit Environment(environment_ptr_t const &parent, bool dynamic = false)
+        : m_parent{parent}, m_dynamic{dynamic} {}
     Environment() = default;
 
     void Mark(entity_ref_collection_t &refs) const override
@@ -56,7 +65,11 @@ public:
         m_values = {};
     }
 
-    void Define(int id, optional<LoxValue> const &val) {
+    void Define(int id, token_t name, optional<LoxValue> const &val) {
+        if (m_dynamic) {
+            m_dynamic_ids_map.insert_or_assign(
+                name.lexeme, dyn_var_record_t{name, id});
+        }
         if (m_values.size() <= id)
             m_values.resize(id + 1, nullopt);
         m_values[id] = val;
@@ -71,13 +84,55 @@ public:
         }
     }
 
-    LoxValue LookupAt(int id, int depth, token_t name) const
-        { return Ancestor(depth)->Lookup(id, name); }
+    optional<LoxValue> LookupDyn(token_t name) const {
+        assert(m_dynamic);
+        if (auto it = m_dynamic_ids_map.find(name.lexeme);
+            it != m_dynamic_ids_map.end())
+        {
+            return Lookup(it->second.id, name);
+        }
+        return nullopt;
+    }
+
+    LoxValue LookupAt(
+        int id, int depth, span<int const> dyn_depths, token_t name) const {
+        
+        for (int dd : dyn_depths) {
+            if (auto res = Ancestor(dd)->LookupDyn(name))
+                return *res;
+        }
+        return Ancestor(depth)->Lookup(id, name);
+    }
 
     void Assign(int id, LoxValue const &val) { m_values[id] = val; }
 
-    void AssignAt(int id, int depth, LoxValue const &val)
-        { Ancestor(depth)->Assign(id, val); }
+    bool AssignDyn(token_t name, LoxValue const &val) {
+        assert(m_dynamic);
+        if (auto it = m_dynamic_ids_map.find(name.lexeme);
+            it != m_dynamic_ids_map.end())
+        {
+            Assign(it->second.id, val);
+            return true;
+        }
+        return false;
+    }
+
+    void AssignAt(
+        int id, int depth, span<int const> dyn_depths,
+        token_t name, LoxValue const &val) {
+
+        for (int dd : dyn_depths) {
+            if (Ancestor(dd)->AssignDyn(name, val))
+                return;
+        }
+        Ancestor(depth)->Assign(id, val);
+    }
+
+    void IterateDyn(auto &&cb) const {
+        assert(m_dynamic);
+        for (auto const &[_, rec] : m_dynamic_ids_map)
+            cb(rec.def_token, m_values[rec.id]);
+    }
 
 private:
     Environment *Parent() {
@@ -149,10 +204,13 @@ public:
 class LoxFunction;
 class LoxClass;
 class LoxMixin;
+class LoxModule;
 class LoxInstance;
 
 using lox_function_ptr_t = shared_ptr<LoxFunction>;
 using lox_class_ptr_t = shared_ptr<LoxClass>;
+using lox_mixin_ptr_t = shared_ptr<LoxMixin>;
+using lox_module_ptr_t = shared_ptr<LoxModule>;
 using lox_instance_ptr_t = shared_ptr<LoxInstance>;
 
 class LoxFunction
@@ -183,7 +241,7 @@ public:
             optional<token_t> const &name,
             environment_ptr_t const &closure,
             bool init)
-        : m_def{def}, m_name{name}, m_closure{closure}, m_init{init} {}
+        : m_def{def}, m_closure{closure}, m_name{name}, m_init{init} {}
 
     void Mark(entity_ref_collection_t &refs) const override
     {
@@ -360,10 +418,7 @@ class LoxModule : public ILoxInstance {
     environment_ptr_t m_closure{};
 
 public:
-    LoxModule(
-        optional<token_t> const &name,
-        ModuleExpr const &mod,
-        Interpreter &interp);
+    LoxModule(optional<token_t> const &, ModuleExpr const &, Interpreter &);
 
     void Mark(entity_ref_collection_t &refs) const override
     {
@@ -414,6 +469,7 @@ class Interpreter : public IExprVisitor, public IStmtVisitor {
     struct resolved_var_t {
         int id;
         int depth;
+        vector<int> dynamic_scope_depths;
     };
 
     vector<lox_entity_ptr_t> m_live_entities{};
@@ -485,8 +541,11 @@ public:
         CollectGarbage();
     }
 
-    void ResolveReference(Expr const &e, int depth, int id) {
-        m_resolved_local_refs.insert_or_assign(&e, resolved_var_t{id, depth});
+    void ResolveReference(
+        Expr const &e, int depth, int id, vector<int> &&dyn_scope_depths) {
+
+        m_resolved_local_refs.insert_or_assign(
+            &e, resolved_var_t{id, depth, move(dyn_scope_depths)});
     }
     void ResolveDeclaration(token_t name, int id)
         { m_resolved_local_decls.insert_or_assign(name, id); }
@@ -497,10 +556,14 @@ public:
         LoxValue const val = Evaluate(*assignment.val);
 
         auto it = m_resolved_local_refs.find(&assignment);
-        if (it == m_resolved_local_refs.end())
+        if (it == m_resolved_local_refs.end()) {
             m_global_env->Assign(assignment.target, val);
-        else
-            m_cur_env->AssignAt(it->second.id, it->second.depth, val);
+        } else {
+            m_cur_env->AssignAt(
+                it->second.id, it->second.depth,
+                it->second.dynamic_scope_depths,
+                assignment.target, val);
+        }
 
         *prev_dest = val;
     }
@@ -701,9 +764,13 @@ public:
         assert(m_dest);
         LoxValue *prev_dest = exchange(m_dest, nullptr);
 
-        auto [super_id, depth] = m_resolved_local_refs.find(&s)->second;
+        auto const &[super_id, depth, dyn_depths] =
+            m_resolved_local_refs.find(&s)->second;
         lox_class_ptr_t superclass = dynamic_pointer_cast<LoxClass>(
-            m_cur_env->LookupAt(super_id, depth, s.keyword).GetObject());
+            m_cur_env
+                ->LookupAt(super_id, depth, dyn_depths, s.keyword)
+                .GetObject()
+        );
 
         if (auto [m, ic] = superclass->FindStaticMethod(s.method.lexeme)) {
             *prev_dest = m->Bind(
@@ -713,7 +780,8 @@ public:
 
         auto this_id = m_resolved_local_decls.find(c_implicit_this_tok)->second;
         lox_instance_ptr_t inst = dynamic_pointer_cast<LoxInstance>(
-            m_cur_env->LookupAt(this_id, depth - 1, c_implicit_super_tok)
+            m_cur_env
+                ->LookupAt(this_id, depth - 1, dyn_depths, c_implicit_super_tok)
                 .GetObject()
         );
 
@@ -737,8 +805,10 @@ public:
         assert(m_dest);
         LoxValue *prev_dest = exchange(m_dest, nullptr);
 
-        auto [inner_id, depth] = m_resolved_local_refs.find(&i)->second;
-        auto inner_obj = m_cur_env->LookupAt(inner_id, depth, i.keyword);
+        auto const &[inner_id, depth, dyn_depths] =
+            m_resolved_local_refs.find(&i)->second;
+        auto inner_obj =
+            m_cur_env->LookupAt(inner_id, depth, dyn_depths, i.keyword);
 
         // An arbitrary choice -- if ther is no inner, we don't eval args
         // and we return nil
@@ -907,6 +977,7 @@ private:
             {
                 m_cur_env->Define(
                     m_resolved_local_decls.at(c_implicit_super_tok),
+                    c_implicit_super_tok,
                     static_pointer_cast<ILoxObject>(superclass));
             }
 
@@ -1010,17 +1081,20 @@ private:
 
     LoxValue LookupVar(token_t name, Expr const &expr) const {
         auto it = m_resolved_local_refs.find(&expr);
-        if (it == m_resolved_local_refs.end()) // unresolved == presumed global
+        if (it == m_resolved_local_refs.end()) { // unresolved == presumed global
             return m_global_env->Lookup(name);
-        else
-            return m_cur_env->LookupAt(it->second.id, it->second.depth, name);
+        } else {
+            return m_cur_env->LookupAt(
+                it->second.id, it->second.depth,
+                it->second.dynamic_scope_depths, name);
+        }
     }
 
     void DefineVar(token_t name, optional<LoxValue> const &val) {
         if (!m_cur_env)
             m_global_env->Define(name.lexeme, val);
         else
-            m_cur_env->Define(m_resolved_local_decls.at(name), val);
+            m_cur_env->Define(m_resolved_local_decls.at(name), name, val);
     }
 
     template <class T, class ...TArgs>
@@ -1075,7 +1149,7 @@ inline LoxValue LoxFunction::Call(Interpreter &interp, span<LoxValue> args)
 {
     environment_ptr_t env = interp.MakeEnt<Environment>(m_closure);
     for (usize i = 0; auto const &param : m_def.params)
-        env->Define(interp.m_resolved_local_decls.at(param), args[i++]);
+        env->Define(interp.m_resolved_local_decls.at(param), param, args[i++]);
 
     auto findThis = [&, this] {
         return m_closure->Lookup(
@@ -1106,14 +1180,15 @@ inline LoxValue LoxFunction::Bind(
     environment_ptr_t env = interp.MakeEnt<Environment>(m_closure);
     env->Define(
         interp.m_resolved_local_decls.at(c_implicit_this_tok),
-        inst);
+        c_implicit_this_tok, inst);
     auto bound_inner = c_nil;
     if (inner_chain.size()) {
         bound_inner = inner_chain.front()->Bind(
             interp, inst, inner_chain.subspan(1));
     }
     env->Define(
-        interp.m_resolved_local_decls.at(c_implicit_inner_tok), bound_inner);
+        interp.m_resolved_local_decls.at(c_implicit_inner_tok),
+        c_implicit_inner_tok, bound_inner);
     return interp.MakeObj<LoxFunction>(m_def, m_name, env, m_init);
 }
 
@@ -1166,25 +1241,36 @@ inline void LoxClass::Mixin(LoxMixin const &mixin)
 inline LoxModule::LoxModule(
     optional<token_t> const &name, ModuleExpr const &mod, Interpreter &interp)
 {
-    m_closure = interp.MakeEnt<Environment>(interp.m_cur_env);
+    m_closure = interp.MakeEnt<Environment>(interp.m_cur_env, true);
     interp.ExecuteBlock(mod.body, m_closure);
-    // @TODO: we need to convert the closure to a proper dict right about
-    // now. This is problematic because of the whole resolved ids stuff.
-    // Hmm...
+    m_closure->IterateDyn(
+        [&](token_t name, optional<LoxValue> const &val) {
+            if (!val) {
+                throw runtime_error_t{
+                    name,
+                    format("Uninitialized var {} in module.", name.lexeme)};
+            }
+        });
 }
 
 inline LoxValue LoxModule::Get(Interpreter &interp, token_t const &name)
 {
-    // @TODO: query off of the resolved dict
-    return {};
+    if (auto res = m_closure->LookupDyn(name))
+        return *res;
+
+    throw runtime_error_t{
+        name, format("Undefined module property '{}'", name.lexeme)};
 }
 
 inline void LoxModule::Set(
     Interpreter &interp, token_t const &name, LoxValue const &val)
 {
-    // @TODO:
-    // 1) Check that it is a var, and not a func/class/mixin
-    // 2) Set
+    if (!m_closure->AssignDyn(name, val)) {
+        throw runtime_error_t{
+            name, format("Undefined module property '{}'", name.lexeme)};
+    }
+
+    // Decided to disallow defining new props on modules
 }
 
 inline LoxValue LoxInstance::Get(Interpreter &interp, token_t const &name)
