@@ -1,0 +1,21 @@
+import "lib/math";
+
+var lambdaUnit = "lamb" + "das";
+import lambdaUnit;
+
+
+// --- Demonstration block ---
+print "  PI =" + MathUtils.PI;
+print "  abs(-42) =" + MathUtils.abs(-42);
+print "  clamp(10, 0, 5) =" + MathUtils.clamp(10, 0, 5);
+
+var v = MathUtils.Vec2(3, 4);
+v.log();
+
+var c = MathUtils.Complex(2, 3);
+c.log();
+
+thrice(fun (i) {
+    print i + ":";
+    v.scale(i).log();
+});

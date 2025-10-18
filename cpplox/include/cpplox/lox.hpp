@@ -6,6 +6,27 @@
 
 #include <ast.hpp>
 
+enum errc_t {
+    e_ec_ok = 0,
+    e_ec_arg_error = 1,
+    e_ec_sys_error = 2,
+    e_ec_parsing_error = 13,
+    e_ec_semantic_error = 69,
+    e_ec_runtime_error = 4221,
+};
+
+inline const unordered_map<errc_t, string_view> c_module_imp_errc_descs{
+    {e_ec_parsing_error, "paser error"},
+    {e_ec_semantic_error, "semantic resolution error"},
+    {e_ec_runtime_error, "runtime error"}
+};
+
+struct lox_t;
+
+// Forward decls for import, defined in main.cpp
+optional<string> read_whole_file(char const *);
+expected<vector<stmt_ptr_t>, errc_t> compile(string_view, lox_t &);
+
 struct runtime_error_t {
     token_t tok;
     string message;
@@ -481,6 +502,11 @@ class Interpreter : public IExprVisitor, public IStmtVisitor {
     unordered_map<Expr const *, resolved_var_t> m_resolved_local_refs{};
     unordered_map<token_t, int> m_resolved_local_decls{};
 
+    // A hacky and suboptimal way to preserve token validtity for imported files
+    vector<string> m_loaded_file_sources{};
+
+    lox_t *m_lox = nullptr;
+
     statistics_t m_stats{};
 
     LoxValue *m_dest = nullptr;
@@ -505,8 +531,9 @@ class Interpreter : public IExprVisitor, public IStmtVisitor {
     };
 
 public:
-    Interpreter()
+    explicit Interpreter(lox_t *lox)
         : m_global_env{MakeEnt<GlobalEnvironment>()}
+        , m_lox{lox}
         { m_global_env->Define("clock", MakeObj<Clock>()); }
 
     ~Interpreter() {
@@ -893,6 +920,35 @@ public:
     }
     void VisitPrintStmt(PrintStmt const &print) override
         { println("{}", to_string(Evaluate(*print.val))); }
+    void VisitImportStmt(ImportStmt const &imp) override {
+        LoxValue const val = Evaluate(*imp.path);
+        if (!val.IsString())
+            throw runtime_error_t{imp.keyword, "Import path must be a string."};
+
+        string const realpath = format("{}.lox", val.GetString());
+        
+        auto bytes = read_whole_file(realpath.c_str());
+        if (!bytes) {
+            throw runtime_error_t{
+                imp.keyword,
+                format("Failed to load module from {}.", realpath)};
+        }
+
+        m_loaded_file_sources.emplace_back(move(*bytes));
+
+        auto parsed = compile(m_loaded_file_sources.back(), *m_lox);
+        if (!parsed) {
+            throw runtime_error_t{
+                imp.keyword,
+                format("Error in module {}: {}.",
+                    val.GetString(),
+                    c_module_imp_errc_descs.at(parsed.error()))
+            };
+        }
+
+        for (auto const &stmt : *parsed)
+            Execute(*stmt);
+    }
     void VisitReturnStmt(ReturnStmt const &ret) override {
         LoxValue retval = c_nil;
         if (ret.value)
@@ -1240,6 +1296,7 @@ inline void LoxClass::Mixin(LoxMixin const &mixin)
 
 inline LoxModule::LoxModule(
     optional<token_t> const &name, ModuleExpr const &mod, Interpreter &interp)
+    : m_name{name}
 {
     m_closure = interp.MakeEnt<Environment>(interp.m_cur_env, true);
     interp.ExecuteBlock(mod.body, m_closure);
@@ -1306,7 +1363,7 @@ struct lox_config_t {
 };
 
 struct lox_t {
-    Interpreter interp{};
+    Interpreter interp{this};
     bool had_error = false;
     bool had_runtime_error = false;
     lox_config_t config = {};

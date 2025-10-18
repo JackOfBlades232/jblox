@@ -15,6 +15,7 @@
 #include <span>
 #include <variant>
 #include <optional>
+#include <expected>
 #include <vector>
 #include <string>
 #include <unordered_map>

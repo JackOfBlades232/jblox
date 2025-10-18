@@ -191,6 +191,10 @@ int main(int argc, char **argv)
                         {"stmt_ptr_t", "body"}
                     }},
                     {"Print", {{"expr_ptr_t", "val"}}},
+                    {"Import", {
+                        {"token_t", "keyword"},
+                        {"expr_ptr_t", "path"}
+                    }},
                     {"Return", {
                         {"token_t", "keyword"},
                         {"expr_ptr_t", "value"}

@@ -133,7 +133,6 @@ public:
         { ResolveMixin(mixin); }
     void VisitModuleExpr(ModuleExpr const &mod) override
         { ResolveModule(mod); }
-
     void VisitBlockStmt(BlockStmt const &block) override {
         BeginScope();
         Resolve(block.stmts);
@@ -182,6 +181,11 @@ public:
     }
     void VisitPrintStmt(PrintStmt const &print) override
         { Resolve(*print.val); }
+    void VisitImportStmt(ImportStmt const &imp) override {
+        if (m_scopes.size())
+            error(*m_lox, imp.keyword, "Can't import at local scope.");
+        Resolve(*imp.path);
+    }
     void VisitReturnStmt(ReturnStmt const &ret) override {
         if (m_func_traversal_state == e_fts_none)
             error(*m_lox, ret.keyword, "Can't return at top level.");

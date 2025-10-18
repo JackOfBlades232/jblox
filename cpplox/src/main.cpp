@@ -4,15 +4,6 @@
 #include <ast.hpp>
 #include <semantic.hpp>
 
-enum errc_t {
-    e_ec_ok = 0,
-    e_ec_arg_error = 1,
-    e_ec_sys_error = 2,
-    e_ec_parsing_error = 13,
-    e_ec_semantic_error = 69,
-    e_ec_runtime_error = 4221,
-};
-
 struct scanner_t {
     string_view source;
     vector<token_t> tokens{};
@@ -847,6 +838,14 @@ stmt_ptr_t parse_module_decl(parser_t &parser)
         name, move(*dynamic_cast<ModuleExpr *>(def.get())));
 }
 
+stmt_ptr_t parse_import(parser_t &parser)
+{
+    token_t keyword = previous(parser);
+    expr_ptr_t path = parse_expr(parser);
+    consume(parser, e_tt_semicolon, "Expected ';' after import statement.");
+    return make_shared<ImportStmt>(keyword, path);
+}
+
 stmt_ptr_t parse_var_decl(parser_t &parser)
 {
     token_t const id =
@@ -879,6 +878,7 @@ void sync_parser(parser_t &parser)
 
         switch (peek(parser).type) {
         case e_tt_var:
+        case e_tt_import:
         case e_tt_for:
         case e_tt_if:
         case e_tt_while:
@@ -912,6 +912,8 @@ stmt_ptr_t parse_decl(parser_t &parser)
             advance(parser);
             return parse_module_decl(parser);
         }
+        if (match(parser, e_tt_import))
+            return parse_import(parser);
         if (match(parser, e_tt_var))
             return parse_var_decl(parser);
 
@@ -1158,6 +1160,12 @@ public:
         print.val->Accept(*this);
         m_accum.append(");\n");
     }
+    void VisitImportStmt(ImportStmt const &imp) override {
+        Indent();
+        m_accum.append("import ");
+        imp.path->Accept(*this);
+        m_accum.append(";\n");
+    }
     void VisitReturnStmt(ReturnStmt const &ret) override {
         Indent();
         m_accum.append("return ");
@@ -1254,40 +1262,6 @@ void interpret(span<stmt_ptr_t const> stmts, lox_t &lox)
     }
 }
 
-errc_t run(string_view code, lox_t &lox)
-{
-    vector<token_t> const tokens = scan_tokens(code, lox);
-    if (lox.had_error)
-        return e_ec_parsing_error;
-    else if (tokens.size() <= 1) // Only eof
-        return e_ec_ok;
-
-    if (lox.config.print_tokens) {
-        for (auto const &tok : tokens)
-            println("{}", to_string(tok));
-    }
-
-    vector<stmt_ptr_t> const stmts = parse(tokens, lox);
-    if (lox.had_error)
-        return e_ec_parsing_error;
-
-    if (lox.config.print_ast) {
-        println("Ast:");
-        for (auto const &stmt : stmts)
-            print("{}", AstPrinter{}.Print(*stmt));
-    }
-
-    Resolver{&lox.interp, &lox}.Resolve(stmts);
-    if (lox.had_error)
-        return e_ec_semantic_error;
-
-    interpret(stmts, lox);
-    if (lox.had_runtime_error)
-        return e_ec_runtime_error;
-
-    return e_ec_ok;
-}
-
 optional<string> read_whole_file(char const *fn)
 {
     FILE *f = fopen(fn, "rb");
@@ -1311,6 +1285,49 @@ optional<string> read_whole_file(char const *fn)
     }
         
     return res;
+}
+
+expected<vector<stmt_ptr_t>, errc_t> compile(string_view code, lox_t &lox)
+{
+    vector<token_t> const tokens = scan_tokens(code, lox);
+    if (lox.had_error)
+        return unexpected{e_ec_parsing_error};
+    else if (tokens.size() <= 1) // Only eof
+        return unexpected{e_ec_ok};
+
+    if (lox.config.print_tokens) {
+        for (auto const &tok : tokens)
+            println("{}", to_string(tok));
+    }
+
+    vector<stmt_ptr_t> const stmts = parse(tokens, lox);
+    if (lox.had_error)
+        return unexpected{e_ec_parsing_error};
+
+    if (lox.config.print_ast) {
+        println("Ast:");
+        for (auto const &stmt : stmts)
+            print("{}", AstPrinter{}.Print(*stmt));
+    }
+
+    Resolver{&lox.interp, &lox}.Resolve(stmts);
+    if (lox.had_error)
+        return unexpected{e_ec_semantic_error};
+
+    return stmts;
+}
+
+errc_t run(string_view code, lox_t &lox)
+{
+    auto parsed = compile(code, lox);
+    if (!parsed)
+        return parsed.error();
+
+    interpret(*parsed, lox);
+    if (lox.had_runtime_error)
+        return e_ec_runtime_error;
+
+    return e_ec_ok;
 }
 
 errc_t run_file(char const *fn, lox_t &lox)

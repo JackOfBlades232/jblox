@@ -1,0 +1,136 @@
+// Courtesy of ChatGpt
+
+print "=== Loading MathUtils module ===";
+
+module MathUtils {
+
+    // --- Constants ---
+    var PI = 3.141592653589793;
+    var E  = 2.718281828459045;
+    var TAU = 2 * PI;
+
+    // --- Basic utility functions ---
+    fun abs(x) {
+        if (x < 0) return -x;
+        return x;
+    }
+
+    fun clamp(x, min, max) {
+        if (x < min) return min;
+        if (x > max) return max;
+        return x;
+    }
+
+    fun degToRad(deg) {
+        return deg * (PI / 180);
+    }
+
+    fun radToDeg(rad) {
+        return rad * (180 / PI);
+    }
+
+    fun pow(base, exp) {
+        var result = 1;
+        for (var i = 0; i < exp; i = i + 1) {
+            result = result * base;
+        }
+        return result;
+    }
+
+    fun factorial(n) {
+        if (n <= 1) return 1;
+        return n * factorial(n - 1);
+    }
+
+    // --- Vector class example ---
+    class Vec2 {
+        init(x, y) {
+            this.x = x;
+            this.y = y;
+        }
+
+        add(v) {
+            return Vec2(this.x + v.x, this.y + v.y);
+        }
+
+        sub(v) {
+            return Vec2(this.x - v.x, this.y - v.y);
+        }
+
+        dot(v) {
+            return this.x * v.x + this.y * v.y;
+        }
+
+        scale(s) {
+            return Vec2(this.x * s, this.y * s);
+        }
+
+        log() {
+            print "(" + this.x + ", " + this.y + ")";
+        }
+
+        class zero() { return Vec2(0, 0); }
+        class unitX() { return Vec2(1, 0); }
+        class unitY() { return Vec2(0, 1); }
+    }
+
+    // --- Complex numbers example ---
+    class Complex {
+        init(re, im) {
+            this.re = re;
+            this.im = im;
+        }
+
+        add(c) {
+            return Complex(this.re + c.re, this.im + c.im);
+        }
+
+        sub(c) {
+            return Complex(this.re - c.re, this.im - c.im);
+        }
+
+        mul(c) {
+            return Complex(this.re * c.re - this.im * c.im,
+                    this.re * c.im + this.im * c.re);
+        }
+
+        conj() {
+            return Complex(this.re, -this.im);
+        }
+
+        log() {
+            print this.re + (this.im < 0 ? "" : "+") + this.im + "i";
+        }
+
+        class fromPolar(r, theta) {
+            var re = r * (theta.cos());
+            var im = r * (theta.sin());
+            return Complex(re, im);
+        }
+    }
+
+    // --- Polynomial helper (using lambdas) ---
+    fun makePolynomial(a, b, c) {
+        // Returns a function f(x) = ax² + bx + c
+        return fun(x) { return a * x * x + b * x + c; };
+    }
+
+    // --- Nested helper module-like object ---
+    module Trig {
+        fun sin(x) { 
+            // crude Taylor approximation around 0
+            return x - (x * x * x) / 6 + (x * x * x * x * x) / 120; 
+        }
+
+        fun cos(x) { 
+            return 1 - (x * x) / 2 + (x * x * x * x) / 24; 
+        }
+
+        fun tan(x) {
+            return sin(x) / cos(x);
+        }
+    }
+}
+
+print "=== MathUtils module ready ===";
+
