@@ -405,6 +405,8 @@ expr_ptr_t parse_mixin(parser_t &parser)
 
 expr_ptr_t parse_classy(parser_t &parser)
 {
+    token_t keyword = previous(parser);
+
     expr_ptr_t superclass{};
     token_t inh_kw = {};
     if (match(parser, {e_tt_less, e_tt_greater})) {
@@ -443,7 +445,7 @@ expr_ptr_t parse_classy(parser_t &parser)
     consume(parser, e_tt_right_brace, "Expected '}' after class body.");
 
     return make_shared<ClassyExpr>(
-        superclass, inh_kw, mixin_kw,
+        keyword, superclass, inh_kw, mixin_kw,
         move(mixins),
         move(method_decls.methods),
         move(method_decls.static_methods),

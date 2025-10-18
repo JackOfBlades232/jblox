@@ -20,6 +20,7 @@ call :RunTest inner.lox %*
 call :RunTest clambdas.lox %*
 call :RunTest mixins.lox %*
 call :RunTest modules.lox %*
+call :RunTest imports.lox %*
 
 popd
 exit /b

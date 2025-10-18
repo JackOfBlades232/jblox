@@ -276,7 +276,7 @@ public:
     string ToString() const override
         { return m_name ? format("<fn {}>", m_name->lexeme) : "<anon fn>"; }
 
-    LoxValue Call(Interpreter &, span<LoxValue>) override;
+    LoxValue Call(Interpreter &, span<LoxValue>, token_t) override;
 
     LoxValue Bind(
         Interpreter &,
@@ -346,7 +346,7 @@ public:
         return 0;
     }
 
-    LoxValue Call(Interpreter &, span<LoxValue>) override;
+    LoxValue Call(Interpreter &, span<LoxValue>, token_t) override;
 
     LoxValue Get(Interpreter &, token_t const &) override;
     void Set(Interpreter &, token_t const &, LoxValue const &) override;
@@ -521,9 +521,202 @@ class Interpreter : public IExprVisitor, public IStmtVisitor {
         HiresTimer m_timer{};
 
     public:
-        LoxValue Call(Interpreter &, span<LoxValue>) override
+        LoxValue Call(Interpreter &, span<LoxValue>, token_t) override
             { return m_timer.MsFromStart() / 1000.0; }
         int Arity() const override { return 0; }
+        void Mark(entity_ref_collection_t &refs) const override
+            { register_ref(this, refs); }
+        void Sweep() override {}
+        string ToString() const override { return "<native fn>"; }
+    };
+
+    class Read : public ILoxCallable {
+    public:
+        LoxValue Call(Interpreter &, span<LoxValue>, token_t) override {
+            string line{};
+            getline(cin, line);
+            if (!cin.good())
+                return c_nil;
+            return LoxValue{move(line)};
+        }
+        int Arity() const override { return 0; }
+        void Mark(entity_ref_collection_t &refs) const override
+            { register_ref(this, refs); }
+        void Sweep() override {}
+        string ToString() const override { return "<native fn>"; }
+    };
+
+    template <bool (LoxValue::*t_checker)() const>
+    class IsValOf : public ILoxCallable {
+    public:
+        LoxValue Call(Interpreter &, span<LoxValue> args, token_t) override
+            { return LoxValue{(args[0].*t_checker)()}; }
+        int Arity() const override { return 1; }
+        void Mark(entity_ref_collection_t &refs) const override
+            { register_ref(this, refs); }
+        void Sweep() override {}
+        string ToString() const override { return "<native fn>"; }
+    };
+
+    template <class TObj>
+    class IsObjOf : public ILoxCallable {
+    public:
+        LoxValue Call(Interpreter &, span<LoxValue> args, token_t) override {
+            return LoxValue{
+                args[0].IsObject() &&
+                dynamic_cast<TObj *>(args[0].GetObject().get())};
+        }
+        int Arity() const override { return 1; }
+        void Mark(entity_ref_collection_t &refs) const override
+            { register_ref(this, refs); }
+        void Sweep() override {}
+        string ToString() const override { return "<native fn>"; }
+    };
+
+    class Str : public ILoxCallable {
+    public:
+        LoxValue Call(Interpreter &, span<LoxValue> args, token_t) override
+            { return LoxValue{to_string(args[0])}; }
+        int Arity() const override { return 1; }
+        void Mark(entity_ref_collection_t &refs) const override
+            { register_ref(this, refs); }
+        void Sweep() override {}
+        string ToString() const override { return "<native fn>"; }
+    };
+
+    class Str2Num : public ILoxCallable {
+    public:
+        LoxValue Call(
+            Interpreter &, span<LoxValue> args, token_t tok) override {
+
+            auto const &arg = args[0];
+            if (!arg.IsString()) {
+                throw runtime_error_t{
+                    tok, "str2num: argument must be a string."};
+            }
+
+            try {
+                return LoxValue{stod(arg.GetString())};
+            } catch (...) {
+                return c_nil;
+            }
+        }
+        int Arity() const override { return 1; }
+        void Mark(entity_ref_collection_t &refs) const override
+            { register_ref(this, refs); }
+        void Sweep() override {}
+        string ToString() const override { return "<native fn>"; }
+    };
+
+    class StrLen : public ILoxCallable {
+    public:
+        LoxValue Call(
+            Interpreter &, span<LoxValue> args, token_t tok) override {
+
+            auto const &sa = args[0];
+            if (!sa.IsString()) {
+                throw runtime_error_t{
+                    tok, "strlen: firts argument must be a string."};
+            }
+            return LoxValue{f64(sa.GetString().length())};
+        }
+        int Arity() const override { return 1; }
+        void Mark(entity_ref_collection_t &refs) const override
+            { register_ref(this, refs); }
+        void Sweep() override {}
+        string ToString() const override { return "<native fn>"; }
+    };
+
+    class StrAt : public ILoxCallable {
+    public:
+        LoxValue Call(
+            Interpreter &, span<LoxValue> args, token_t tok) override {
+
+            auto const &sa = args[0];
+            auto const &ia = args[1];
+            if (!sa.IsString()) {
+                throw runtime_error_t{
+                    tok, "strat: firts argument must be a string."};
+            }
+            if (!ia.IsNumber()) {
+                throw runtime_error_t{
+                    tok, "strat: second argument must be a number."};
+            }
+
+            auto const &s = sa.GetString();
+            auto id_raw = ia.GetNumber();
+            auto idf = round(id_raw);
+            if (fabs(id_raw - idf) > DBL_EPSILON) {
+                throw runtime_error_t{
+                    tok, "strat: second argument must be integer."};
+            }
+            int id = int(idf);
+            if (id < 0 || id >= s.length()) {
+                throw runtime_error_t{
+                    tok,
+                    format(
+                        "strat: index must be in str length range [{}, {}).",
+                        0, s.length() - 1)
+                };
+            }
+
+            return LoxValue{f64(s[id])};
+        }
+        int Arity() const override { return 2; }
+        void Mark(entity_ref_collection_t &refs) const override
+            { register_ref(this, refs); }
+        void Sweep() override {}
+        string ToString() const override { return "<native fn>"; }
+    };
+
+    class SubStr : public ILoxCallable {
+    public:
+        LoxValue Call(
+            Interpreter &, span<LoxValue> args, token_t tok) override {
+
+            auto const &sa = args[0];
+            auto const &froma = args[1];
+            auto const &toa = args[2];
+            if (!sa.IsString()) {
+                throw runtime_error_t{
+                    tok, "substr: firts argument must be a string."};
+            }
+            if (!froma.IsNumber() || !toa.IsNumber()) {
+                throw runtime_error_t{
+                    tok, "substr: second and third argument must be numbers."};
+            }
+
+            auto const &s = sa.GetString();
+
+            auto convert_index = [&](auto const &arg) {
+                auto id_raw = arg.GetNumber();
+                auto idf = round(id_raw);
+                if (fabs(id_raw - idf) > DBL_EPSILON) {
+                    throw runtime_error_t{
+                        tok,
+                        "substr: second and third arguments must be integer."};
+                }
+                auto id = int(idf);
+                if (id < 0 || id > s.length()) {
+                    throw runtime_error_t{
+                        tok,
+                        format(
+                            "substr: id must be in str length range [{}, {}).",
+                            0, s.length() - 1)
+                    };
+                }
+                return id;
+            };
+
+            int from = convert_index(froma);
+            int to = convert_index(toa);
+
+            if (from > to)
+                throw runtime_error_t{tok, "substr: from must be <= to."};
+
+            return LoxValue{s.substr(from, to)};
+        }
+        int Arity() const override { return 3; }
         void Mark(entity_ref_collection_t &refs) const override
             { register_ref(this, refs); }
         void Sweep() override {}
@@ -534,7 +727,24 @@ public:
     explicit Interpreter(lox_t *lox)
         : m_global_env{MakeEnt<GlobalEnvironment>()}
         , m_lox{lox}
-        { m_global_env->Define("clock", MakeObj<Clock>()); }
+    {
+        m_global_env->Define("clock", MakeObj<Clock>());
+        m_global_env->Define("read", MakeObj<Read>());
+        m_global_env->Define("isnil", MakeObj<IsValOf<&LoxValue::IsNil>>());
+        m_global_env->Define("isbool", MakeObj<IsValOf<&LoxValue::IsBool>>());
+        m_global_env->Define("isstr", MakeObj<IsValOf<&LoxValue::IsString>>());
+        m_global_env->Define("isnum", MakeObj<IsValOf<&LoxValue::IsNumber>>());
+        m_global_env->Define("isfun", MakeObj<IsObjOf<LoxFunction>>());
+        m_global_env->Define("isclass", MakeObj<IsObjOf<LoxClass>>());
+        m_global_env->Define("ismixin", MakeObj<IsObjOf<LoxMixin>>());
+        m_global_env->Define("ismodule", MakeObj<IsObjOf<LoxModule>>());
+        m_global_env->Define("isinstance", MakeObj<IsObjOf<LoxInstance>>());
+        m_global_env->Define("str", MakeObj<Str>());
+        m_global_env->Define("str2num", MakeObj<Str2Num>());
+        m_global_env->Define("strlen", MakeObj<StrLen>());
+        m_global_env->Define("strat", MakeObj<StrAt>());
+        m_global_env->Define("substr", MakeObj<SubStr>());
+    }
 
     ~Interpreter() {
         m_cur_env = {};
@@ -756,7 +966,7 @@ public:
                 " args, but got " + to_string(arg_values.size()) + "."};
         }
 
-        *prev_dest = callable.Call(*this, arg_values);
+        *prev_dest = callable.Call(*this, arg_values, call.paren);
     }
     void VisitGetExpr(GetExpr const &get) override {
         assert(m_dest);
@@ -821,7 +1031,7 @@ public:
             *prev_dest = m
                 ->Bind(*this, static_pointer_cast<ILoxObject>(inst), ic)
                 .GetCallable()
-                .Call(*this, {});
+                .Call(*this, {}, s.keyword);
             return;
         }
 
@@ -857,7 +1067,7 @@ public:
                 " args, but got " + to_string(arg_values.size()) + "."};
         }
 
-        *prev_dest = inner->Call(*this, arg_values);
+        *prev_dest = inner->Call(*this, arg_values, i.paren);
     }
     void VisitVariableExpr(VariableExpr const &variable) override {
         assert(m_dest);
@@ -1087,7 +1297,7 @@ private:
         {
             init->Bind(*this, cls_value, inner_init_chain)
                 .GetCallable()
-                .Call(*this, {}); 
+                .Call(*this, {}, cls.keyword); 
         }
 
         return cls_value;
@@ -1201,7 +1411,8 @@ private:
     }
 };
 
-inline LoxValue LoxFunction::Call(Interpreter &interp, span<LoxValue> args)
+inline LoxValue LoxFunction::Call(
+    Interpreter &interp, span<LoxValue> args, token_t)
 {
     environment_ptr_t env = interp.MakeEnt<Environment>(m_closure);
     for (usize i = 0; auto const &param : m_def.params)
@@ -1248,14 +1459,15 @@ inline LoxValue LoxFunction::Bind(
     return interp.MakeObj<LoxFunction>(m_def, m_name, env, m_init);
 }
 
-inline LoxValue LoxClass::Call(Interpreter &interp, span<LoxValue> args)
+inline LoxValue LoxClass::Call(
+    Interpreter &interp, span<LoxValue> args, token_t tok)
 {
     auto inst = interp.MakeObj<LoxInstance>(shared_from_this());
     auto [init, inner_init_chain] = FindMethod("init");
     if (init) {
         init->Bind(interp, inst, inner_init_chain)
             .GetCallable()
-            .Call(interp, args);
+            .Call(interp, args, tok);
     }
     return inst;
 }
@@ -1344,7 +1556,7 @@ inline LoxValue LoxInstance::Get(Interpreter &interp, token_t const &name)
         return m->Bind(
             interp, static_pointer_cast<ILoxObject>(shared_from_this()), ic)
             .GetCallable()
-            .Call(interp, {});
+            .Call(interp, {}, name);
     }
 
     throw runtime_error_t{name, format("Undefined property '{}'", name.lexeme)};

@@ -117,7 +117,7 @@ public:
 class Interpreter;
 
 struct ILoxCallable : virtual ILoxObject {
-    virtual LoxValue Call(Interpreter &, span<LoxValue>) = 0;
+    virtual LoxValue Call(Interpreter &, span<LoxValue>, token_t) = 0;
     virtual int Arity() const = 0;
 };
 

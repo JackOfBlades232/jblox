@@ -1,0 +1,56 @@
+var begin = clock();
+
+// Quite brittle because no exceptional situation handling
+
+while (true) {
+    var line = read();
+    if (!line) {
+        if (!isnil(line))
+            print "Panic! a falsey val with is not a nil";
+        break;
+    }
+    if (!isstr(line)) {
+        print "Panic! read returned not-a-string";
+    }
+
+    var lineLen = strlen(line);
+
+    var sepId = 0;
+    var reqSep = strat(":", 0);
+    while (sepId < lineLen && strat(line, sepId) != reqSep)
+        sepId = sepId + 1;
+
+    if (sepId == lineLen) {
+        print "No separator found";
+    } else {
+        var name = substr(line, 0, sepId);
+        var numstr = substr(line, sepId + 1, lineLen);
+
+        var num = str2num(numstr);
+        if (!num) {
+            print "Invalid number '" + numstr + "'";
+        } else {
+            if (!isnum(line)) {
+                print "Panic! str2num returned not-a-number";
+            }
+            print "Read number '" + str(num) + "' from entry '" + name + "'";
+        }
+    }
+}
+
+fun f() {}
+class C {}
+mixin Mx {}
+module M {}
+var i = C();
+
+if (!isfun(f))
+    print "Panic! fun returned not-a-func";
+if (!isclass(C))
+    print "Panic! class returned not-a-class";
+if (!ismixin(Mx))
+    print "Panic! mixin returned not-a-mixin";
+if (!ismodule(M))
+    print "Panic! module returned not-a-module";
+if (!isinstance(i))
+    print "Panic! class constructor returned not-an-instance";

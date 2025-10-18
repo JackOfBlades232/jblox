@@ -146,6 +146,7 @@ int main(int argc, char **argv)
                         {"vector<stmt_ptr_t>", "body"}
                     }},
                     {"Classy", {
+                        {"token_t", "keyword"},
                         {"expr_ptr_t", "superclass"},
                         {"token_t", "inheritance_keyword"},
                         {"token_t", "mixin_keyword"},
