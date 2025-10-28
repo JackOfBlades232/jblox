@@ -6,5 +6,11 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/clox
     ${CMAKE_CURRENT_BINARY_DIR}/include)
 
-add_executable(clox src/main.c)
+if (MSVC)
+    add_compile_options(/W4)
+else()
+    add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(clox src/main.c src/os.c)
 
