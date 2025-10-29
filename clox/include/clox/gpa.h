@@ -1,6 +1,7 @@
 #pragma once
 
 #include "buffer.h"
+#include "debug.h"
 
 typedef struct gpa_free_header {
     usize size;
@@ -17,16 +18,16 @@ typedef struct {
 } gpa_t;
 
 #define GPA_MIN_ALIGNMENT 16
-_Static_assert(
+STATIC_ASSERT(
     GPA_MIN_ALIGNMENT % _Alignof(gpa_free_header_t) == 0,
     "GPA min alignment must be valid for free header");
-_Static_assert(
+STATIC_ASSERT(
     GPA_MIN_ALIGNMENT % _Alignof(gpa_allocated_header_t) == 0,
     "GPA min alignment must be valid for allocated header");
-_Static_assert(
+STATIC_ASSERT(
     sizeof(gpa_allocated_header_t) <= GPA_MIN_ALIGNMENT,
     "GPA min alignment must be less then allocated header size");
-_Static_assert(sizeof(gpa_free_header_t) <= GPA_MIN_ALIGNMENT,
+STATIC_ASSERT(sizeof(gpa_free_header_t) <= GPA_MIN_ALIGNMENT,
     "GPA min alignment must be less then free header size");
 
 static inline void *gpa_allocate(gpa_t *gpa, usize bytes)
@@ -87,8 +88,8 @@ static inline void gpa_deallocate(gpa_t *gpa, void *p)
 
 static inline gpa_t make_gpa(buffer_t mem)
 {
-    assert(mem.len >= GPA_MIN_ALIGNMENT);
-    assert(mem.len % GPA_MIN_ALIGNMENT == 0);
+    ASSERT(mem.len >= GPA_MIN_ALIGNMENT);
+    ASSERT(mem.len % GPA_MIN_ALIGNMENT == 0);
     gpa_free_header_t *free = (gpa_free_header_t *)mem.data;
     free->size = mem.len / GPA_MIN_ALIGNMENT;
     free->next = NULL;

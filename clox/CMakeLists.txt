@@ -8,9 +8,12 @@ include_directories(
 
 if (MSVC)
     add_compile_options(/W4)
+    add_compile_options(/NODEFAULTLIB /ENTRY:start__)
 else()
     add_compile_options(-Wall -Wextra -Wpedantic)
+    add_compile_options(-Wno-language-extension-token)
+    add_compile_options(-nostdlib -ffreestanding)
 endif()
 
-add_executable(clox src/main.c src/os.c)
+add_executable(clox src/main.c src/os.c src/io.c)
 

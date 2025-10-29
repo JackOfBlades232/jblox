@@ -4,10 +4,6 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <float.h>
-
-#include <assert.h>
-#include <stdio.h>
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -27,6 +23,14 @@ typedef long long llong;
 typedef unsigned long long ullong;
 typedef size_t usize;
 
+#if _WIN32
+#include <BaseTsd.h>
+typedef SSIZE_T isize;
+#else
+#include <sys/types.h>
+typedef ssize_t isize;
+#endif
+
 #define XITYPES \
     X(u8)       \
     X(u16)      \
@@ -42,7 +46,8 @@ typedef size_t usize;
     X(ulong)    \
     X(llong)    \
     X(ullong)   \
-    X(usize)
+    X(usize)    \
+    X(isize)
 
 #define XFTYPES \
     X(f32)      \
@@ -69,6 +74,7 @@ typedef size_t usize;
         llong: llong ## _ ## name_,   \
         ullong: ullong ## _ ## name_, \
         usize: usize ## _ ## name_,   \
+        isize: isize ## _ ## name_,   \
     )
 
 #define GENF_ITYPES(X_, name_)        \
@@ -88,6 +94,7 @@ typedef size_t usize;
         llong: llong ## _ ## name_,   \
         ullong: ullong ## _ ## name_, \
         usize: usize ## _ ## name_,   \
+        isize: isize ## _ ## name_,   \
     )
 
 #define GENF_FTYPES(X_, name_)        \
@@ -101,6 +108,9 @@ typedef size_t usize;
 
 #define CAT_(a_, b_) a_ ## b_
 #define CAT(a_, b_) CAT_(a_, b_)
+
+#define ARRCNT(a_) (sizeof(a_) / sizeof(*(a_)))
+#define STRLITLEN(s_) (sizeof(s_) / sizeof(char) - 1)
 
 #define ABS(a_) ((a_) < 0 ? -(a_) : (a_))
 

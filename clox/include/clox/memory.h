@@ -37,12 +37,11 @@ static inline void free_os_large_pages_memory(void *mem, usize size)
 
 #else
 
-#include <sys/mman.h>
-#include <linux/mman.h>
 #include <unistd.h>
-
+#include <sys/mman.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include <linux/mman.h>
 
 static inline void *allocate_os_pages_memory(usize bytes)
 {

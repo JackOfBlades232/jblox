@@ -1,6 +1,7 @@
 #pragma once
 
 #include "defs.h"
+#include "io.h"
 
 #if _WIN32
 
@@ -12,12 +13,16 @@ typedef struct {
     HANDLE process_hnd;
     usize regular_page_size;
     usize large_page_size; // 0 means disabled
+    io_handle_t hstdin;
+    io_handle_t hstdout;
+    io_handle_t hstderr;
 } os_process_state_t;
 
 static inline void init_os_process_state(os_process_state_t *st)
 {
     st->process_hnd = GetCurrentProcess();
     st->regular_page_size = 4096;
+    // @TODO: init io
 }
 
 static inline b32 try_enable_large_pages(os_process_state_t *st)
@@ -44,11 +49,6 @@ static inline b32 try_enable_large_pages(os_process_state_t *st)
     return st->large_page_size > 0;
 }
 
-static inline i64 get_last_os_error()
-{
-    return (i64)GetLastError();
-}
-
 #else
 
 #include <unistd.h>
@@ -57,6 +57,9 @@ typedef struct {
     pid_t pid;
     usize regular_page_size;
     char stat_file_name_buf[128];
+    io_handle_t hstdin;
+    io_handle_t hstdout;
+    io_handle_t hstderr;
 } os_process_state_t;
 
 static inline void init_os_process_state(os_process_state_t *st)
@@ -66,17 +69,15 @@ static inline void init_os_process_state(os_process_state_t *st)
     snprintf(
         st->stat_file_name_buf, sizeof(st->stat_file_name_buf),
         "/proc/%d/stat", st->pid);
+    st->hstdin = (io_handle_t){STDIN_FILENO + 1};
+    st->hstdout = (io_handle_t){STDOUT_FILENO + 1};
+    st->hstderr = (io_handle_t){STDERR_FILENO + 1};
 }
 
 static inline b32 try_enable_large_pages(os_process_state_t *st)
 {
     (void)st;
     return true;
-}
-
-static inline i64 get_last_os_error()
-{
-    return (i64)errno;
 }
 
 #endif
