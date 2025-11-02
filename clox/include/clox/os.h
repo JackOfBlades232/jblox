@@ -7,8 +7,10 @@
 
 #if _WIN32
 
+// @TODO: dynamic load
 #include <windows.h>
 
+// @TODO: dynamic load
 #pragma comment(lib, "Advapi32.lib")
 
 typedef struct {
@@ -53,10 +55,8 @@ static inline b32 os_try_enable_large_pages(os_process_state_t *st)
 
 #else
 
-#include <unistd.h>
-
 typedef struct {
-    pid_t pid;
+    sys_pid_t pid;
     usize regular_page_size;
     char stat_file_name_buf[128];
     io_handle_t hstdin;
@@ -71,9 +71,9 @@ static inline void os_init_process_state(os_process_state_t *st)
     fmt_sprint(
         st->stat_file_name_buf, sizeof(st->stat_file_name_buf),
         "/proc/%d/stat", st->pid);
-    st->hstdin = (io_handle_t){STDIN_FILENO + 1};
-    st->hstdout = (io_handle_t){STDOUT_FILENO + 1};
-    st->hstderr = (io_handle_t){STDERR_FILENO + 1};
+    st->hstdin = (io_handle_t){SYS_STDIN_FILENO + 1};
+    st->hstdout = (io_handle_t){SYS_STDOUT_FILENO + 1};
+    st->hstderr = (io_handle_t){SYS_STDERR_FILENO + 1};
 }
 
 static inline b32 os_try_enable_large_pages(os_process_state_t *st)

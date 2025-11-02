@@ -38,7 +38,7 @@ static inline void *gpa_allocate(gpa_t *gpa, usize bytes)
     usize const min_blocks = real_byte_size / GPA_ALIGNMENT;
 
     while (free) {
-        size_t free_size = free->size;
+        usize free_size = free->size;
         gpa_free_header_t *next = free->next;
         if (free_size >= min_blocks) {
 

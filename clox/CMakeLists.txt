@@ -16,7 +16,7 @@ else()
     add_compile_options(
         -Wall -Wextra -pedantic -Wno-language-extension-token)
     add_compile_options(
-        -nostdlib -ffreestanding
+        -nostdlib -nostdinc -ffreestanding
         -fno-stack-protector -fno-builtin)
     add_link_options(-nostdlib -nodefaultlibs -ffreestanding)
 endif()

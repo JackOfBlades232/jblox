@@ -2,17 +2,14 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 
-#include <stddef.h>
-#include <stdint.h>
-
-typedef uint8_t u8;
-typedef uint16_t u16;
-typedef uint32_t u32;
-typedef uint64_t u64;
-typedef int8_t i8;
-typedef int16_t i16;
-typedef int32_t i32;
-typedef int64_t i64;
+typedef __UINT8_TYPE__ u8;
+typedef __UINT16_TYPE__ u16;
+typedef __UINT32_TYPE__ u32;
+typedef __UINT64_TYPE__ u64;
+typedef __INT8_TYPE__ i8;
+typedef __INT16_TYPE__ i16;
+typedef __INT32_TYPE__ i32;
+typedef __INT64_TYPE__ i64;
 typedef float f32;
 typedef double f64;
 typedef u32 b32;
@@ -21,14 +18,14 @@ typedef unsigned char uchar;
 typedef unsigned long ulong;
 typedef long long llong;
 typedef unsigned long long ullong;
-typedef size_t usize;
+typedef __SIZE_TYPE__ usize;
 
 #if _WIN32
+// @TODO: get rid
 #include <BaseTsd.h>
 typedef SSIZE_T isize;
 #else
-#include <sys/types.h>
-typedef ssize_t isize;
+typedef long isize;
 #endif
 
 #define XITYPES \
@@ -89,6 +86,8 @@ typedef ssize_t isize;
 
 #define true ((b32)1)
 #define false ((b32)0)
+
+#define NULL ((void *)0)
 
 #define CAT_(a_, b_) a_ ## b_
 #define CAT(a_, b_) CAT_(a_, b_)

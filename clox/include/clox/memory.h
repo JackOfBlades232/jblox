@@ -5,6 +5,7 @@
 
 #if _WIN32
 
+// @TODO: dynamic load
 #include <windows.h>
 
 static inline void *os_allocate_pages_memory(usize bytes)
@@ -38,19 +39,13 @@ static inline void os_free_large_pages_memory(void *mem, usize size)
 
 #else
 
-#include <unistd.h>
-#include <sys/mman.h>
-#include <sys/time.h>
-#include <sys/resource.h>
-#include <linux/mman.h>
-
 static inline void *os_allocate_pages_memory(usize bytes)
 {
     usize const bytes_for_pages =
         ROUND_UP(bytes, g_os_proc_state.regular_page_size);
     return sys_mmap(
-        NULL, bytes_for_pages, PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+        NULL, bytes_for_pages, SYS_PROT_READ | SYS_PROT_WRITE,
+        SYS_MAP_PRIVATE | SYS_MAP_ANON, 0, 0);
 }
 
 static inline void os_free_pages_memory(void *mem, usize bytes)
@@ -63,8 +58,9 @@ static inline void *os_allocate_large_pages_memory(usize bytes)
     usize const c_huge_page_alignment = 2 << 20; // @TODO: settable?
     usize const bytes_for_pages = ROUND_UP(bytes, c_huge_page_alignment);
     void *ptr = sys_mmap(
-        NULL, bytes_for_pages, PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB, -1, 0);
+        NULL, bytes_for_pages, SYS_PROT_READ | SYS_PROT_WRITE,
+        SYS_MAP_PRIVATE | SYS_MAP_ANON | SYS_MAP_HUGETLB | SYS_MAP_HUGE_2MB,
+        -1, 0);
     return (isize)ptr < 0 ? NULL : ptr;
 }
 
