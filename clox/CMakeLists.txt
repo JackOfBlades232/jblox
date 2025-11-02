@@ -21,5 +21,5 @@ else()
     add_link_options(-nostdlib -nodefaultlibs -ffreestanding)
 endif()
 
-add_executable(clox src/start.c src/main.c src/os.c src/io.c)
+add_executable(clox src/main.c)
 

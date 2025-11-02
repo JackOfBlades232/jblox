@@ -20,14 +20,14 @@ typedef struct {
     io_handle_t hstderr;
 } os_process_state_t;
 
-static inline void init_os_process_state(os_process_state_t *st)
+static inline void os_init_process_state(os_process_state_t *st)
 {
     st->process_hnd = GetCurrentProcess();
     st->regular_page_size = 4096;
     // @TODO: init io
 }
 
-static inline b32 try_enable_large_pages(os_process_state_t *st)
+static inline b32 os_try_enable_large_pages(os_process_state_t *st)
 {
     HANDLE token_hnd;
 
@@ -64,7 +64,7 @@ typedef struct {
     io_handle_t hstderr;
 } os_process_state_t;
 
-static inline void init_os_process_state(os_process_state_t *st)
+static inline void os_init_process_state(os_process_state_t *st)
 {
     st->pid = sys_getpid();
     st->regular_page_size = 4096; // @TODO: support properly?
@@ -76,7 +76,7 @@ static inline void init_os_process_state(os_process_state_t *st)
     st->hstderr = (io_handle_t){STDERR_FILENO + 1};
 }
 
-static inline b32 try_enable_large_pages(os_process_state_t *st)
+static inline b32 os_try_enable_large_pages(os_process_state_t *st)
 {
     (void)st;
     return true;
@@ -84,5 +84,5 @@ static inline b32 try_enable_large_pages(os_process_state_t *st)
 
 #endif
 
-extern os_process_state_t g_os_proc_state;
+static os_process_state_t g_os_proc_state;
 

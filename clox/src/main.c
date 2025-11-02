@@ -10,17 +10,18 @@
 
 int main(int argc, char **argv)
 {
-    init_os_process_state(&g_os_proc_state);
-    try_enable_large_pages(&g_os_proc_state);
+    os_init_process_state(&g_os_proc_state);
+    os_try_enable_large_pages(&g_os_proc_state);
 
-    buffer_t program_memory = buf_allocate_best(4ull << 30);
+    buffer_t program_memory = buf_allocate_best(1ull << 30);
 
     // @TEST s
     LOGF("Hello, world! Argc=%d, Argv=%p", argc, argv);
     if (buf_is_valid(&program_memory)) {
         LOGF(
-            "Allocated %U bytes for program memory at %p",
-            program_memory.len, program_memory.data);
+            "Allocated %U bytes for program memory at %p (%s)",
+            program_memory.len, program_memory.data,
+            program_memory.is_large_pages ? "large pages" : "regular pages");
     } else {
         LOGF("Failed to allocate %U bytes for program memory!", 4ull << 30);
         return 2;
@@ -57,3 +58,25 @@ int main(int argc, char **argv)
     return 0;
 }
 
+
+#if _WIN32
+
+// @TODO
+
+#else
+
+__attribute__((naked)) void _start(void)
+{
+    asm(
+        "xor rbp, rbp\n"
+        "pop rdi\n"
+        "mov rsi, rsp\n"
+        "and rsp, -16\n"
+        "call main\n"
+        "mov rdi, rax\n"
+        "mov rax, 60\n"
+        "syscall\n"
+        "ret");
+}
+
+#endif

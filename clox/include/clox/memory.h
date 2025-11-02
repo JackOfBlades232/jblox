@@ -7,19 +7,19 @@
 
 #include <windows.h>
 
-static inline void *allocate_os_pages_memory(usize bytes)
+static inline void *os_allocate_pages_memory(usize bytes)
 {
     return VirtualAlloc(
         NULL, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 }
 
-static inline void free_os_pages_memory(void *mem, usize size)
+static inline void os_free_pages_memory(void *mem, usize size)
 {
     (void)size;
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
-static inline void *allocate_os_large_pages_memory(usize bytes)
+static inline void *os_allocate_large_pages_memory(usize bytes)
 {
     if (g_os_proc_state.large_page_size == 0)
         return NULL;
@@ -30,10 +30,10 @@ static inline void *allocate_os_large_pages_memory(usize bytes)
         MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE);
 }
 
-static inline void free_os_large_pages_memory(void *mem, usize size)
+static inline void os_free_large_pages_memory(void *mem, usize size)
 {
     (void)size;
-    free_os_pages_memory(mem, 0);
+    os_free_pages_memory(mem, 0);
 }
 
 #else
@@ -44,7 +44,7 @@ static inline void free_os_large_pages_memory(void *mem, usize size)
 #include <sys/resource.h>
 #include <linux/mman.h>
 
-static inline void *allocate_os_pages_memory(usize bytes)
+static inline void *os_allocate_pages_memory(usize bytes)
 {
     usize const bytes_for_pages =
         ROUND_UP(bytes, g_os_proc_state.regular_page_size);
@@ -53,25 +53,24 @@ static inline void *allocate_os_pages_memory(usize bytes)
         MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
 }
 
-static inline void free_os_pages_memory(void *mem, usize bytes)
+static inline void os_free_pages_memory(void *mem, usize bytes)
 {
     sys_munmap(mem, ROUND_UP(bytes, g_os_proc_state.regular_page_size));
 }
 
-static inline void *allocate_os_large_pages_memory(usize bytes)
+static inline void *os_allocate_large_pages_memory(usize bytes)
 {
-    usize const c_huge_page_alignment = 2 << 20;
-    usize const bytes_for_pages =
-        ROUND_UP(bytes, c_huge_page_alignment);
+    usize const c_huge_page_alignment = 2 << 20; // @TODO: settable?
+    usize const bytes_for_pages = ROUND_UP(bytes, c_huge_page_alignment);
     void *ptr = sys_mmap(
         NULL, bytes_for_pages, PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB, 0, 0);
-    return ptr == MAP_FAILED ? NULL : ptr;
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB, -1, 0);
+    return (isize)ptr < 0 ? NULL : ptr;
 }
 
-static inline void free_os_large_pages_memory(void *mem, usize bytes)
+static inline void os_free_large_pages_memory(void *mem, usize bytes)
 {
-    usize const c_huge_page_alignment = 2 << 20;
+    usize const c_huge_page_alignment = 2 << 20; // @TODO: settable?
     sys_munmap(mem, ROUND_UP(bytes, c_huge_page_alignment));
 }
 

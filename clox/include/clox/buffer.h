@@ -16,13 +16,13 @@ static inline b32 buf_is_valid(buffer_t const *b)
 
 static inline buffer_t buf_allocate(u64 bytes)
 {
-    void *data = allocate_os_pages_memory(bytes);
+    void *data = os_allocate_pages_memory(bytes);
     return (buffer_t){(u8 *)data, bytes, false};
 }
 
 static inline buffer_t buf_allocate_lp(u64 bytes)
 {
-    void *data = allocate_os_large_pages_memory(bytes);
+    void *data = os_allocate_large_pages_memory(bytes);
     return (buffer_t){(u8 *)data, bytes, true};
 }
 
@@ -39,8 +39,8 @@ static inline void buf_deallocate(buffer_t *buf)
 {
     if (buf->data) {
         (buf->is_large_pages ?
-            &free_os_large_pages_memory :
-            &free_os_pages_memory)(buf->data, buf->len);
+            &os_free_large_pages_memory :
+            &os_free_pages_memory)(buf->data, buf->len);
         buf->data = NULL;
         buf->len = 0;
         buf->is_large_pages = false;
