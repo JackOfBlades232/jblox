@@ -7,6 +7,7 @@ include_directories(
     ${CMAKE_CURRENT_BINARY_DIR}/include)
 
 if (MSVC)
+    # @TODO: bring up to speed
     add_compile_options(/W4)
     add_compile_options(/GS- /Zl)
     add_link_options(/NODEFAULTLIB /ENTRY:_start /SUBSYSTEM:CONSOLE)
@@ -15,9 +16,11 @@ else()
     add_compile_options(-masm=intel)
     add_compile_options(
         -Wall -Wextra -pedantic -Wno-language-extension-token)
+    add_compile_options(-static -nostdlib -nostdinc -ffreestanding)
     add_compile_options(
-        -nostdlib -nostdinc -ffreestanding
-        -fno-stack-protector -fno-builtin)
+        -fno-stack-protector -fno-builtin
+        -fno-unwind-tables -fno-asynchronous-unwind-tables
+        -fdata-sections)
     add_link_options(-nostdlib -nodefaultlibs -ffreestanding)
 endif()
 

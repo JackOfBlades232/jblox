@@ -28,12 +28,12 @@
 
 typedef int sys_pid_t;
 
-// @TODO: sort out if I need volatiles/clobbers
+// @TODO: sort out if I need more clobbers
 
 static inline isize sys_call0(usize id)
 {
     isize ret;
-    asm(
+    asm volatile(
         "syscall"
         : "=a"(ret)
         : "a"(id)
@@ -44,7 +44,7 @@ static inline isize sys_call0(usize id)
 static inline isize sys_call1(usize id, void *arg)
 {
     isize ret;
-    asm(
+    asm volatile(
         "syscall"
         : "=a"(ret)
         : "a"(id), "D"(arg)
@@ -55,7 +55,7 @@ static inline isize sys_call1(usize id, void *arg)
 static inline isize sys_call2(usize id, void *arg1, void *arg2)
 {
     isize ret;
-    asm(
+    asm volatile(
         "syscall"
         : "=a"(ret)
         : "a"(id), "D"(arg1), "S"(arg2)
@@ -66,7 +66,7 @@ static inline isize sys_call2(usize id, void *arg1, void *arg2)
 static inline isize sys_call3(usize id, void *arg1, void *arg2, void *arg3)
 {
     isize ret;
-    asm(
+    asm volatile(
         "syscall"
         : "=a"(ret)
         : "a"(id), "D"(arg1), "S"(arg2), "d"(arg3)
@@ -82,7 +82,7 @@ static inline isize sys_call6(
     register i64 r10 asm("r10") = (i64)arg4;
     register i64 r8 asm("r8") = (i64)arg5;
     register i64 r9 asm("r9") = (i64)arg6;
-    asm(
+    asm volatile(
         "syscall"
         : "=a"(ret)
         : "a"(id), "D"(arg1), "S"(arg2), "d"(arg3), "r"(r10), "r"(r8), "r"(r9)

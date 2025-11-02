@@ -14,7 +14,6 @@
 
 #else
 
-// @TODO: sort out if I need volatile
 #define DEBUG_BREAK asm("int3")
 
 #endif
