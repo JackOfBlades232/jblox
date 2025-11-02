@@ -12,16 +12,27 @@ if (MSVC)
     add_compile_options(/GS- /Zl)
     add_link_options(/NODEFAULTLIB /ENTRY:_start /SUBSYSTEM:CONSOLE)
 else()
-    add_compile_options(-g)
-    add_compile_options(-masm=intel)
     add_compile_options(
-        -Wall -Wextra -pedantic -Wno-language-extension-token)
-    add_compile_options(-static -nostdlib -nostdinc -ffreestanding)
-    add_compile_options(
+        -masm=intel
+        -Wall -Wextra -pedantic -Wno-language-extension-token
+        -nostdinc -ffreestanding
         -fno-stack-protector -fno-builtin
         -fno-unwind-tables -fno-asynchronous-unwind-tables
-        -fdata-sections)
-    add_link_options(-nostdlib -nodefaultlibs -ffreestanding)
+        -ffunction-sections -fdata-sections
+        -fno-ident)
+    add_link_options(
+        -static -nostdlib -nodefaultlibs
+        -Wl,--build-id=none -Wl,--gc-sections -Wl,--undefined=main)
+
+    # Debug
+    add_compile_options(-g)
+
+    # Opt
+    add_compile_options(-Os -O2 -flto)
+    add_link_options(-flto)
+
+    # Strip
+    #add_link_options(-s)
 endif()
 
 add_executable(clox src/main.c)
