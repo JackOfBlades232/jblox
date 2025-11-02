@@ -1,6 +1,7 @@
 #pragma once
 
 #include "defs.h" 
+#include "os.h" 
 
 #if _WIN32
 
@@ -47,20 +48,23 @@ static inline void *allocate_os_pages_memory(usize bytes)
 {
     usize const bytes_for_pages =
         ROUND_UP(bytes, g_os_proc_state.regular_page_size);
-    return mmap(
+    return sys_mmap(
         NULL, bytes_for_pages, PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
 }
 
 static inline void free_os_pages_memory(void *mem, usize bytes)
 {
-    munmap(mem, ROUND_UP(bytes, g_os_proc_state.regular_page_size));
+    sys_munmap(mem, ROUND_UP(bytes, g_os_proc_state.regular_page_size));
 }
 
 static inline void *allocate_os_large_pages_memory(usize bytes)
 {
-    void *ptr = mmap(
-        NULL, bytes, PROT_READ | PROT_WRITE,
+    usize const c_huge_page_alignment = 2 << 20;
+    usize const bytes_for_pages =
+        ROUND_UP(bytes, c_huge_page_alignment);
+    void *ptr = sys_mmap(
+        NULL, bytes_for_pages, PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB, 0, 0);
     return ptr == MAP_FAILED ? NULL : ptr;
 }
@@ -68,7 +72,7 @@ static inline void *allocate_os_large_pages_memory(usize bytes)
 static inline void free_os_large_pages_memory(void *mem, usize bytes)
 {
     usize const c_huge_page_alignment = 2 << 20;
-    munmap(mem, ROUND_UP(bytes, c_huge_page_alignment));
+    sys_munmap(mem, ROUND_UP(bytes, c_huge_page_alignment));
 }
 
 #endif

@@ -66,15 +66,7 @@ typedef ssize_t isize;
         i32: i32 ## _ ## name_,       \
         i64: i64 ## _ ## name_,       \
         f32: f32 ## _ ## name_,       \
-        f64: f64 ## _ ## name_,       \
-        b32: b32 ## _ ## name_,       \
-        uint: uint ## _ ## name_,     \
-        uchar: uchar ## _ ## name_,   \
-        ulong: ulong ## _ ## name_,   \
-        llong: llong ## _ ## name_,   \
-        ullong: ullong ## _ ## name_, \
-        usize: usize ## _ ## name_,   \
-        isize: isize ## _ ## name_,   \
+        f64: f64 ## _ ## name_        \
     )
 
 #define GENF_ITYPES(X_, name_)        \
@@ -86,21 +78,13 @@ typedef ssize_t isize;
         i8: i8 ## _ ## name_,         \
         i16: i16 ## _ ## name_,       \
         i32: i32 ## _ ## name_,       \
-        i64: i64 ## _ ## name_,       \
-        b32: b32 ## _ ## name_,       \
-        uint: uint ## _ ## name_,     \
-        uchar: uchar ## _ ## name_,   \
-        ulong: ulong ## _ ## name_,   \
-        llong: llong ## _ ## name_,   \
-        ullong: ullong ## _ ## name_, \
-        usize: usize ## _ ## name_,   \
-        isize: isize ## _ ## name_,   \
+        i64: i64 ## _ ## name_        \
     )
 
 #define GENF_FTYPES(X_, name_)        \
     _Generic((X_),                    \
         f32: f32 ## _ ## name_,       \
-        f64: f64 ## _ ## name_,       \
+        f64: f64 ## _ ## name_        \
     )
 
 #define true ((b32)1)
@@ -112,12 +96,17 @@ typedef ssize_t isize;
 #define ARRCNT(a_) (sizeof(a_) / sizeof(*(a_)))
 #define STRLITLEN(s_) (sizeof(s_) / sizeof(char) - 1)
 
+#define SWAP(a_, b_, type_) \
+    do { type_ tmp_ = (a_); (a_) = (b_); (b_) = tmp_; } while (0)
+
 #define ABS(a_) ((a_) < 0 ? -(a_) : (a_))
+#define MIN(a_, b_) ((a_) < (b_) ? (a_) : (b_))
+#define MAX(a_, b_) ((a_) > (b_) ? (a_) : (b_))
 
 #define ROUND_UP(v_, m_) ((m_) * (((v_) - 1) / (m_) + 1))
 
 #define DECLARE_GCD(type_)                             \
-    static inline type_ type_ ## gcd(type_ a, type_ b) \
+    static inline type_ type_ ## _gcd(type_ a, type_ b) \
     {                                                  \
         while (b != 0) {                               \
             type_ t = b;                               \
@@ -132,3 +121,8 @@ XITYPES
 #define GCD(a_, b_) GENF_ITYPES(a_, gcd)((a_), (b_))
 
 #define LCM(a_, b_) ((ABS(a_) * ABS(b_)) / GCD(a_, b_))
+
+#define VA_LIST __builtin_va_list
+#define VA_START(ap_, param_) __builtin_va_start(ap_, param_)
+#define VA_END(ap_) __builtin_va_end(ap_)
+#define VA_ARG(ap_, type_) __builtin_va_arg(ap_, type_)

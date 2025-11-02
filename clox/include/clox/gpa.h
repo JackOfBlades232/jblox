@@ -17,25 +17,25 @@ typedef struct {
     gpa_free_header_t *head;
 } gpa_t;
 
-#define GPA_MIN_ALIGNMENT 16
-STATIC_ASSERT(
-    GPA_MIN_ALIGNMENT % _Alignof(gpa_free_header_t) == 0,
+#define GPA_ALIGNMENT 16
+_Static_assert(
+    GPA_ALIGNMENT % _Alignof(gpa_free_header_t) == 0,
     "GPA min alignment must be valid for free header");
-STATIC_ASSERT(
-    GPA_MIN_ALIGNMENT % _Alignof(gpa_allocated_header_t) == 0,
+_Static_assert(
+    GPA_ALIGNMENT % _Alignof(gpa_allocated_header_t) == 0,
     "GPA min alignment must be valid for allocated header");
-STATIC_ASSERT(
-    sizeof(gpa_allocated_header_t) <= GPA_MIN_ALIGNMENT,
+_Static_assert(
+    sizeof(gpa_allocated_header_t) <= GPA_ALIGNMENT,
     "GPA min alignment must be less then allocated header size");
-STATIC_ASSERT(sizeof(gpa_free_header_t) <= GPA_MIN_ALIGNMENT,
+_Static_assert(sizeof(gpa_free_header_t) <= GPA_ALIGNMENT,
     "GPA min alignment must be less then free header size");
 
 static inline void *gpa_allocate(gpa_t *gpa, usize bytes)
 {
     gpa_free_header_t *free = gpa->head, *prev = NULL;
     usize const real_byte_size =
-        ROUND_UP(GPA_MIN_ALIGNMENT + bytes, GPA_MIN_ALIGNMENT);
-    usize const min_blocks = real_byte_size / GPA_MIN_ALIGNMENT;
+        ROUND_UP(GPA_ALIGNMENT + bytes, GPA_ALIGNMENT);
+    usize const min_blocks = real_byte_size / GPA_ALIGNMENT;
 
     while (free) {
         size_t free_size = free->size;
@@ -57,7 +57,7 @@ static inline void *gpa_allocate(gpa_t *gpa, usize bytes)
             else
                 gpa->head = next;
 
-            return (u8 *)alloc + GPA_MIN_ALIGNMENT;
+            return (u8 *)alloc + GPA_ALIGNMENT;
         }
     }
 
@@ -67,14 +67,14 @@ static inline void *gpa_allocate(gpa_t *gpa, usize bytes)
 static inline void gpa_deallocate(gpa_t *gpa, void *p)
 {
     gpa_allocated_header_t *alloc =
-        (gpa_allocated_header_t *)((u8 *)p - GPA_MIN_ALIGNMENT);
+        (gpa_allocated_header_t *)((u8 *)p - GPA_ALIGNMENT);
     usize size = alloc->size;
 
     gpa_free_header_t *free = (gpa_free_header_t *)alloc;
 
     // If next to each other, coalesce
     while (gpa->head ==
-        (gpa_free_header_t *)((u8 *)free + size * GPA_MIN_ALIGNMENT))
+        (gpa_free_header_t *)((u8 *)free + size * GPA_ALIGNMENT))
     {
         size += gpa->head->size;
         gpa_free_header_t *next = gpa->head->next;
@@ -88,10 +88,10 @@ static inline void gpa_deallocate(gpa_t *gpa, void *p)
 
 static inline gpa_t make_gpa(buffer_t mem)
 {
-    ASSERT(mem.len >= GPA_MIN_ALIGNMENT);
-    ASSERT(mem.len % GPA_MIN_ALIGNMENT == 0);
+    ASSERT(mem.len >= GPA_ALIGNMENT);
+    ASSERT(mem.len % GPA_ALIGNMENT == 0);
     gpa_free_header_t *free = (gpa_free_header_t *)mem.data;
-    free->size = mem.len / GPA_MIN_ALIGNMENT;
+    free->size = mem.len / GPA_ALIGNMENT;
     free->next = NULL;
     return (gpa_t){mem, free};
 }

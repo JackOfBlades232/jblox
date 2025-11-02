@@ -8,12 +8,18 @@ include_directories(
 
 if (MSVC)
     add_compile_options(/W4)
-    add_compile_options(/NODEFAULTLIB /ENTRY:start__)
+    add_compile_options(/GS- /Zl)
+    add_link_options(/NODEFAULTLIB /ENTRY:_start /SUBSYSTEM:CONSOLE)
 else()
-    add_compile_options(-Wall -Wextra -Wpedantic)
-    add_compile_options(-Wno-language-extension-token)
-    add_compile_options(-nostdlib -ffreestanding)
+    add_compile_options(-g)
+    add_compile_options(-masm=intel)
+    add_compile_options(
+        -Wall -Wextra -pedantic -Wno-language-extension-token)
+    add_compile_options(
+        -nostdlib -ffreestanding
+        -fno-stack-protector -fno-builtin)
+    add_link_options(-nostdlib -nodefaultlibs -ffreestanding)
 endif()
 
-add_executable(clox src/main.c src/os.c src/io.c)
+add_executable(clox src/start.c src/main.c src/os.c src/io.c)
 

@@ -1,6 +1,9 @@
 #include <os.h>
 #include <memory.h>
 #include <buffer.h>
+#include <fmt.h>
+#include <io.h>
+#include <logging.h>
 #include <defs.h>
 
 #include <gpa.h>
@@ -13,13 +16,13 @@ int main(int argc, char **argv)
     buffer_t program_memory = buf_allocate_best(4ull << 30);
 
     // @TEST s
-    // @TODO: reimplement, add logging system
-    printf("Hello, world! Argc=%d, Argv=%p\n", argc, argv);
+    LOGF("Hello, world! Argc=%d, Argv=%p", argc, argv);
     if (buf_is_valid(&program_memory)) {
-        printf("Allocated %llu bytes for program memory at %p\n",
+        LOGF(
+            "Allocated %U bytes for program memory at %p",
             program_memory.len, program_memory.data);
     } else {
-        printf("Failed to allocate %llu bytes for program memory!\n", 4ull << 30);
+        LOGF("Failed to allocate %U bytes for program memory!", 4ull << 30);
         return 2;
     }
 
@@ -30,22 +33,22 @@ int main(int argc, char **argv)
     f64 *doubles = GPA_ALLOC_N(gpa, f64, 1024);
     u8 *bytes = gpa_allocate(&gpa, 1 << 20);
     if (!number) {
-        printf("GPA alloc failed for number!\n");
+        LOG("GPA alloc failed for number!");
         return 2;
     } else {
-        printf("Allocated number at %p\n", number);
+        LOGF("Allocated number at %p", number);
     }
     if (!doubles) {
-        printf("GPA alloc failed for double array!\n");
+        LOG("GPA alloc failed for double array!");
         return 2;
     } else {
-        printf("Allocated double array at %p\n", doubles);
+        LOGF("Allocated double array at %p", doubles);
     }
     if (!bytes) {
-        printf("GPA alloc failed for byte blob!\n");
+        LOG("GPA alloc failed for byte blob!");
         return 2;
     } else {
-        printf("Allocated byte blob at %p\n", bytes);
+        LOGF("Allocated byte blob at %p", bytes);
     }
     GPA_DEALLOC(gpa, doubles);
     GPA_DEALLOC(gpa, number);
@@ -53,3 +56,4 @@ int main(int argc, char **argv)
 
     return 0;
 }
+

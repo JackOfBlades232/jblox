@@ -14,6 +14,7 @@
 
 #else
 
+// @TODO: sort out if I need volatile
 #define DEBUG_BREAK asm("int3")
 
 #endif
@@ -27,5 +28,3 @@
     } while (0)
 
 #endif
-
-#define STATIC_ASSERT(e_, s_) _Static_assert((e_), s_)

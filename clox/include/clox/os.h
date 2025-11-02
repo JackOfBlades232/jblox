@@ -1,7 +1,9 @@
 #pragma once
 
 #include "defs.h"
+#include "syscalls.h"
 #include "io.h"
+#include "fmt.h"
 
 #if _WIN32
 
@@ -64,9 +66,9 @@ typedef struct {
 
 static inline void init_os_process_state(os_process_state_t *st)
 {
-    st->pid = getpid();
-    st->regular_page_size = (usize)getpagesize();
-    snprintf(
+    st->pid = sys_getpid();
+    st->regular_page_size = 4096; // @TODO: support properly?
+    fmt_sprint(
         st->stat_file_name_buf, sizeof(st->stat_file_name_buf),
         "/proc/%d/stat", st->pid);
     st->hstdin = (io_handle_t){STDIN_FILENO + 1};
