@@ -21,8 +21,13 @@ static inline usize type_ ## _fmt_sprint (char *buf, usize bufsize, type_ n) \
         n /= (type_)10;                                                      \
         --bs;                                                                \
     }                                                                        \
-    usize len = bufsize - bs;                                                \
     usize off = neg ? 1 : 0;                                                 \
+    usize len = bufsize - bs;                                                \
+    if (len == off) {                                                        \
+        *p++ = '0';                                                          \
+        --bs;                                                                \
+        ++len;                                                               \
+    }                                                                        \
     for (usize i = off; i < off + (len - off) / 2; ++i)                      \
         SWAP(buf[i], buf[len + off - i - 1], char);                          \
     return len;                                                              \
@@ -38,7 +43,7 @@ static inline usize fmt_sprint_double(char *buf, usize bufsize, f64 n)
 {
     u64 bits = *(u64 *)&n;
     b32 s = bits >> 63;
-    i64 e = (bits >> 52) & ~(1 << 11) - 1023;
+    i64 e = ((bits >> 52) & ((1 << 11) - 1)) - 1023;
     u64 m = bits & ((1ll << 52) - 1);
 
     u64 mantissa_with_one = m | (1ull << 52);
@@ -50,13 +55,19 @@ static inline usize fmt_sprint_double(char *buf, usize bufsize, f64 n)
         f = 0;
     } else {
         w = mantissa_with_one >> -shift;
-        f = mantissa_with_one & ((1ull << -shift) - 1);
+        f = (mantissa_with_one & ((1ull << -shift) - 1)) << e;
     }
 
     usize len = FMT_SPRINT_INT(buf, bufsize, (i64)w * (s ? -1 : 1));
     if (f && len < bufsize) {
         buf[len++] = '.';
-        len += FMT_SPRINT_INT(buf + len, bufsize - len, f);
+        uint significant_digits = 15;
+        while (f && len < bufsize && significant_digits--) {
+            f *= 10;
+            u64 digit = f >> 52;
+            buf[len++] = digit + '0';
+            f &= ((1ull << 52) - 1);
+        }
     }
     
     return len;

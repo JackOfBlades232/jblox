@@ -82,7 +82,12 @@ static inline b32 os_try_enable_large_pages(os_process_state_t *st)
     return true;
 }
 
+static inline void os_exit(int code)
+{
+    sys_exit(code);
+}
+
 #endif
 
-static os_process_state_t g_os_proc_state;
+static os_process_state_t g_os_proc_state = {0};
 

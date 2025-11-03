@@ -104,24 +104,30 @@ typedef long isize;
 
 #define ROUND_UP(v_, m_) ((m_) * (((v_) - 1) / (m_) + 1))
 
-#define DECLARE_GCD(type_)                             \
-    static inline type_ type_ ## _gcd(type_ a, type_ b) \
-    {                                                  \
-        while (b != 0) {                               \
-            type_ t = b;                               \
-            b = a % b;                                 \
-            a = t;                                     \
-        }                                              \
-        return ABS(a);                                 \
-    }
-#define X(t_) DECLARE_GCD(t_)
-XITYPES
-#undef X
-#define GCD(a_, b_) GENF_ITYPES(a_, gcd)((a_), (b_))
-
-#define LCM(a_, b_) ((ABS(a_) * ABS(b_)) / GCD(a_, b_))
-
 #define VA_LIST __builtin_va_list
 #define VA_START(ap_, param_) __builtin_va_start(ap_, param_)
 #define VA_END(ap_) __builtin_va_end(ap_)
 #define VA_ARG(ap_, type_) __builtin_va_arg(ap_, type_)
+
+#ifdef _MSC_VER
+#define FINLINE __forceinline
+#else
+#define FINLINE __attribute__((always_inline)) inline
+#endif
+
+// Implementations for debug-mode compound literals and stuff to pick up
+void *memset(void *to, int val, usize size)
+{
+    u8 *uto = (u8 *)to;
+    while (size--)
+        *uto++ = val;
+    return to;
+}
+
+void memcpy(void *to, void const *from, usize size)
+{
+    u8 *uto = (u8 *)to;
+    u8 const *ufrom = (u8 const *)from;
+    while (size--)
+        *uto++ = *ufrom++;
+}

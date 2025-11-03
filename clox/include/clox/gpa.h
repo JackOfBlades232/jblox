@@ -49,6 +49,7 @@ static inline void *gpa_allocate(gpa_t *gpa, usize bytes)
                 gpa_free_header_t *new_header =
                     (gpa_free_header_t *)((u8 *)free + real_byte_size);
                 new_header->size = free_size - min_blocks;
+                new_header->next = next;
                 next = new_header;
             }
 
@@ -59,12 +60,14 @@ static inline void *gpa_allocate(gpa_t *gpa, usize bytes)
 
             return (u8 *)alloc + GPA_ALIGNMENT;
         }
+
+        free = next;
     }
 
     return NULL;
 }
 
-static inline void gpa_deallocate(gpa_t *gpa, void *p)
+static inline void gpa_deallocate(gpa_t *gpa, void const *p)
 {
     gpa_allocated_header_t *alloc =
         (gpa_allocated_header_t *)((u8 *)p - GPA_ALIGNMENT);
@@ -86,7 +89,7 @@ static inline void gpa_deallocate(gpa_t *gpa, void *p)
     gpa->head = free;
 }
 
-static inline gpa_t make_gpa(buffer_t mem)
+static inline gpa_t gpa_make(buffer_t mem)
 {
     ASSERT(mem.len >= GPA_ALIGNMENT);
     ASSERT(mem.len % GPA_ALIGNMENT == 0);
@@ -96,10 +99,4 @@ static inline gpa_t make_gpa(buffer_t mem)
     return (gpa_t){mem, free};
 }
 
-// @TODO: _Generic?
-#define GPA_ALLOC(gpa_, type_) \
-    (type_ *)(gpa_allocate(&(gpa_), sizeof(type_)))
-#define GPA_ALLOC_N(gpa_, type_, n_) \
-    (type_ *)(gpa_allocate(&(gpa_), sizeof(type_) * (n_)))
-
-#define GPA_DEALLOC(gpa_, ptr_) gpa_deallocate(&(gpa_), (ptr_))
+static gpa_t g_gpa = {0};

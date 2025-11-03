@@ -17,6 +17,7 @@ else()
         -Wall -Wextra -pedantic -Wno-language-extension-token
         -nostdinc -ffreestanding
         -fno-stack-protector -fno-builtin
+        -fno-builtin-memcpy -fno-builtin-memset
         -fno-unwind-tables -fno-asynchronous-unwind-tables
         -ffunction-sections -fdata-sections
         -fno-ident)
@@ -28,8 +29,8 @@ else()
     add_compile_options(-g)
 
     # Opt
-    add_compile_options(-Os -O2 -flto)
-    add_link_options(-flto)
+    #add_compile_options(-Os -O2 -flto)
+    #add_link_options(-flto)
 
     # Strip
     #add_link_options(-s)
