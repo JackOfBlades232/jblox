@@ -13,17 +13,18 @@ typedef __INT64_TYPE__ i64;
 typedef float f32;
 typedef double f64;
 typedef u32 b32;
-typedef unsigned int uint;
+typedef u64 b64;
 typedef unsigned char uchar;
+typedef unsigned short ushort;
+typedef unsigned int uint;
 typedef unsigned long ulong;
 typedef long long llong;
 typedef unsigned long long ullong;
 typedef __SIZE_TYPE__ usize;
 
 #if _WIN32
-// @TODO: get rid
-#include <BaseTsd.h>
-typedef SSIZE_T isize;
+typedef i64 isize;
+typedef ushort wchar;
 #else
 typedef long isize;
 #endif
@@ -38,6 +39,7 @@ typedef long isize;
     X(i32)      \
     X(i64)      \
     X(b32)      \
+    X(b64)      \
     X(uint)     \
     X(uchar)    \
     X(ulong)    \
@@ -45,6 +47,27 @@ typedef long isize;
     X(ullong)   \
     X(usize)    \
     X(isize)
+
+#define XSITYPES \
+    X(i8)       \
+    X(i16)      \
+    X(i32)      \
+    X(i64)      \
+    X(llong)    \
+    X(isize)
+
+#define XUITYPES \
+    X(u8)       \
+    X(u16)      \
+    X(u32)      \
+    X(u64)      \
+    X(b32)      \
+    X(b64)      \
+    X(uint)     \
+    X(uchar)    \
+    X(ulong)    \
+    X(ullong)   \
+    X(usize)
 
 #define XFTYPES \
     X(f32)      \
@@ -78,6 +101,21 @@ typedef long isize;
         i64: i64 ## _ ## name_        \
     )
 
+#define GENF_SITYPES(X_, name_)        \
+    _Generic((X_),                    \
+        i8: i8 ## _ ## name_,         \
+        i16: i16 ## _ ## name_,       \
+        i32: i32 ## _ ## name_,       \
+        i64: i64 ## _ ## name_        \
+    )
+#define GENF_UITYPES(X_, name_)        \
+    _Generic((X_),                    \
+        u8: u8 ## _ ## name_,         \
+        u16: u16 ## _ ## name_,       \
+        u32: u32 ## _ ## name_,       \
+        u64: u64 ## _ ## name_,       \
+    )
+
 #define GENF_FTYPES(X_, name_)        \
     _Generic((X_),                    \
         f32: f32 ## _ ## name_,       \
@@ -93,7 +131,7 @@ typedef long isize;
 #define CAT(a_, b_) CAT_(a_, b_)
 
 #define ARRCNT(a_) (sizeof(a_) / sizeof(*(a_)))
-#define STRLITLEN(s_) (sizeof(s_) / sizeof(char) - 1)
+#define STRLITLEN(s_) (sizeof(s_) / sizeof((s_)[0]) - 1)
 
 #define SWAP(a_, b_, type_) \
     do { type_ tmp_ = (a_); (a_) = (b_); (b_) = tmp_; } while (0)
@@ -120,7 +158,7 @@ void *memset(void *to, int val, usize size)
 {
     u8 *uto = (u8 *)to;
     while (size--)
-        *uto++ = val;
+        *uto++ = (u8)val;
     return to;
 }
 

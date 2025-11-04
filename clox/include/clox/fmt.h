@@ -5,7 +5,7 @@
 // fwd
 static inline isize fmt_sprint(char *buf, usize bufsize, char const *fmt, ...);
 
-#define DECLARE_FMT_SPRINT_INT(type_)                                        \
+#define X(type_)                                                             \
 static inline usize type_ ## _fmt_sprint (char *buf, usize bufsize, type_ n) \
 {                                                                            \
     char *p = buf;                                                           \
@@ -14,7 +14,7 @@ static inline usize type_ ## _fmt_sprint (char *buf, usize bufsize, type_ n) \
     if (bs && neg) {                                                         \
         *p++ = '-';                                                          \
         --bs;                                                                \
-        n = -n;                                                              \
+        n = ((type_)-n);                                                     \
     }                                                                        \
     while (bs && n) {                                                        \
         *p++ = n % (type_)10 + '0';                                          \
@@ -32,8 +32,29 @@ static inline usize type_ ## _fmt_sprint (char *buf, usize bufsize, type_ n) \
         SWAP(buf[i], buf[len + off - i - 1], char);                          \
     return len;                                                              \
 }
-#define X(t_) DECLARE_FMT_SPRINT_INT(t_)
-XITYPES
+XSITYPES
+#undef X
+#define X(type_)                                                             \
+static inline usize type_ ## _fmt_sprint (char *buf, usize bufsize, type_ n) \
+{                                                                            \
+    char *p = buf;                                                           \
+    usize bs = bufsize;                                                      \
+    while (bs && n) {                                                        \
+        *p++ = n % (type_)10 + '0';                                          \
+        n /= (type_)10;                                                      \
+        --bs;                                                                \
+    }                                                                        \
+    usize len = bufsize - bs;                                                \
+    if (len == 0) {                                                          \
+        *p++ = '0';                                                          \
+        --bs;                                                                \
+        ++len;                                                               \
+    }                                                                        \
+    for (usize i = 0; i < len / 2; ++i)                                      \
+        SWAP(buf[i], buf[len - i - 1], char);                                \
+    return len;                                                              \
+}
+XUITYPES
 #undef X
 #define FMT_SPRINT_INT(buf_, bufsize_, n_) \
     GENF_ITYPES(n_, fmt_sprint)((buf_), (bufsize_), (n_))
@@ -65,7 +86,7 @@ static inline usize fmt_sprint_double(char *buf, usize bufsize, f64 n)
         while (f && len < bufsize && significant_digits--) {
             f *= 10;
             u64 digit = f >> 52;
-            buf[len++] = digit + '0';
+            buf[len++] = (char)digit + '0';
             f &= ((1ull << 52) - 1);
         }
     }
@@ -80,7 +101,7 @@ static inline usize fmt_sprint_ptr(char *buf, usize bufsize, void const *ptr)
     usize bs = bufsize;
     while (bs && n) {
         int d = n % 16;
-        *p++ = d >= 10 ? (d - 10 + 'a') : (d + '0');
+        *p++ = d >= 10 ? ((char)d - 10 + 'a') : ((char)d + '0');
         n /= 16;
         --bs;
     }
@@ -108,31 +129,31 @@ static inline isize fmt_vsprint(
                 break;
             case 'c': {
                 int c = VA_ARG(args, int);
-                *dst++ = c;
+                *dst++ = (char)c;
             } break;
             case 'd': {
                 i32 n = VA_ARG(args, i32);
-                dst += FMT_SPRINT_INT(dst, end - dst, n);
+                dst += FMT_SPRINT_INT(dst, (usize)(end - dst), n);
             } break;
             case 'u': {
                 u32 n = VA_ARG(args, u32);
-                dst += FMT_SPRINT_INT(dst, end - dst, n);
+                dst += FMT_SPRINT_INT(dst, (usize)(end - dst), n);
             } break;
             case 'D': {
                 i64 n = VA_ARG(args, i64);
-                dst += FMT_SPRINT_INT(dst, end - dst, n);
+                dst += FMT_SPRINT_INT(dst, (usize)(end - dst), n);
             } break;
             case 'U': {
                 u64 n = VA_ARG(args, u64);
-                dst += FMT_SPRINT_INT(dst, end - dst, n);
+                dst += FMT_SPRINT_INT(dst, (usize)(end - dst), n);
             } break;
             case 'f': {
                 f64 n = VA_ARG(args, f64);
-                dst += fmt_sprint_double(dst, end - dst, n);
+                dst += fmt_sprint_double(dst, (usize)(end - dst), n);
             } break;
             case 'p': {
                 void const *p = VA_ARG(args, void const *);
-                dst += fmt_sprint_ptr(dst, end - dst, p);
+                dst += fmt_sprint_ptr(dst, (usize)(end - dst), p);
             } break;
             case 's': {
                 char const *p = VA_ARG(args, char const *);
@@ -140,6 +161,9 @@ static inline isize fmt_vsprint(
                     *dst++ = *p++;
             } break;
             // @TODO: length-ed string
+            default:
+                *dst++ = *fmt;
+                break;
             }
         } break;
 
@@ -157,7 +181,7 @@ static inline isize fmt_sprint(char *buf, usize bufsize, char const *fmt, ...)
 {
     VA_LIST args;
     VA_START(args, fmt);
-    usize ret = fmt_vsprint(buf, bufsize, fmt, args);
+    isize ret = fmt_vsprint(buf, bufsize, fmt, args);
     VA_END(args);
     return ret;
 }

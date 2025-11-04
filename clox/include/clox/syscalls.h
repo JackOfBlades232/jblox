@@ -4,7 +4,75 @@
 
 #if _WIN32
 
-// @TODO
+#define WIN32_ERROR_SUCCESS 0l
+#define WIN32_INVALID_HANDLE_VALUE ((win32_handle_t)((u64)-1))
+#define WIN32_STD_INPUT_HANDLE ((u32)-10)
+#define WIN32_STD_OUTPUT_HANDLE ((u32)-11)
+#define WIN32_STD_ERROR_HANDLE ((u32)-12)
+#define WIN32_MEM_COMMIT 0x1000
+#define WIN32_MEM_RESERVE 0x2000
+#define WIN32_MEM_RELEASE 0x8000
+#define WIN32_MEM_LARGE_PAGES 0x20000000
+#define WIN32_PAGE_READWRITE 0x4
+#define WIN32_TOKEN_ADJUST_PRIVILEGES 0x20
+#define WIN32_SE_PRIVILEGE_ENABLED 0x2L
+
+typedef void *win32_handle_t;
+
+typedef struct {
+    u32 privilege_count;
+    struct {
+        struct {
+            u32 low_part;
+            long high_part;
+        } luid;
+        u32 attributes;
+    } privileges[1];
+} win32_token_privileges_t;
+
+typedef void *(__stdcall *win32_get_proc_addr_t)(win32_handle_t, char const *);
+typedef b32 (__stdcall *win32_close_handle_t)(win32_handle_t);
+typedef win32_handle_t (__stdcall *win32_load_library_a_t)(char const *);
+typedef b32 (__stdcall *win32_free_library_t)(win32_handle_t);
+typedef void (__stdcall *win32_exit_process_t)(uint);
+typedef u32 (__stdcall *win32_get_last_error_t)(void);
+typedef void *(__stdcall *win32_virtual_alloc_t)(void *, usize, u32, u32);
+typedef b32 (__stdcall *win32_virtual_free_t)(void *, usize, u32);
+typedef win32_handle_t (__stdcall *win32_create_file_a_t)(
+    char const *, u32, u32, void *, u32, u32, win32_handle_t);
+typedef b32 (__stdcall *win32_write_file_t)(
+    win32_handle_t, void const *, u32, u32 *, void *);
+typedef b32 (__stdcall *win32_read_file_t)(
+    win32_handle_t, void *, u32, u32 *, void *);
+typedef win32_handle_t (__stdcall *win32_get_current_process_t)(void);
+typedef win32_handle_t (__stdcall *win32_get_std_handle_t)(u32);
+typedef wchar const *(__stdcall *win32_get_command_line_w_t)(void);
+typedef wchar **(__stdcall *win32_command_line_to_argv_w_t)(
+    wchar const *, int *);
+typedef usize (__stdcall *win32_get_large_page_minimum_t)(void);
+typedef b32 (__stdcall *win32_open_process_token_t)(
+    win32_handle_t, u32, win32_handle_t *);
+typedef b32 (__stdcall *win32_lookup_privilege_value_a_t)(
+    char const *, char const *, void *);
+typedef b32 (__stdcall *win32_adjust_token_privileges_t)(
+    win32_handle_t, b32, win32_token_privileges_t const *,
+    u32, win32_token_privileges_t *, u32 *);
+
+typedef struct {
+    win32_get_proc_addr_t get_proc_addr;
+    win32_close_handle_t close_handle;
+    win32_load_library_a_t load_library_a;
+    win32_free_library_t free_library;
+    win32_exit_process_t exit_process;
+    win32_get_last_error_t get_last_error;
+    win32_virtual_alloc_t virtual_alloc;
+    win32_virtual_free_t virtual_free;
+    win32_create_file_a_t create_file_a;
+    win32_write_file_t write_file;
+    win32_read_file_t read_file;
+} win32_syscalls_t;
+
+u64 __readgsqword(ulong offset);
 
 #else
 
@@ -17,9 +85,9 @@
 
 #define SYS_PROT_READ 0x1
 #define SYS_PROT_WRITE 0x2
-#define SYS_MAP_PRIVATE	0x02
+#define SYS_MAP_PRIVATE 0x02
 #define SYS_MAP_ANON 0x20
-#define SYS_MAP_HUGETLB	0x040000
+#define SYS_MAP_HUGETLB 0x040000
 #define SYS_MAP_HUGE_2MB (21U << 26)
 
 #define SYS_STDIN_FILENO 0

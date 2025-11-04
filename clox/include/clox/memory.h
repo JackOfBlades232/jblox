@@ -5,30 +5,29 @@
 
 #if _WIN32
 
-// @TODO: dynamic load
-#include <windows.h>
-
 static inline void *os_allocate_pages_memory(usize bytes)
 {
-    return VirtualAlloc(
-        NULL, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    return g_os.sys.virtual_alloc(
+        NULL, bytes, WIN32_MEM_RESERVE | WIN32_MEM_COMMIT,
+        WIN32_PAGE_READWRITE);
 }
 
 static inline void os_free_pages_memory(void *mem, usize size)
 {
     (void)size;
-    VirtualFree(mem, 0, MEM_RELEASE);
+    g_os.sys.virtual_free(mem, 0, WIN32_MEM_RELEASE);
 }
 
 static inline void *os_allocate_large_pages_memory(usize bytes)
 {
-    if (g_os_proc_state.large_page_size == 0)
+    if (g_os.large_page_size == 0)
         return NULL;
     usize const bytes_for_pages =
-        ROUND_UP(bytes, g_os_proc_state.large_page_size);
-    return VirtualAlloc(
+        ROUND_UP(bytes, g_os.large_page_size);
+    return g_os.sys.virtual_alloc(
         NULL, bytes_for_pages,
-        MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE);
+        WIN32_MEM_RESERVE | WIN32_MEM_COMMIT | WIN32_MEM_LARGE_PAGES, 
+        WIN32_PAGE_READWRITE);
 }
 
 static inline void os_free_large_pages_memory(void *mem, usize size)
@@ -42,7 +41,7 @@ static inline void os_free_large_pages_memory(void *mem, usize size)
 static inline void *os_allocate_pages_memory(usize bytes)
 {
     usize const bytes_for_pages =
-        ROUND_UP(bytes, g_os_proc_state.regular_page_size);
+        ROUND_UP(bytes, g_os.regular_page_size);
     return sys_mmap(
         NULL, bytes_for_pages, SYS_PROT_READ | SYS_PROT_WRITE,
         SYS_MAP_PRIVATE | SYS_MAP_ANON, 0, 0);
@@ -50,7 +49,7 @@ static inline void *os_allocate_pages_memory(usize bytes)
 
 static inline void os_free_pages_memory(void *mem, usize bytes)
 {
-    sys_munmap(mem, ROUND_UP(bytes, g_os_proc_state.regular_page_size));
+    sys_munmap(mem, ROUND_UP(bytes, g_os.regular_page_size));
 }
 
 static inline void *os_allocate_large_pages_memory(usize bytes)

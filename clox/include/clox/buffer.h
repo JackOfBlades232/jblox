@@ -6,7 +6,7 @@
 typedef struct {
     u8 *data;
     u64 len : 63;
-    b32 is_large_pages : 1;
+    b64 is_large_pages : 1;
 } buffer_t;
 
 static inline b32 buf_is_valid(buffer_t const *b)
