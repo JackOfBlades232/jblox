@@ -1,3 +1,4 @@
+#include <context.h>
 #include <os.h>
 #include <memory.h>
 #include <buffer.h>
@@ -9,14 +10,17 @@
 
 #include "lox.c"
 
-static int common_main(void)
+static int common_main(ctx_t const *ctx)
 {
-    buffer_t program_memory = buf_allocate_best(1ull << 30);
+    buffer_t program_memory = buf_allocate_best(ctx, 1ull << 30);
     VERIFY(buf_is_valid(&program_memory), "Failed to allocate program memory.");
 
-    g_gpa = gpa_make(program_memory);
+    gpa_t gpa = gpa_make(ctx, program_memory);
 
-    return lox_main();
+    ctx_t lox_ctx = *ctx;
+    lox_ctx.gpa = &gpa;
+
+    return lox_main(&lox_ctx);
 }
 
 
@@ -234,43 +238,44 @@ static inline win32_peb_t const *win32_get_peb_x64(void)
     return (win32_peb_t const *)__readgsqword(0x60);
 }
 
-static inline void win32_try_enable_large_pages(win32_handle_t kernel32)
+static inline void win32_try_enable_large_pages(
+    os_process_state_t *os, win32_handle_t kernel32)
 {
 #define WIN32_CHECK(e_)                                     \
     do                                                      \
     {                                                       \
         if (!(e_)) {                                        \
             if (advapi32)                                   \
-                g_os.sys.close_handle(advapi32);            \
+                os->sys.close_handle(advapi32);             \
             return;                                         \
         }                                                   \
     } while (0)
-    win32_handle_t advapi32 = g_os.sys.load_library_a("advapi32.dll");
+    win32_handle_t advapi32 = os->sys.load_library_a("advapi32.dll");
     WIN32_CHECK(advapi32);
 
     win32_open_process_token_t open_process_token =
-        (win32_open_process_token_t)g_os.sys.get_proc_addr(
+        (win32_open_process_token_t)os->sys.get_proc_addr(
             advapi32, "OpenProcessToken");
     WIN32_CHECK(open_process_token);
 
     win32_lookup_privilege_value_a_t lookup_privilege_value_a =
-        (win32_lookup_privilege_value_a_t)g_os.sys.get_proc_addr(
+        (win32_lookup_privilege_value_a_t)os->sys.get_proc_addr(
                 advapi32, "LookupPrivilegeValueA");
     WIN32_CHECK(lookup_privilege_value_a);
     win32_adjust_token_privileges_t adjust_token_privileges =
-        (win32_adjust_token_privileges_t)g_os.sys.get_proc_addr(
+        (win32_adjust_token_privileges_t)os->sys.get_proc_addr(
                 advapi32, "AdjustTokenPrivileges");
     WIN32_CHECK(adjust_token_privileges);
 
     win32_get_large_page_minimum_t get_large_page_minimum =
-        (win32_get_large_page_minimum_t)g_os.sys.get_proc_addr(
+        (win32_get_large_page_minimum_t)os->sys.get_proc_addr(
                 kernel32, "GetLargePageMinimum");
     WIN32_CHECK(get_large_page_minimum);
 
     win32_handle_t token_hnd;
 
     if (open_process_token(
-        g_os.process_hnd, WIN32_TOKEN_ADJUST_PRIVILEGES, &token_hnd))
+        os->process_hnd, WIN32_TOKEN_ADJUST_PRIVILEGES, &token_hnd))
     {
         win32_token_privileges_t privs = {0};
         privs.privilege_count = 1;
@@ -279,15 +284,15 @@ static inline void win32_try_enable_large_pages(win32_handle_t kernel32)
             NULL, "SeLockMemoryPrivilege", &privs.privileges[0].luid)) 
         {
             adjust_token_privileges(token_hnd, false, &privs, 0, NULL, NULL);
-            if (g_os.sys.get_last_error() == WIN32_ERROR_SUCCESS)
-                g_os.large_page_size = get_large_page_minimum();
+            if (os->sys.get_last_error() == WIN32_ERROR_SUCCESS)
+                os->large_page_size = get_large_page_minimum();
         }
         
-        g_os.sys.close_handle(token_hnd);
+        os->sys.close_handle(token_hnd);
     }
 
 
-    g_os.sys.free_library(advapi32);
+    os->sys.free_library(advapi32);
 }
 
 static void win32_main(void)
@@ -301,91 +306,96 @@ static void win32_main(void)
     win32_handle_t kernel32 = win32_get_kernel32_mod(peb);
     WIN32_NO_MANS_LAND_VERIFY(kernel32);
 
-    WIN32_NO_MANS_LAND_VERIFY(
-        g_os.sys.get_proc_addr = win32_get_get_proc_addr(kernel32));
+    os_process_state_t os = {0};
 
     WIN32_NO_MANS_LAND_VERIFY(
-        g_os.sys.exit_process =
-            (win32_exit_process_t)g_os.sys.get_proc_addr(
+        os.sys.get_proc_addr = win32_get_get_proc_addr(kernel32));
+
+    WIN32_NO_MANS_LAND_VERIFY(
+        os.sys.exit_process =
+            (win32_exit_process_t)os.sys.get_proc_addr(
                     kernel32, "ExitProcess"));
 
 #undef WIN32_NO_MANS_LAND_PANIC
 #define WIN32_BOOT_VERIFY(e_) \
-    do { if(!(e_)) g_os.sys.exit_process(4221); } while (0)
+    do { if(!(e_)) os.sys.exit_process(4221); } while (0)
 
     WIN32_BOOT_VERIFY(
-        g_os.sys.load_library_a =
-            (win32_load_library_a_t)g_os.sys.get_proc_addr(
+        os.sys.load_library_a =
+            (win32_load_library_a_t)os.sys.get_proc_addr(
                     kernel32, "LoadLibraryA"));
     WIN32_BOOT_VERIFY(
-        g_os.sys.free_library =
-            (win32_free_library_t)g_os.sys.get_proc_addr(
+        os.sys.free_library =
+            (win32_free_library_t)os.sys.get_proc_addr(
                     kernel32, "FreeLibrary"));
     WIN32_BOOT_VERIFY(
-        g_os.sys.get_last_error =
-            (win32_get_last_error_t)g_os.sys.get_proc_addr(
+        os.sys.get_last_error =
+            (win32_get_last_error_t)os.sys.get_proc_addr(
                     kernel32, "GetLastError"));
     WIN32_BOOT_VERIFY(
-        g_os.sys.close_handle =
-            (win32_close_handle_t)g_os.sys.get_proc_addr(
+        os.sys.close_handle =
+            (win32_close_handle_t)os.sys.get_proc_addr(
                     kernel32, "CloseHandle"));
     WIN32_BOOT_VERIFY(
-        g_os.sys.virtual_alloc =
-            (win32_virtual_alloc_t)g_os.sys.get_proc_addr(
+        os.sys.virtual_alloc =
+            (win32_virtual_alloc_t)os.sys.get_proc_addr(
                     kernel32, "VirtualAlloc"));
     WIN32_BOOT_VERIFY(
-        g_os.sys.virtual_free =
-            (win32_virtual_free_t)g_os.sys.get_proc_addr(
+        os.sys.virtual_free =
+            (win32_virtual_free_t)os.sys.get_proc_addr(
                     kernel32, "VirtualFree"));
     WIN32_BOOT_VERIFY(
-        g_os.sys.create_file_a =
-            (win32_create_file_a_t)g_os.sys.get_proc_addr(
+        os.sys.create_file_a =
+            (win32_create_file_a_t)os.sys.get_proc_addr(
                     kernel32, "CreateFileA"));
     WIN32_BOOT_VERIFY(
-        g_os.sys.write_file =
-            (win32_write_file_t)g_os.sys.get_proc_addr(
+        os.sys.write_file =
+            (win32_write_file_t)os.sys.get_proc_addr(
                     kernel32, "WriteFile"));
     WIN32_BOOT_VERIFY(
-        g_os.sys.read_file =
-            (win32_read_file_t)g_os.sys.get_proc_addr(
+        os.sys.read_file =
+            (win32_read_file_t)os.sys.get_proc_addr(
                     kernel32, "ReadFile"));
 
     win32_get_current_process_t get_current_process = 
-        (win32_get_current_process_t)g_os.sys.get_proc_addr(
+        (win32_get_current_process_t)os.sys.get_proc_addr(
                 kernel32, "GetCurrentProcess");
     WIN32_BOOT_VERIFY(get_current_process);
 
     win32_get_std_handle_t get_std_handle = 
-        (win32_get_std_handle_t)g_os.sys.get_proc_addr(
+        (win32_get_std_handle_t)os.sys.get_proc_addr(
                 kernel32, "GetStdHandle");
     WIN32_BOOT_VERIFY(get_std_handle);
 
     // @TODO: calls through loaded fptrs
-    g_os.process_hnd = get_current_process();
-    g_os.regular_page_size = 4096;
+    os.process_hnd = get_current_process();
+    os.regular_page_size = 4096;
 
-    win32_try_enable_large_pages(kernel32);
+    win32_try_enable_large_pages(&os, kernel32);
 
-    g_os.hstdin = (io_handle_t){get_std_handle(WIN32_STD_INPUT_HANDLE)};
-    g_os.hstdout = (io_handle_t){get_std_handle(WIN32_STD_OUTPUT_HANDLE)};
-    g_os.hstderr = (io_handle_t){get_std_handle(WIN32_STD_ERROR_HANDLE)};
+    os.hstdin = (io_handle_t){get_std_handle(WIN32_STD_INPUT_HANDLE)};
+    os.hstdout = (io_handle_t){get_std_handle(WIN32_STD_OUTPUT_HANDLE)};
+    os.hstderr = (io_handle_t){get_std_handle(WIN32_STD_ERROR_HANDLE)};
 
-    WIN32_BOOT_VERIFY(g_os.hstdin.hnd != WIN32_INVALID_HANDLE_VALUE);
-    WIN32_BOOT_VERIFY(g_os.hstdout.hnd != WIN32_INVALID_HANDLE_VALUE);
-    WIN32_BOOT_VERIFY(g_os.hstderr.hnd != WIN32_INVALID_HANDLE_VALUE);
+    WIN32_BOOT_VERIFY(os.hstdin.hnd != WIN32_INVALID_HANDLE_VALUE);
+    WIN32_BOOT_VERIFY(os.hstdout.hnd != WIN32_INVALID_HANDLE_VALUE);
+    WIN32_BOOT_VERIFY(os.hstderr.hnd != WIN32_INVALID_HANDLE_VALUE);
+
+    ctx_t os_ctx = {&os, NULL};
+    ctx_t *ctx = &os_ctx;
 
 #undef WIN32_BOOT_VERIFY
 
     {
-        win32_handle_t shell32 = g_os.sys.load_library_a("shell32.dll");
+        win32_handle_t shell32 = os.sys.load_library_a("shell32.dll");
         VERIFY(shell32, "Failed to load \"shell32.dll\", required for argv.");
         win32_get_command_line_w_t get_command_line_w = 
-            (win32_get_command_line_w_t)g_os.sys.get_proc_addr(
+            (win32_get_command_line_w_t)os.sys.get_proc_addr(
                     kernel32, "GetCommandLineW");
         VERIFY(get_command_line_w,
             "Failed to load \"GetCommandLineW\" from \"kernel32.dll\"");
         win32_command_line_to_argv_w_t command_line_to_argv_w = 
-            (win32_command_line_to_argv_w_t)g_os.sys.get_proc_addr(
+            (win32_command_line_to_argv_w_t)os.sys.get_proc_addr(
                     shell32, "CommandLineToArgvW");
         VERIFY(command_line_to_argv_w,
             "Failed to load \"CommandLineToArgvW\" from \"shell32.dll\"");
@@ -404,13 +414,13 @@ static void win32_main(void)
             *arg = '\0';
         }
     
-        g_os.argc = argc;
-        g_os.argv = (char **)wargv;
+        os.argc = argc;
+        os.argv = (char **)wargv;
 
-        g_os.sys.free_library(shell32);
+        os.sys.free_library(shell32);
     }
 
-    g_os.sys.exit_process((uint)common_main());
+    os.sys.exit_process((uint)common_main(&os_ctx));
 }
 
 void start(void)
@@ -422,18 +432,22 @@ void start(void)
 
 static int sys_main(int argc, char **argv)
 {
-    g_os.argc = argc;
-    g_os.argv = argv;
-    g_os.pid = sys_getpid();
-    g_os.regular_page_size = 4096; // @TODO: support properly?
-    fmt_sprint(
-        g_os.stat_file_name_buf, sizeof(g_os.stat_file_name_buf),
-        "/proc/%d/stat", g_os.pid);
-    g_os.hstdin = (io_handle_t){SYS_STDIN_FILENO + 1};
-    g_os.hstdout = (io_handle_t){SYS_STDOUT_FILENO + 1};
-    g_os.hstderr = (io_handle_t){SYS_STDERR_FILENO + 1};
+    os_process_state_t os = {0};
 
-    return common_main();
+    os.argc = argc;
+    os.argv = argv;
+    os.pid = sys_getpid();
+    os.regular_page_size = 4096; // @TODO: support properly?
+    fmt_sprint(
+        os.stat_file_name_buf, sizeof(os.stat_file_name_buf),
+        "/proc/%d/stat", os.pid);
+    os.hstdin = (io_handle_t){SYS_STDIN_FILENO + 1};
+    os.hstdout = (io_handle_t){SYS_STDOUT_FILENO + 1};
+    os.hstderr = (io_handle_t){SYS_STDERR_FILENO + 1};
+
+    ctx_t ctx = {&os, NULL};
+
+    return common_main(&ctx);
 }
 
 __attribute__((naked)) void _start(void)

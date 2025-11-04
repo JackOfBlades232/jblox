@@ -12,7 +12,7 @@ typedef struct {
     usize size;
 } gpa_allocated_header_t;
 
-typedef struct {
+typedef struct gpa {
     buffer_t memory;
     gpa_free_header_t *head;
 } gpa_t;
@@ -89,7 +89,7 @@ static inline void gpa_deallocate(gpa_t *gpa, void const *p)
     gpa->head = free;
 }
 
-static inline gpa_t gpa_make(buffer_t mem)
+static inline gpa_t gpa_make(ctx_t const *ctx, buffer_t mem)
 {
     ASSERT(mem.len >= GPA_ALIGNMENT);
     ASSERT(mem.len % GPA_ALIGNMENT == 0);
@@ -98,5 +98,3 @@ static inline gpa_t gpa_make(buffer_t mem)
     free->next = NULL;
     return (gpa_t){mem, free};
 }
-
-static gpa_t g_gpa = {0};

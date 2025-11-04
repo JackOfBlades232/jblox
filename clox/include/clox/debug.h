@@ -28,5 +28,5 @@
 
 #endif
 
-#define PANIC(msg_) do { LOG("PANIC: " msg_); os_exit(13); } while (0)
+#define PANIC(msg_) do { LOG("PANIC: " msg_); os_exit(ctx, 13); } while (0)
 #define VERIFY(e_, msg_) do { if (!(e_)) PANIC(msg_); } while (0)

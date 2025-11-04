@@ -8,19 +8,20 @@
 #include <gpa.h>
 #include <debug.h>
 
-static inline void *reallocate(void const *ptr, usize old_size, usize new_size)
+static inline void *reallocate(
+    ctx_t const *ctx, void const *ptr, usize old_size, usize new_size)
 {
     if (new_size == 0) {
-        gpa_deallocate(&g_gpa, ptr);
+        gpa_deallocate(ctx->gpa, ptr);
         return NULL;
     }
 
-    void *res = gpa_allocate(&g_gpa, new_size);
+    void *res = gpa_allocate(ctx->gpa, new_size);
     VERIFY(res, "Out of memory.");
 
     if (old_size) {
         memcpy(res, ptr, MIN(old_size, new_size));
-        gpa_deallocate(&g_gpa, ptr);
+        gpa_deallocate(ctx->gpa, ptr);
     }
 
     return res;
@@ -29,9 +30,9 @@ static inline void *reallocate(void const *ptr, usize old_size, usize new_size)
 #define GROW_CAP(cap_) ((cap_) < 8 ? 8 : 2 * (cap_))
 #define GROW_ARRAY(type_, ptr_, oldcap_, newcap_) \
     (type_ *)reallocate(                          \
-        (ptr_), (oldcap_) * sizeof(type_), (newcap_) * sizeof(type_))
+        ctx, (ptr_), (oldcap_) * sizeof(type_), (newcap_) * sizeof(type_))
 #define FREE_ARRAY(type_, ptr_, cap_) \
-    reallocate((ptr_), sizeof(type_) * (cap_), 0)
+    reallocate(ctx, (ptr_), sizeof(type_) * (cap_), 0)
 
 typedef enum {
     e_op_constant,
@@ -51,7 +52,8 @@ static inline value_array_t make_value_array(void)
     return (value_array_t){0};
 }
 
-static inline void write_value_array(value_array_t *arr, value_t val)
+static inline void write_value_array(
+    ctx_t const *ctx, value_array_t *arr, value_t val)
 {
     if (arr->cap < arr->cnt + 1) {
         uint old_cap = arr->cap;
@@ -62,7 +64,7 @@ static inline void write_value_array(value_array_t *arr, value_t val)
     arr->values[arr->cnt++] = val;
 }
 
-static inline void free_value_array(value_array_t *arr)
+static inline void free_value_array(ctx_t const *ctx, value_array_t *arr)
 {
     FREE_ARRAY(value_t, arr->values, arr->cap);
     *arr = make_value_array();
@@ -83,7 +85,8 @@ static inline line_info_t make_line_info(void)
     return (line_info_t){0};
 }
 
-static inline void write_line_info(line_info_t *info, uint line, uint instr_end)
+static inline void write_line_info(
+    ctx_t const *ctx, line_info_t *info, uint line, uint instr_end)
 {
     if (info->cap < info->cnt + 1) {
         uint old_cap = info->cap;
@@ -95,7 +98,7 @@ static inline void write_line_info(line_info_t *info, uint line, uint instr_end)
     info->entries[info->cnt++] = (line_info_entry_t){line, instr_end};
 }
 
-static inline void free_line_info(line_info_t *info)
+static inline void free_line_info(ctx_t const *ctx, line_info_t *info)
 {
     FREE_ARRAY(value_t, info->entries, info->cap);
     *info = make_line_info();
@@ -116,7 +119,7 @@ static inline chunk_t make_chunk(void)
     return c;
 }
 
-static inline void write_chunk(chunk_t *chunk, u8 byte, uint line)
+static inline void write_chunk(ctx_t const *ctx, chunk_t *chunk, u8 byte, uint line)
 {
     if (chunk->cap < chunk->cnt + 1) {
         uint old_cap = chunk->cap;
@@ -127,30 +130,31 @@ static inline void write_chunk(chunk_t *chunk, u8 byte, uint line)
     chunk->code[chunk->cnt++] = byte;
 
     if (line != chunk->current_line) {
-        write_line_info(&chunk->lines, line, chunk->cnt);
+        write_line_info(ctx, &chunk->lines, line, chunk->cnt);
         chunk->current_line = line;
     } else {
         chunk->lines.entries[chunk->lines.cnt - 1].instr_range_end = chunk->cnt;
     }
 }
 
-static inline uint add_constant(chunk_t *chunk, value_t val)
+static inline uint add_constant(ctx_t const *ctx, chunk_t *chunk, value_t val)
 {
-    write_value_array(&chunk->constants, val);
+    write_value_array(ctx, &chunk->constants, val);
     return chunk->constants.cnt - 1;
 }
 
-static inline void write_constant(chunk_t *chunk, value_t val, uint line)
+static inline void write_constant(
+    ctx_t const *ctx, chunk_t *chunk, value_t val, uint line)
 {
-    uint constant = add_constant(chunk, val);
+    uint constant = add_constant(ctx, chunk, val);
     if (constant <= 255) {
-        write_chunk(chunk, e_op_constant, line);
-        write_chunk(chunk, (u8)constant, line);
+        write_chunk(ctx, chunk, e_op_constant, line);
+        write_chunk(ctx, chunk, (u8)constant, line);
     } else if (constant <= 16777215) {
-        write_chunk(chunk, e_op_constant_long, line);
-        write_chunk(chunk, (u8)(constant & 0xFF), line);
-        write_chunk(chunk, (u8)((constant >> 8) & 0xFF), line);
-        write_chunk(chunk, (u8)((constant >> 16) & 0xFF), line);
+        write_chunk(ctx, chunk, e_op_constant_long, line);
+        write_chunk(ctx, chunk, (u8)(constant & 0xFF), line);
+        write_chunk(ctx, chunk, (u8)((constant >> 8) & 0xFF), line);
+        write_chunk(ctx, chunk, (u8)((constant >> 16) & 0xFF), line);
     } else {
         // @TODO: a more gracious error?
         PANIC(
@@ -159,11 +163,11 @@ static inline void write_constant(chunk_t *chunk, value_t val, uint line)
     }
 }
 
-static inline void free_chunk(chunk_t *chunk)
+static inline void free_chunk(ctx_t const *ctx, chunk_t *chunk)
 {
     FREE_ARRAY(u8, chunk->code, chunk->cap);
-    free_value_array(&chunk->constants);
-    free_line_info(&chunk->lines);
+    free_value_array(ctx, &chunk->constants);
+    free_line_info(ctx, &chunk->lines);
     *chunk = make_chunk();
 }
 
@@ -173,41 +177,42 @@ static inline void free_chunk(chunk_t *chunk)
 
 #else
 
-static void disasm_value(value_t val)
+static void disasm_value(ctx_t const *ctx, value_t val)
 {
     LOGF_NONL("%f", val);
 }
 
-static uint disasm_simple_instruction(char const *name, uint at)
+static uint disasm_simple_instruction(
+    ctx_t const *ctx, char const *name, uint at)
 {
     LOGF("%s", name);
     return at + 1;
 }
 
 static uint disasm_constant_instruction(
-    char const *name, chunk_t const *chunk, uint at)
+    ctx_t const *ctx, char const *name, chunk_t const *chunk, uint at)
 {
     u8 constant = chunk->code[at + 1];
     LOGF_NONL("%s %u (", name, constant);
-    disasm_value(chunk->constants.values[constant]);
+    disasm_value(ctx, chunk->constants.values[constant]);
     LOG(")");
     return at + 2;
 }
 
 static uint disasm_long_constant_instruction(
-    char const *name, chunk_t const *chunk, uint at)
+    ctx_t const *ctx, char const *name, chunk_t const *chunk, uint at)
 {
     uint constant =
         chunk->code[at + 1]
         | ((uint)chunk->code[at + 2] << 8)
         | ((uint)chunk->code[at + 3] << 16);
     LOGF_NONL("%s %u (", name, constant);
-    disasm_value(chunk->constants.values[constant]);
+    disasm_value(ctx, chunk->constants.values[constant]);
     LOG(")");
     return at + 4;
 }
 
-static uint disasm_instruction(chunk_t const *chunk, uint at)
+static uint disasm_instruction(ctx_t const *ctx, chunk_t const *chunk, uint at)
 {
     {
         isize chars = LOGF_NONL("%u:", at);
@@ -238,29 +243,33 @@ static uint disasm_instruction(chunk_t const *chunk, uint at)
     u8 instr = chunk->code[at];
     switch (instr) {
     case e_op_constant:
-        return disasm_constant_instruction("OP_CONSTANT", chunk, at);
+        return disasm_constant_instruction(
+            ctx, "OP_CONSTANT", chunk, at);
     case e_op_constant_long:
-        return disasm_long_constant_instruction("OP_CONSTANT_LONG", chunk, at);
+        return disasm_long_constant_instruction(
+            ctx, "OP_CONSTANT_LONG", chunk, at);
     case e_op_return:
-        return disasm_simple_instruction("OP_RETURN", at);
+        return disasm_simple_instruction(
+            ctx, "OP_RETURN", at);
     default:
         LOGF("Unknown opcode %d", (int)instr);
         return at + 1;
     }
 }
 
-static void disasm_chunk(chunk_t const *chunk, char const *name)
+static void disasm_chunk(
+    ctx_t const *ctx, chunk_t const *chunk, char const *name)
 {
     LOGF("== %s ==", name);
     for (uint off = 0; off < chunk->cnt;)
-        off = disasm_instruction(chunk, off); 
+        off = disasm_instruction(ctx, chunk, off); 
 }
 
-#define DISASSEMBLE_CHUNK(chunk_, name_) disasm_chunk((chunk_), (name_))
+#define DISASSEMBLE_CHUNK(chunk_, name_) disasm_chunk(ctx, (chunk_), (name_))
 
 #endif
 
-static int lox_main(void)
+static int lox_main(ctx_t const *ctx)
 {
     {
         chunk_t chunk = make_chunk();
@@ -268,13 +277,13 @@ static int lox_main(void)
         f64 base = 1.2;
         uint i = 0;
         for (; i < 512; ++i)
-            write_constant(&chunk, base + i * 0.2, 123 + i / 100);
+            write_constant(ctx, &chunk, base + i * 0.2, 123 + i / 100);
 
-        write_chunk(&chunk, e_op_return, 123 + i / 100);
+        write_chunk(ctx, &chunk, e_op_return, 123 + i / 100);
 
         DISASSEMBLE_CHUNK(&chunk, "test chunk");
 
-        free_chunk(&chunk);
+        free_chunk(ctx, &chunk);
     }
 
     return 0;
