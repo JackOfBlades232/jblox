@@ -46,9 +46,7 @@ typedef b32 (__stdcall *win32_read_file_t)(
     win32_handle_t, void *, u32, u32 *, void *);
 typedef win32_handle_t (__stdcall *win32_get_current_process_t)(void);
 typedef win32_handle_t (__stdcall *win32_get_std_handle_t)(u32);
-typedef wchar const *(__stdcall *win32_get_command_line_w_t)(void);
-typedef wchar **(__stdcall *win32_command_line_to_argv_w_t)(
-    wchar const *, int *);
+typedef char const *(__stdcall *win32_get_command_line_a_t)(void);
 typedef usize (__stdcall *win32_get_large_page_minimum_t)(void);
 typedef b32 (__stdcall *win32_open_process_token_t)(
     win32_handle_t, u32, win32_handle_t *);

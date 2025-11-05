@@ -317,62 +317,18 @@ static void win32_main(void)
             (win32_exit_process_t)os.sys.get_proc_addr(
                     kernel32, "ExitProcess"));
 
-#undef WIN32_NO_MANS_LAND_PANIC
+#undef WIN32_NO_MANS_LAND_VERIFY
 #define WIN32_BOOT_VERIFY(e_) \
     do { if(!(e_)) os.sys.exit_process(4221); } while (0)
-
-    WIN32_BOOT_VERIFY(
-        os.sys.load_library_a =
-            (win32_load_library_a_t)os.sys.get_proc_addr(
-                    kernel32, "LoadLibraryA"));
-    WIN32_BOOT_VERIFY(
-        os.sys.free_library =
-            (win32_free_library_t)os.sys.get_proc_addr(
-                    kernel32, "FreeLibrary"));
-    WIN32_BOOT_VERIFY(
-        os.sys.get_last_error =
-            (win32_get_last_error_t)os.sys.get_proc_addr(
-                    kernel32, "GetLastError"));
-    WIN32_BOOT_VERIFY(
-        os.sys.close_handle =
-            (win32_close_handle_t)os.sys.get_proc_addr(
-                    kernel32, "CloseHandle"));
-    WIN32_BOOT_VERIFY(
-        os.sys.virtual_alloc =
-            (win32_virtual_alloc_t)os.sys.get_proc_addr(
-                    kernel32, "VirtualAlloc"));
-    WIN32_BOOT_VERIFY(
-        os.sys.virtual_free =
-            (win32_virtual_free_t)os.sys.get_proc_addr(
-                    kernel32, "VirtualFree"));
-    WIN32_BOOT_VERIFY(
-        os.sys.create_file_a =
-            (win32_create_file_a_t)os.sys.get_proc_addr(
-                    kernel32, "CreateFileA"));
-    WIN32_BOOT_VERIFY(
-        os.sys.write_file =
-            (win32_write_file_t)os.sys.get_proc_addr(
-                    kernel32, "WriteFile"));
-    WIN32_BOOT_VERIFY(
-        os.sys.read_file =
-            (win32_read_file_t)os.sys.get_proc_addr(
-                    kernel32, "ReadFile"));
-
-    win32_get_current_process_t get_current_process = 
-        (win32_get_current_process_t)os.sys.get_proc_addr(
-                kernel32, "GetCurrentProcess");
-    WIN32_BOOT_VERIFY(get_current_process);
 
     win32_get_std_handle_t get_std_handle = 
         (win32_get_std_handle_t)os.sys.get_proc_addr(
                 kernel32, "GetStdHandle");
     WIN32_BOOT_VERIFY(get_std_handle);
-
-    // @TODO: calls through loaded fptrs
-    os.process_hnd = get_current_process();
-    os.regular_page_size = 4096;
-
-    win32_try_enable_large_pages(&os, kernel32);
+    WIN32_BOOT_VERIFY(
+        os.sys.write_file =
+            (win32_write_file_t)os.sys.get_proc_addr(
+                    kernel32, "WriteFile"));
 
     os.hstdin = (io_handle_t){get_std_handle(WIN32_STD_INPUT_HANDLE)};
     os.hstdout = (io_handle_t){get_std_handle(WIN32_STD_OUTPUT_HANDLE)};
@@ -382,51 +338,88 @@ static void win32_main(void)
     WIN32_BOOT_VERIFY(os.hstdout.hnd != WIN32_INVALID_HANDLE_VALUE);
     WIN32_BOOT_VERIFY(os.hstderr.hnd != WIN32_INVALID_HANDLE_VALUE);
 
+#undef WIN32_BOOT_VERIFY
+
     PUSH_CONTEXT(os_ctx, &os, NULL);
     SETUP_CONTEXT(os_ctx);
 
-#undef WIN32_BOOT_VERIFY
+    VERIFY(os.sys.load_library_a =
+        (win32_load_library_a_t)os.sys.get_proc_addr(kernel32, "LoadLibraryA"),
+        "Failed to load \"LoadLibraryA\" from \"kernel32.dll\"");
+    VERIFY(os.sys.free_library =
+        (win32_free_library_t)os.sys.get_proc_addr(kernel32, "FreeLibrary"),
+        "Failed to load \"FreeLibrary\" from \"kernel32.dll\"");
+    VERIFY(os.sys.get_last_error =
+        (win32_get_last_error_t)os.sys.get_proc_addr(kernel32, "GetLastError"),
+        "Failed to load \"GetLastError\" from \"kernel32.dll\"");
+    VERIFY(os.sys.close_handle =
+        (win32_close_handle_t)os.sys.get_proc_addr(kernel32, "CloseHandle"),
+        "Failed to load \"CloseHandle\" from \"kernel32.dll\"");
+    VERIFY(os.sys.virtual_alloc =
+        (win32_virtual_alloc_t)os.sys.get_proc_addr(kernel32, "VirtualAlloc"),
+        "Failed to load \"VirtualAlloc\" from \"kernel32.dll\"");
+    VERIFY(os.sys.virtual_free =
+        (win32_virtual_free_t)os.sys.get_proc_addr(kernel32, "VirtualFree"),
+        "Failed to load \"VirtualFree\" from \"kernel32.dll\"");
+    VERIFY(os.sys.create_file_a =
+        (win32_create_file_a_t)os.sys.get_proc_addr(kernel32, "CreateFileA"),
+        "Failed to load \"CreateFileA\" from \"kernel32.dll\"");
+    VERIFY(os.sys.read_file =
+        (win32_read_file_t)os.sys.get_proc_addr(kernel32, "ReadFile"),
+        "Failed to load \"ReadFile\" from \"kernel32.dll\"");
 
-    {
-        win32_handle_t shell32 = os.sys.load_library_a("shell32.dll");
-        VERIFY(shell32, "Failed to load \"shell32.dll\", required for argv.");
-        win32_get_command_line_w_t get_command_line_w = 
-            (win32_get_command_line_w_t)os.sys.get_proc_addr(
-                    kernel32, "GetCommandLineW");
-        VERIFY(get_command_line_w,
-            "Failed to load \"GetCommandLineW\" from \"kernel32.dll\"");
-        win32_command_line_to_argv_w_t command_line_to_argv_w = 
-            (win32_command_line_to_argv_w_t)os.sys.get_proc_addr(
-                    shell32, "CommandLineToArgvW");
-        VERIFY(command_line_to_argv_w,
-            "Failed to load \"CommandLineToArgvW\" from \"shell32.dll\"");
+    win32_get_current_process_t get_current_process = 
+        (win32_get_current_process_t)os.sys.get_proc_addr(
+                kernel32, "GetCurrentProcess");
+    VERIFY(get_current_process,
+        "Failed to load \"GetCurrentProcess\" from \"kernel32.dll\"");
+    win32_get_command_line_a_t get_command_line_a = 
+        (win32_get_command_line_a_t)os.sys.get_proc_addr(
+                kernel32, "GetCommandLineA");
+    VERIFY(get_command_line_a,
+        "Failed to load \"GetCommandLineA\" from \"kernel32.dll\"");
 
-        int argc;
-        wchar **wargv = command_line_to_argv_w(get_command_line_w(), &argc);
+    os.process_hnd = get_current_process();
 
-        for (int i = 0; i < argc; ++i) {
-            wchar const *warg = wargv[i];
-            char *arg = (char *)(wargv[i]);
-            while (*warg) {
-                VERIFY(
-                    *warg <= 0xFF, "Only ascii characters supported in argv.");
-                *arg++ = (char)(*warg++);
-            }
-            *arg = '\0';
+    char const *cmdline = get_command_line_a();
+    usize cmdline_len = strlen(cmdline);
+
+    int argc = 0;
+    char **argv = (char **)os_allocate_pages_memory(ctx, sizeof(void *) * 129);
+    char *argv_stor = (char *)os_allocate_pages_memory(ctx, cmdline_len + 1);
+    VERIFY(argv, "Failed to allocate mem for argv.");
+    VERIFY(argv_stor, "Failed to allocate mem for argv storage.");
+
+    b32 was_space = true;
+    for (usize i = 0; i <= cmdline_len; ++i) {
+        char c = cmdline[i];
+        b32 is_space =
+            c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\0';
+        if (!is_space) {
+            VERIFY(argc < 128, "Allowed max 128 cmdline args.");
+            if (was_space)
+                argv[argc] = argv_stor;
+            *argv_stor++ = c;
+        } else if (!was_space) {
+            *argv_stor++ = '\0';
+            ++argc;
         }
-    
-        os.argc = argc;
-        os.argv = (char **)wargv;
-
-        os.sys.free_library(shell32);
+        was_space = is_space;
     }
+    argv[argc] = NULL;
+
+    os.argc = argc;
+    os.argv = argv;
+
+    os.regular_page_size = 4096;
+    win32_try_enable_large_pages(&os, kernel32);
 
     os.sys.exit_process((uint)common_main(&os_ctx));
 }
 
 void start(void)
 {
-    win32_main();    
+    win32_main();
 }
 
 #else

@@ -27,7 +27,7 @@ if (MSVC)
     add_compile_options(/Zi)
 
     # Opt
-    add_compile_options(/Oi /O2 /Os)
+    #add_compile_options(/Oi /O2 /Os)
 else()
     add_compile_options(
         -masm=intel

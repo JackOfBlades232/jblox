@@ -169,3 +169,11 @@ void memcpy(void *to, void const *from, usize size)
     while (size--)
         *uto++ = *ufrom++;
 }
+
+usize strlen(char const *str)
+{
+    usize len = 0;
+    while (*str++)
+        ++len;
+    return len;
+}
