@@ -13,12 +13,13 @@
 static int common_main(ctx_t const *ctx)
 {
     buffer_t program_memory = buf_allocate_best(ctx, 1ull << 30);
-    VERIFY(buf_is_valid(&program_memory), "Failed to allocate program memory.");
+    VERIFY(
+        buf_is_valid(ctx, &program_memory),
+        "Failed to allocate program memory.");
 
     gpa_t gpa = gpa_make(ctx, program_memory);
 
-    ctx_t lox_ctx = *ctx;
-    lox_ctx.gpa = &gpa;
+    PUSH_CONTEXT(lox_ctx, ctx->os, &gpa);
 
     return lox_main(&lox_ctx);
 }
@@ -381,8 +382,8 @@ static void win32_main(void)
     WIN32_BOOT_VERIFY(os.hstdout.hnd != WIN32_INVALID_HANDLE_VALUE);
     WIN32_BOOT_VERIFY(os.hstderr.hnd != WIN32_INVALID_HANDLE_VALUE);
 
-    ctx_t os_ctx = {&os, NULL};
-    ctx_t *ctx = &os_ctx;
+    PUSH_CONTEXT(os_ctx, &os, NULL);
+    SETUP_CONTEXT(os_ctx);
 
 #undef WIN32_BOOT_VERIFY
 
@@ -445,9 +446,9 @@ static int sys_main(int argc, char **argv)
     os.hstdout = (io_handle_t){SYS_STDOUT_FILENO + 1};
     os.hstderr = (io_handle_t){SYS_STDERR_FILENO + 1};
 
-    ctx_t ctx = {&os, NULL};
+    PUSH_CONTEXT(os_ctx, &os, NULL);
 
-    return common_main(&ctx);
+    return common_main(&os_ctx);
 }
 
 __attribute__((naked)) void _start(void)

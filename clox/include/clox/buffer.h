@@ -10,8 +10,9 @@ typedef struct {
     b64 is_large_pages : 1;
 } buffer_t;
 
-static inline b32 buf_is_valid(buffer_t const *b)
+static inline b32 buf_is_valid(ctx_t const *ctx, buffer_t const *b)
 {
+    (void)ctx;
     return b->data != NULL;
 }
 
@@ -30,10 +31,9 @@ static inline buffer_t buf_allocate_lp(ctx_t const *ctx, u64 bytes)
 static inline buffer_t buf_allocate_best(ctx_t const *ctx, u64 bytes)
 {
     buffer_t b = buf_allocate_lp(ctx, bytes);
-    if (buf_is_valid(&b))
-        return b;
-    else
-        return buf_allocate(ctx, bytes);
+    if (!buf_is_valid(ctx, &b))
+        b = buf_allocate(ctx, bytes);
+    return b;
 }
 
 static inline void buf_deallocate(ctx_t const *ctx, buffer_t *buf)

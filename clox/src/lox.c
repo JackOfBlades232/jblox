@@ -12,16 +12,16 @@ static inline void *reallocate(
     ctx_t const *ctx, void const *ptr, usize old_size, usize new_size)
 {
     if (new_size == 0) {
-        gpa_deallocate(ctx->gpa, ptr);
+        gpa_deallocate(ctx, ctx->gpa, ptr);
         return NULL;
     }
 
-    void *res = gpa_allocate(ctx->gpa, new_size);
+    void *res = gpa_allocate(ctx, ctx->gpa, new_size);
     VERIFY(res, "Out of memory.");
 
     if (old_size) {
         memcpy(res, ptr, MIN(old_size, new_size));
-        gpa_deallocate(ctx->gpa, ptr);
+        gpa_deallocate(ctx, ctx->gpa, ptr);
     }
 
     return res;
@@ -47,8 +47,9 @@ typedef struct {
     value_t *values;
 } value_array_t;
 
-static inline value_array_t make_value_array(void)
+static inline value_array_t make_value_array(ctx_t const *ctx)
 {
+    (void)ctx;
     return (value_array_t){0};
 }
 
@@ -67,7 +68,7 @@ static inline void write_value_array(
 static inline void free_value_array(ctx_t const *ctx, value_array_t *arr)
 {
     FREE_ARRAY(value_t, arr->values, arr->cap);
-    *arr = make_value_array();
+    *arr = make_value_array(ctx);
 }
 
 typedef struct {
@@ -80,8 +81,9 @@ typedef struct {
     line_info_entry_t *entries;
 } line_info_t;
 
-static inline line_info_t make_line_info(void)
+static inline line_info_t make_line_info(ctx_t const *ctx)
 {
+    (void)ctx;
     return (line_info_t){0};
 }
 
@@ -101,7 +103,7 @@ static inline void write_line_info(
 static inline void free_line_info(ctx_t const *ctx, line_info_t *info)
 {
     FREE_ARRAY(value_t, info->entries, info->cap);
-    *info = make_line_info();
+    *info = make_line_info(ctx);
 }
 
 typedef struct {
@@ -112,8 +114,9 @@ typedef struct {
     uint current_line;
 } chunk_t;
 
-static inline chunk_t make_chunk(void)
+static inline chunk_t make_chunk(ctx_t const *ctx)
 {
+    (void)ctx;
     chunk_t c = {0};
     c.current_line = ((uint)-1);
     return c;
@@ -168,7 +171,7 @@ static inline void free_chunk(ctx_t const *ctx, chunk_t *chunk)
     FREE_ARRAY(u8, chunk->code, chunk->cap);
     free_value_array(ctx, &chunk->constants);
     free_line_info(ctx, &chunk->lines);
-    *chunk = make_chunk();
+    *chunk = make_chunk(ctx);
 }
 
 #if NDEBUG
@@ -272,7 +275,7 @@ static void disasm_chunk(
 static int lox_main(ctx_t const *ctx)
 {
     {
-        chunk_t chunk = make_chunk();
+        chunk_t chunk = make_chunk(ctx);
 
         f64 base = 1.2;
         uint i = 0;

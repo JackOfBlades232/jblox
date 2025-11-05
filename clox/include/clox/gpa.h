@@ -2,6 +2,7 @@
 
 #include "buffer.h"
 #include "debug.h"
+#include "context.h"
 
 typedef struct gpa_free_header {
     usize size;
@@ -30,8 +31,9 @@ _Static_assert(
 _Static_assert(sizeof(gpa_free_header_t) <= GPA_ALIGNMENT,
     "GPA min alignment must be less then free header size");
 
-static inline void *gpa_allocate(gpa_t *gpa, usize bytes)
+static inline void *gpa_allocate(ctx_t const *ctx, gpa_t *gpa, usize bytes)
 {
+    (void)ctx;
     gpa_free_header_t *free = gpa->head, *prev = NULL;
     usize const real_byte_size =
         ROUND_UP(GPA_ALIGNMENT + bytes, GPA_ALIGNMENT);
@@ -67,8 +69,9 @@ static inline void *gpa_allocate(gpa_t *gpa, usize bytes)
     return NULL;
 }
 
-static inline void gpa_deallocate(gpa_t *gpa, void const *p)
+static inline void gpa_deallocate(ctx_t const *ctx, gpa_t *gpa, void const *p)
 {
+    (void)ctx;
     gpa_allocated_header_t *alloc =
         (gpa_allocated_header_t *)((u8 *)p - GPA_ALIGNMENT);
     usize size = alloc->size;

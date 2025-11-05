@@ -7,8 +7,9 @@
 
 #if _WIN32
 
-static inline b32 io_is_valid(io_handle_t const *hnd)
+static inline b32 io_is_valid(ctx_t const *ctx, io_handle_t const *hnd)
 {
+    (void)ctx;
     return hnd->hnd != NULL;
 }
 
@@ -34,8 +35,9 @@ static inline isize io_read(ctx_t const *ctx,
 
 #include "syscalls.h"
 
-static inline b32 io_is_valid(io_handle_t const *hnd)
+static inline b32 io_is_valid(ctx_t const *ctx, io_handle_t const *hnd)
 {
+    (void)ctx;
     return hnd->fid >= 0;
 }
 
@@ -61,7 +63,7 @@ static inline isize fmt_print(ctx_t const *ctx,
     char buf[256]; // Lazy...
     VA_LIST args;
     VA_START(args, fmt);
-    usize chars = (usize)fmt_vsprint(buf, sizeof(buf), fmt, args);
+    usize chars = (usize)fmt_vsprint(ctx, buf, sizeof(buf), fmt, args);
     isize written_chars = io_write(ctx, hnd, (u8 const *)buf, chars);
     VA_END(args);
     return written_chars;

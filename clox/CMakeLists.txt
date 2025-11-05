@@ -11,8 +11,8 @@ if (MSVC)
     # @TODO: bring up to speed
     add_compile_options(/GS- /Zl /INCREMENTAL:NO)
     add_compile_options(
-        -Wall -Wextra -Wpedantic
-        -Wno-incompatible-library-redeclaration -Wno-nrvo -Wno-undef
+        -Wall -Wextra -Wpedantic -Werror
+        -Wno-incompatible-library-redeclaration -Wno-undef
         -Wno-unsafe-buffer-usage -Wno-unused-macros -Wno-missing-prototypes
         -Wno-declaration-after-statement -Wno-pre-c11-compat -Wno-padded
         -Wno-cast-align -Wno-cast-qual -Wno-bad-function-cast
@@ -31,7 +31,8 @@ if (MSVC)
 else()
     add_compile_options(
         -masm=intel
-        -Wall -Wextra -Wpedantic -Wno-language-extension-token -Wno-main
+        -Wall -Wextra -Wpedantic -Werror
+        -Wno-language-extension-token -Wno-main
         -pedantic -nostdinc -ffreestanding
         -fno-stack-protector -fno-builtin
         -fno-builtin-memcpy -fno-builtin-memset
