@@ -10,6 +10,9 @@
 
 #include "lox.c"
 
+#define PUSH_CONTEXT(name_, ...) ctx_t name_ = (ctx_t){__VA_ARGS__}
+#define SETUP_CONTEXT(name_) ctx_t *ctx = &(name_)
+
 static int common_main(ctx_t const *ctx)
 {
     buffer_t program_memory = buf_allocate_best(ctx, 1ull << 30);
@@ -424,22 +427,22 @@ void start(void)
 
 #else
 
-static int sys_main(int argc, char **argv)
+static __attribute__((used)) int sys_main(int argc, char **argv)
 {
     os_process_state_t os = {0};
+
+    PUSH_CONTEXT(os_ctx, &os, NULL);
 
     os.argc = argc;
     os.argv = argv;
     os.pid = sys_getpid();
     os.regular_page_size = 4096; // @TODO: support properly?
-    fmt_sprint(
+    fmt_sprint(&os_ctx,
         os.stat_file_name_buf, sizeof(os.stat_file_name_buf),
         "/proc/%d/stat", os.pid);
     os.hstdin = (io_handle_t){SYS_STDIN_FILENO + 1};
     os.hstdout = (io_handle_t){SYS_STDOUT_FILENO + 1};
     os.hstderr = (io_handle_t){SYS_STDERR_FILENO + 1};
-
-    PUSH_CONTEXT(os_ctx, &os, NULL);
 
     return common_main(&os_ctx);
 }

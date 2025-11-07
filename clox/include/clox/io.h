@@ -70,6 +70,6 @@ static inline isize fmt_print(ctx_t const *ctx,
 }
 
 #define OUTPUT(s_) \
-    io_write(&ctx->os->hstdout, (u8 *)s_, STRLITLEN(s_) + 1)
+    io_write(ctx, &ctx->os->hstdout, (u8 *)s_, STRLITLEN(s_) + 1)
 #define OUTPUTF(s_, ...) \
-    fmt_print(&ctx->os->hstdout, s_ __VA_OPT__(,) __VA_ARGS__)
+    fmt_print(ctx, &ctx->os->hstdout, s_ __VA_OPT__(,) __VA_ARGS__)

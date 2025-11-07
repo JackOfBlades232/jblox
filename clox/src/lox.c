@@ -1,3 +1,4 @@
+#include <context.h>
 #include <os.h>
 #include <memory.h>
 #include <buffer.h>
@@ -37,6 +38,11 @@ static inline void *reallocate(
 typedef enum {
     e_op_constant,
     e_op_constant_long,
+    e_op_add,
+    e_op_subtract,
+    e_op_multiply,
+    e_op_divide,
+    e_op_negate,
     e_op_return,
 } opcode_t;
 
@@ -174,11 +180,12 @@ static inline void free_chunk(ctx_t const *ctx, chunk_t *chunk)
     *chunk = make_chunk(ctx);
 }
 
-#if NDEBUG
+static void print_value(ctx_t const *ctx, value_t val)
+{
+    OUTPUTF("%f", val);
+}
 
-#define DISASSEMBLE_CHUNK(...)
-
-#else
+#if DEBUG_TRACE_EXECUTION || DEBUG_DISASM
 
 static void disasm_value(ctx_t const *ctx, value_t val)
 {
@@ -251,6 +258,21 @@ static uint disasm_instruction(ctx_t const *ctx, chunk_t const *chunk, uint at)
     case e_op_constant_long:
         return disasm_long_constant_instruction(
             ctx, "OP_CONSTANT_LONG", chunk, at);
+    case e_op_negate:
+        return disasm_simple_instruction(
+            ctx, "OP_NEGATE", at);
+    case e_op_add:
+        return disasm_simple_instruction(
+            ctx, "OP_ADD", at);
+    case e_op_subtract:
+        return disasm_simple_instruction(
+            ctx, "OP_SUBTRACT", at);
+    case e_op_multiply:
+        return disasm_simple_instruction(
+            ctx, "OP_MULTIPLY", at);
+    case e_op_divide:
+        return disasm_simple_instruction(
+            ctx, "OP_DIVIDE", at);
     case e_op_return:
         return disasm_simple_instruction(
             ctx, "OP_RETURN", at);
@@ -259,6 +281,8 @@ static uint disasm_instruction(ctx_t const *ctx, chunk_t const *chunk, uint at)
         return at + 1;
     }
 }
+
+#if DEBUG_DISASM
 
 static void disasm_chunk(
     ctx_t const *ctx, chunk_t const *chunk, char const *name)
@@ -272,22 +296,291 @@ static void disasm_chunk(
 
 #endif
 
-static int lox_main(ctx_t const *ctx)
+#endif
+
+#ifndef DISASSEMBLE_CHUNK
+#define DISASSEMBLE_CHUNK(...)
+#endif
+
+#define VM_STACK_SEGMENT_SIZE 256
+
+typedef struct vm_stack_segment {
+    value_t values[VM_STACK_SEGMENT_SIZE];
+    struct vm_stack_segment *prev;
+    struct vm_stack_segment *next;
+} vm_stack_segment_t;
+
+typedef struct vm {
+    chunk_t *chunk;
+    u8 *ip;
+    vm_stack_segment_t stack;
+    vm_stack_segment_t *cur_stack_seg; 
+    value_t *stack_top;
+} vm_t;
+
+static void reset_stack(ctx_t const *ctx, vm_t *vm)
 {
+    (void)ctx;
+    vm->cur_stack_seg = &vm->stack;
+    vm->stack_top = vm->stack.values;
+}
+
+static void init_vm(ctx_t const *ctx, vm_t *vm)
+{
+    reset_stack(ctx, vm);
+}
+
+#define PUSH_STACK_SEG(vm_)                                       \
+    do {                                                          \
+        vm_stack_segment_t *new_seg_ =                            \
+            reallocate(ctx, NULL, 0, sizeof(vm_stack_segment_t)); \
+        (vm_)->cur_stack_seg->next = new_seg_;                    \
+        new_seg_->prev = (vm_)->cur_stack_seg;                    \
+        new_seg_->next = NULL;                                    \
+        (vm_)->cur_stack_seg = new_seg_;                          \
+        (vm_)->stack_top = new_seg_->values;                      \
+    } while (0)
+
+#define POP_STACK_SEG(vm_)                                        \
+    do {                                                          \
+        ASSERT((vm_)->cur_stack_seg->prev);                       \
+        vm_stack_segment_t *old_seg_ = (vm_)->cur_stack_seg;      \
+        (vm_)->cur_stack_seg = old_seg_->prev;                    \
+        (vm_)->cur_stack_seg->next = NULL;                        \
+        reallocate(ctx, old_seg_, sizeof(vm_stack_segment_t), 0); \
+        (vm_)->stack_top =                                        \
+            (vm_)->cur_stack_seg->values + VM_STACK_SEGMENT_SIZE; \
+    } while (0)
+
+static void push_stack(ctx_t const *ctx, vm_t *vm, value_t val)
+{
+    if (vm->stack_top - vm->cur_stack_seg->values >= VM_STACK_SEGMENT_SIZE)
+        PUSH_STACK_SEG(vm);
+
+    *vm->stack_top++ = val;
+}
+
+static value_t pop_stack(ctx_t const *ctx, vm_t *vm)
+{
+    if (vm->stack_top == vm->cur_stack_seg->values)
+        POP_STACK_SEG(vm);
+
+    return *(--vm->stack_top);
+}
+
+typedef enum {
+    e_interp_ok,
+    e_interp_compile_err,
+    e_interp_runtime_err
+} interp_result_t;
+
+static interp_result_t run_vm(ctx_t const *ctx, vm_t *vm)
+{
+#define READ_BYTE() (*vm->ip++)
+#define READ_CONSTANT() (vm->chunk->constants.values[READ_BYTE()])
+#define READ_CONSTANT_LONG()     \
+    (vm->chunk->constants.values \
+        [(u32)READ_BYTE() | ((u32)READ_BYTE() << 8) | ((u32)READ_BYTE() << 16)])
+#define BINARY_OP(op_) \
+    do {                                                    \
+        f64 b_ = pop_stack(ctx, vm);                        \
+        *(vm->stack_top - 1) = *(vm->stack_top - 1) op_ b_; \
+    } while (0)
+
+    for (;;) {
+#if DEBUG_TRACE_EXECUTION
+        LOG_NONL("              ");
+        for (vm_stack_segment_t const *seg = &vm->stack; seg; seg = seg->next) {
+            for (
+                value_t const
+                    *slot = seg->values,
+                    *end = seg == vm->cur_stack_seg
+                        ? vm->stack_top
+                        : seg->values + VM_STACK_SEGMENT_SIZE;
+                slot < end;
+                ++slot)
+            {
+                LOG_NONL("[ ");
+                disasm_value(ctx, *slot);
+                LOG_NONL(" ]");
+            }
+        }
+        LOG("");
+        disasm_instruction(ctx, vm->chunk, (uint)(vm->ip - vm->chunk->code));
+#endif
+
+        u8 instr;
+        switch (instr = READ_BYTE()) {
+        case e_op_constant: {
+            value_t constant = READ_CONSTANT();
+            push_stack(ctx, vm, constant);
+        } break;
+
+        case e_op_constant_long: {
+            value_t constant = READ_CONSTANT_LONG();
+            push_stack(ctx, vm, constant);
+        } break;
+
+        case e_op_add:
+            BINARY_OP(+);
+            break;
+
+        case e_op_subtract:
+            BINARY_OP(-);
+            break;
+
+        case e_op_multiply:
+            BINARY_OP(*);
+            break;
+
+        case e_op_divide:
+            BINARY_OP(/); // @TODO: zero div check
+            break;
+
+        case e_op_negate:
+            *(vm->stack_top - 1) = -*(vm->stack_top - 1);
+            break;
+
+        case e_op_return:
+            print_value(ctx, pop_stack(ctx, vm));
+            OUTPUT("\n");
+            return e_interp_ok;
+
+        default:
+            ASSERT(0);
+            break;
+        }
+    }
+
+#undef READ_BYTE
+#undef READ_CONSTANT
+#undef READ_CONSTANT_LONG
+#undef BINARY_OP
+}
+
+static interp_result_t interpret_chunk(
+    ctx_t const *ctx, vm_t *vm, chunk_t *chunk)
+{
+    vm->chunk = chunk;
+    vm->ip = chunk->code;
+    return run_vm(ctx, vm);
+}
+
+static void vm_test(ctx_t const *ctx, vm_t *vm)
+{
+    uint iid = 123;
+#define NEXT_LINE() ((iid++) / 10)
+
+    // 1 * 2 + 3
     {
         chunk_t chunk = make_chunk(ctx);
 
-        f64 base = 1.2;
-        uint i = 0;
-        for (; i < 512; ++i)
-            write_constant(ctx, &chunk, base + i * 0.2, 123 + i / 100);
+        write_constant(ctx, &chunk, 3.0, NEXT_LINE());
+        write_constant(ctx, &chunk, 2.0, NEXT_LINE());
+        write_constant(ctx, &chunk, 1.0, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_multiply, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_add, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_return, NEXT_LINE());
 
-        write_chunk(ctx, &chunk, e_op_return, 123 + i / 100);
-
-        DISASSEMBLE_CHUNK(&chunk, "test chunk");
+        DISASSEMBLE_CHUNK(&chunk, "Test [1 * 2 + 3]");
+        interpret_chunk(ctx, vm, &chunk);
 
         free_chunk(ctx, &chunk);
     }
+
+    // 1 + 2 * 3
+    {
+        chunk_t chunk = make_chunk(ctx);
+
+        write_constant(ctx, &chunk, 1.0, NEXT_LINE());
+        write_constant(ctx, &chunk, 2.0, NEXT_LINE());
+        write_constant(ctx, &chunk, 3.0, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_multiply, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_add, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_return, NEXT_LINE());
+
+        DISASSEMBLE_CHUNK(&chunk, "Test [1 + 2 * 3]");
+        interpret_chunk(ctx, vm, &chunk);
+
+        free_chunk(ctx, &chunk);
+    }
+
+    // 3 - 2 - 1
+    {
+        chunk_t chunk = make_chunk(ctx);
+
+        write_constant(ctx, &chunk, 3.0, NEXT_LINE());
+        write_constant(ctx, &chunk, 2.0, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_subtract, NEXT_LINE());
+        write_constant(ctx, &chunk, 1.0, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_subtract, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_return, NEXT_LINE());
+
+        DISASSEMBLE_CHUNK(&chunk, "Test [3 - 2 - 1]");
+        interpret_chunk(ctx, vm, &chunk);
+
+        free_chunk(ctx, &chunk);
+    }
+
+    // 1 + 2 * 3 - 4 / -5
+    {
+        chunk_t chunk = make_chunk(ctx);
+
+        write_constant(ctx, &chunk, 1.0, NEXT_LINE());
+        write_constant(ctx, &chunk, 2.0, NEXT_LINE());
+        write_constant(ctx, &chunk, 3.0, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_multiply, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_add, NEXT_LINE());
+        write_constant(ctx, &chunk, 4.0, NEXT_LINE());
+        write_constant(ctx, &chunk, 5.0, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_negate, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_divide, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_subtract, NEXT_LINE());
+        write_chunk(ctx, &chunk, e_op_return, NEXT_LINE());
+
+        DISASSEMBLE_CHUNK(&chunk, "Test [1 + 2 * 3 - 4 / -5]");
+        interpret_chunk(ctx, vm, &chunk);
+
+        free_chunk(ctx, &chunk);
+    }
+
+#if 0
+    {
+        chunk_t chunk = make_chunk(ctx);
+
+        for (int j = 0; j < 97; ++j)
+            add_constant(ctx, &chunk, (f64)(j + 1));
+        for (int i = 0; i < 500000; ++i) {
+            for (int j = 0; j < 97; ++j) {
+                write_chunk(ctx, &chunk, e_op_constant, NEXT_LINE());
+                write_chunk(ctx, &chunk, (u8)j, NEXT_LINE());
+            }
+            for (int j = 0; j < 96 / 4; ++j) {
+                write_chunk(ctx, &chunk, e_op_divide, NEXT_LINE());
+                write_chunk(ctx, &chunk, e_op_multiply, NEXT_LINE());
+                write_chunk(ctx, &chunk, e_op_add, NEXT_LINE());
+                write_chunk(ctx, &chunk, e_op_subtract, NEXT_LINE());
+                write_chunk(ctx, &chunk, e_op_negate, NEXT_LINE());
+            }
+        }
+        write_chunk(ctx, &chunk, e_op_return, NEXT_LINE());
+
+        DISASSEMBLE_CHUNK(&chunk, "Test [lots of ops]");
+        interpret_chunk(ctx, vm, &chunk);
+
+        free_chunk(ctx, &chunk);
+    }
+#endif
+
+#undef NEXT_LINE
+}
+
+static int lox_main(ctx_t const *ctx)
+{
+    vm_t vm = {0};
+    init_vm(ctx, &vm);
+
+    vm_test(ctx, &vm);
 
     return 0;
 }

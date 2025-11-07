@@ -79,11 +79,21 @@ static inline usize fmt_sprint_double(
         w = mantissa_with_one << shift;
         f = 0;
     } else {
-        w = mantissa_with_one >> -shift;
-        f = (mantissa_with_one & ((1ull << -shift) - 1)) << e;
+        w = mantissa_with_one >> MIN(-shift, 63);
+        f = (mantissa_with_one & ((1ull << -shift) - 1));
+        if (e > 0)
+            f <<= e;
+        else
+            f >>= -e;
     }
 
-    usize len = FMT_SPRINT_INT(buf, bufsize, (i64)w * (s ? -1 : 1));
+    usize len = 0;
+    if (buf && bufsize && s) {
+        *buf++ = '-';
+        --bufsize;
+        ++len;
+    }
+    len += FMT_SPRINT_INT(buf, bufsize, (i64)w);
     if (f && len < bufsize) {
         buf[len++] = '.';
         uint significant_digits = 15;

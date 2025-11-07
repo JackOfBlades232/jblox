@@ -7,6 +7,8 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/clox
     ${CMAKE_CURRENT_BINARY_DIR}/include)
 
+add_compile_options(-DDEBUG_TRACE_EXECUTION=0 -DDEBUG_DISASM=0)
+
 if (MSVC)
     # @TODO: bring up to speed
     add_compile_options(/GS- /Zl /INCREMENTAL:NO)
@@ -32,7 +34,7 @@ else()
     add_compile_options(
         -masm=intel
         -Wall -Wextra -Wpedantic -Werror
-        -Wno-language-extension-token -Wno-main
+        -Wno-language-extension-token
         -pedantic -nostdinc -ffreestanding
         -fno-stack-protector -fno-builtin
         -fno-builtin-memcpy -fno-builtin-memset
@@ -41,7 +43,7 @@ else()
         -fno-ident)
     add_link_options(
         -static -nostdlib -nodefaultlibs
-        -Wl,--build-id=none -Wl,--gc-sections -Wl,--undefined=sys_main)
+        -Wl,--build-id=none -Wl,--gc-sections)
 
     # Debug
     add_compile_options(-g)
