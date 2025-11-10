@@ -8,6 +8,7 @@
 #include <defs.h>
 #include <gpa.h>
 #include <debug.h>
+#include <string.h>
 
 static inline void *reallocate(
     ctx_t const *ctx, void const *ptr, usize old_size, usize new_size)
@@ -467,113 +468,77 @@ static interp_result_t interpret_chunk(
     return run_vm(ctx, vm);
 }
 
-static void vm_test(ctx_t const *ctx, vm_t *vm)
+static interp_result_t interpret(ctx_t const *ctx, vm_t *vm, string_t code)
 {
-    uint iid = 123;
-#define NEXT_LINE() ((iid++) / 10)
+    OUTPUT("Code: [");
+    OUTPUTS(code);
+    OUTPUT("]\n");
 
-    // 1 * 2 + 3
-    {
-        chunk_t chunk = make_chunk(ctx);
+    // @TODO
 
-        write_constant(ctx, &chunk, 3.0, NEXT_LINE());
-        write_constant(ctx, &chunk, 2.0, NEXT_LINE());
-        write_constant(ctx, &chunk, 1.0, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_multiply, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_add, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_return, NEXT_LINE());
+    (void)vm;
 
-        DISASSEMBLE_CHUNK(&chunk, "Test [1 * 2 + 3]");
-        interpret_chunk(ctx, vm, &chunk);
+    (void)interpret_chunk;
+    (void)disasm_chunk;
 
-        free_chunk(ctx, &chunk);
-    }
+    return e_interp_ok;
+}
 
-    // 1 + 2 * 3
-    {
-        chunk_t chunk = make_chunk(ctx);
+// @TODO: fix for files with <
+static void repl(ctx_t const *ctx, vm_t *vm)
+{
+    char line[1024];
+    usize buffered_chars = 0;
 
-        write_constant(ctx, &chunk, 1.0, NEXT_LINE());
-        write_constant(ctx, &chunk, 2.0, NEXT_LINE());
-        write_constant(ctx, &chunk, 3.0, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_multiply, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_add, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_return, NEXT_LINE());
+    for (;;) {
+        OUTPUT("> ");
 
-        DISASSEMBLE_CHUNK(&chunk, "Test [1 + 2 * 3]");
-        interpret_chunk(ctx, vm, &chunk);
+        isize chars_read = io_read(
+            ctx, &ctx->os->hstdin,
+            (u8 *)line + buffered_chars, sizeof(line) - buffered_chars);
+        if (chars_read == 0)
+            break;
 
-        free_chunk(ctx, &chunk);
-    }
+        isize line_break = 0;
+        while (line_break < chars_read && line[line_break] != '\n')
+            ++line_break;
 
-    // 3 - 2 - 1
-    {
-        chunk_t chunk = make_chunk(ctx);
-
-        write_constant(ctx, &chunk, 3.0, NEXT_LINE());
-        write_constant(ctx, &chunk, 2.0, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_subtract, NEXT_LINE());
-        write_constant(ctx, &chunk, 1.0, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_subtract, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_return, NEXT_LINE());
-
-        DISASSEMBLE_CHUNK(&chunk, "Test [3 - 2 - 1]");
-        interpret_chunk(ctx, vm, &chunk);
-
-        free_chunk(ctx, &chunk);
-    }
-
-    // 1 + 2 * 3 - 4 / -5
-    {
-        chunk_t chunk = make_chunk(ctx);
-
-        write_constant(ctx, &chunk, 1.0, NEXT_LINE());
-        write_constant(ctx, &chunk, 2.0, NEXT_LINE());
-        write_constant(ctx, &chunk, 3.0, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_multiply, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_add, NEXT_LINE());
-        write_constant(ctx, &chunk, 4.0, NEXT_LINE());
-        write_constant(ctx, &chunk, 5.0, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_negate, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_divide, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_subtract, NEXT_LINE());
-        write_chunk(ctx, &chunk, e_op_return, NEXT_LINE());
-
-        DISASSEMBLE_CHUNK(&chunk, "Test [1 + 2 * 3 - 4 / -5]");
-        interpret_chunk(ctx, vm, &chunk);
-
-        free_chunk(ctx, &chunk);
-    }
-
-#if 0
-    {
-        chunk_t chunk = make_chunk(ctx);
-
-        for (int j = 0; j < 97; ++j)
-            add_constant(ctx, &chunk, (f64)(j + 1));
-        for (int i = 0; i < 500000; ++i) {
-            for (int j = 0; j < 97; ++j) {
-                write_chunk(ctx, &chunk, e_op_constant, NEXT_LINE());
-                write_chunk(ctx, &chunk, (u8)j, NEXT_LINE());
-            }
-            for (int j = 0; j < 96 / 4; ++j) {
-                write_chunk(ctx, &chunk, e_op_divide, NEXT_LINE());
-                write_chunk(ctx, &chunk, e_op_multiply, NEXT_LINE());
-                write_chunk(ctx, &chunk, e_op_add, NEXT_LINE());
-                write_chunk(ctx, &chunk, e_op_subtract, NEXT_LINE());
-                write_chunk(ctx, &chunk, e_op_negate, NEXT_LINE());
-            }
+        if (line_break == chars_read) {
+            LOG("Max repl line is 1023 characters long");
+            buffered_chars = 0;
+            continue;
         }
-        write_chunk(ctx, &chunk, e_op_return, NEXT_LINE());
 
-        DISASSEMBLE_CHUNK(&chunk, "Test [lots of ops]");
-        interpret_chunk(ctx, vm, &chunk);
+        line[line_break] = '\0';
+        
+        interpret(ctx, vm, (string_t){line, (usize)line_break});
 
-        free_chunk(ctx, &chunk);
+        buffered_chars = chars_read - line_break - 1;
+        char *src = &line[line_break + 1], *dst = line;
+        for (usize i = 0; i < buffered_chars; ++i)
+            *dst++ = *src++;
     }
-#endif
+}
 
-#undef NEXT_LINE
+static void run_file(ctx_t const *ctx, vm_t *vm, char const *fname)
+{
+    io_file_t f = io_read_open_file(ctx, fname);
+    if (!io_file_is_valid(ctx, &f)) {
+        LOGF("Failed to open script '%s'.", fname);
+        os_exit(ctx, 65);
+    }
+
+    char *script = reallocate(ctx, NULL, 0, f.len + 1);
+    usize chars_read = io_read(ctx, &f.ioh, (u8 *)script, f.len);
+    VERIFY(chars_read == f.len, "Failed to read script.");
+    script[f.len] = '\0';
+
+    interp_result_t res = interpret(ctx, vm, (string_t){script, f.len});
+
+    if (res == e_interp_compile_err)
+        os_exit(ctx, 70);
+    else if (res == e_interp_runtime_err)
+        os_exit(ctx, 75);
 }
 
 static int lox_main(ctx_t const *ctx)
@@ -581,7 +546,14 @@ static int lox_main(ctx_t const *ctx)
     vm_t vm = {0};
     init_vm(ctx, &vm);
 
-    vm_test(ctx, &vm);
+    if (ctx->os->argc == 1) {
+        repl(ctx, &vm);
+    } else if (ctx->os->argc == 2) {
+        run_file(ctx, &vm, ctx->os->argv[1]);
+    } else {
+        LOG("Usage: clox [file].");
+        os_exit(ctx, 64);
+    }
 
     return 0;
 }

@@ -4,6 +4,7 @@
 #include "context.h"
 #include "defs.h"
 #include "fmt.h"
+#include "string.h"
 
 #if _WIN32
 
@@ -57,6 +58,64 @@ static inline isize io_read(ctx_t const *ctx,
 
 #endif
 
+static inline b32 io_file_is_valid(ctx_t const *ctx, io_file_t const *f)
+{
+    return io_is_valid(ctx, &f->ioh);
+}
+
+#if _WIN32
+
+static inline io_file_t io_read_open_file(ctx_t const *ctx, char const *fn)
+{
+    io_file_t f = {0};
+
+    f.ioh.hnd = ctx->os->sys.create_file_a(
+        fn, WIN32_GENERIC_READ, 0, NULL,
+        WIN32_OPEN_EXISTING, WIN32_FILE_ATTRIBUTE_NORMAL, NULL);
+    if (!is_valid(ctx, &f.ioh))
+        return f;
+
+    u32 len_lo = 0, len_hi = 0;
+    len_lo = ctx->os->sys.get_file_size(f.ioh.hnd, &len_hi);
+    f.len = ((usize)len_hi << 32) | (usize)len_lo;
+
+    return f;
+}
+
+static inline void io_close_file(ctx_t const *ctx, io_file_t *f)
+{
+    if (io_file_is_valid(f)) {
+        ctx->os->sys.close_handle(f.ioh.hnd);
+        *f = (io_file_t){0};
+    }
+}
+
+#else
+
+static inline io_file_t io_read_open_file(ctx_t const *ctx, char const *fn)
+{
+    io_file_t f = {0};
+
+    f.ioh.fid = sys_open(fn, SYS_O_RDONLY, 0) + 1;
+    if (!io_is_valid(ctx, &f.ioh))
+        return f;
+
+    f.len = sys_lseek(f.ioh.fid - 1, 0, SYS_SEEK_END);
+    sys_lseek(f.ioh.fid - 1, 0, SYS_SEEK_SET);
+
+    return f;
+}
+
+static inline void io_close_file(ctx_t const *ctx, io_file_t *f)
+{
+    if (io_file_is_valid(ctx, f)) {
+        sys_close(f->ioh.fid - 1);
+        *f = (io_file_t){0};
+    }
+}
+
+#endif
+
 static inline isize fmt_print(ctx_t const *ctx,
     io_handle_t *hnd, char const *fmt, ...)
 {
@@ -73,3 +132,5 @@ static inline isize fmt_print(ctx_t const *ctx,
     io_write(ctx, &ctx->os->hstdout, (u8 *)s_, STRLITLEN(s_) + 1)
 #define OUTPUTF(s_, ...) \
     fmt_print(ctx, &ctx->os->hstdout, s_ __VA_OPT__(,) __VA_ARGS__)
+#define OUTPUTS(s_) \
+    io_write(ctx, &ctx->os->hstdout, (u8 *)(s_).p, (s_).len)

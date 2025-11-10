@@ -16,6 +16,9 @@
 #define WIN32_PAGE_READWRITE 0x4
 #define WIN32_TOKEN_ADJUST_PRIVILEGES 0x20
 #define WIN32_SE_PRIVILEGE_ENABLED 0x2L
+#define WIN32_GENERIC_READ 0x80000000
+#define WIN32_OPEN_EXISTING 3
+#define WIN32_FILE_ATTRIBUTE_NORMAL 0x80
 
 typedef void *win32_handle_t;
 
@@ -44,6 +47,7 @@ typedef b32 (__stdcall *win32_write_file_t)(
     win32_handle_t, void const *, u32, u32 *, void *);
 typedef b32 (__stdcall *win32_read_file_t)(
     win32_handle_t, void *, u32, u32 *, void *);
+typedef u32 (__stdcall *win32_get_file_size_t)(win32_handle_t, u32 *);
 typedef win32_handle_t (__stdcall *win32_get_current_process_t)(void);
 typedef win32_handle_t (__stdcall *win32_get_std_handle_t)(u32);
 typedef char const *(__stdcall *win32_get_command_line_a_t)(void);
@@ -68,6 +72,7 @@ typedef struct {
     win32_create_file_a_t create_file_a;
     win32_write_file_t write_file;
     win32_read_file_t read_file;
+    win32_get_file_size_t get_file_size;
 } win32_syscalls_t;
 
 u64 __readgsqword(ulong offset);
@@ -77,6 +82,9 @@ u64 __readgsqword(ulong offset);
 #define SYS_EXIT 60
 #define SYS_WRITE 1
 #define SYS_READ 0
+#define SYS_OPEN 2
+#define SYS_CLOSE 3
+#define SYS_LSEEK 8
 #define SYS_GETPID 39
 #define SYS_MMAP 9
 #define SYS_MUNMAP 11
@@ -87,6 +95,9 @@ u64 __readgsqword(ulong offset);
 #define SYS_MAP_ANON 0x20
 #define SYS_MAP_HUGETLB 0x040000
 #define SYS_MAP_HUGE_2MB (21U << 26)
+#define SYS_O_RDONLY 0
+#define SYS_SEEK_SET 0
+#define SYS_SEEK_END 2
 
 #define SYS_STDIN_FILENO 0
 #define SYS_STDOUT_FILENO 1
@@ -172,6 +183,21 @@ static inline isize sys_write(int fd, u8 const *buf, usize bytes)
 static inline isize sys_read(int fd, u8 *buf, usize bytes)
 {
     return sys_call3(SYS_READ, (void *)fd, (void *)buf, (void *)bytes);
+}
+
+static inline int sys_open(char const *path, int flags, uint mode)
+{
+    return sys_call3(SYS_OPEN, (void *)path, (void *)flags, (void *)mode);
+}
+
+static inline void sys_close(int fd)
+{
+    sys_call1(SYS_CLOSE, (void *)fd);
+}
+
+static inline usize sys_lseek(int fd, usize off, uint whence)
+{
+    return sys_call3(SYS_LSEEK, (void *)fd, (void *)off, (void *)whence);
 }
 
 static inline sys_pid_t sys_getpid(void)

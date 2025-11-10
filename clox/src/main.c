@@ -370,6 +370,9 @@ static void win32_main(void)
     VERIFY(os.sys.read_file =
         (win32_read_file_t)os.sys.get_proc_addr(kernel32, "ReadFile"),
         "Failed to load \"ReadFile\" from \"kernel32.dll\"");
+    VERIFY(os.sys.get_file_size =
+        (win32_get_file_size_t)os.sys.get_proc_addr(kernel32, "GetFileSize"),
+        "Failed to load \"GetFileSize\" from \"kernel32.dll\"");
 
     win32_get_current_process_t get_current_process = 
         (win32_get_current_process_t)os.sys.get_proc_addr(

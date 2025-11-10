@@ -15,3 +15,8 @@ typedef struct {
 } io_handle_t;
 
 #endif
+
+typedef struct {
+    io_handle_t ioh;
+    usize len;
+} io_file_t ;
