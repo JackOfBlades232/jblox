@@ -7,7 +7,7 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/clox
     ${CMAKE_CURRENT_BINARY_DIR}/include)
 
-add_compile_options(-DDEBUG_TRACE_EXECUTION=0 -DDEBUG_DISASM=0)
+add_compile_options(-DDEBUG_TRACE_EXECUTION=1 -DDEBUG_DISASM=1)
 
 if (MSVC)
     # @TODO: bring up to speed

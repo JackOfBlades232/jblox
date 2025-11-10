@@ -330,15 +330,16 @@ static void init_vm(ctx_t const *ctx, vm_t *vm)
     reset_stack(ctx, vm);
 }
 
-#define PUSH_STACK_SEG(vm_)                                       \
-    do {                                                          \
-        vm_stack_segment_t *new_seg_ =                            \
-            reallocate(ctx, NULL, 0, sizeof(vm_stack_segment_t)); \
-        (vm_)->cur_stack_seg->next = new_seg_;                    \
-        new_seg_->prev = (vm_)->cur_stack_seg;                    \
-        new_seg_->next = NULL;                                    \
-        (vm_)->cur_stack_seg = new_seg_;                          \
-        (vm_)->stack_top = new_seg_->values;                      \
+#define PUSH_STACK_SEG(vm_)                                    \
+    do {                                                       \
+        vm_stack_segment_t *new_seg_ =                         \
+            (vm_stack_segment_t *)reallocate(                  \
+                    ctx, NULL, 0, sizeof(vm_stack_segment_t)); \
+        (vm_)->cur_stack_seg->next = new_seg_;                 \
+        new_seg_->prev = (vm_)->cur_stack_seg;                 \
+        new_seg_->next = NULL;                                 \
+        (vm_)->cur_stack_seg = new_seg_;                       \
+        (vm_)->stack_top = new_seg_->values;                   \
     } while (0)
 
 #define POP_STACK_SEG(vm_)                                        \
