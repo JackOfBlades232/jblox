@@ -2,6 +2,7 @@
 
 #include "defs.h"
 #include "context.h"
+#include "string.h"
 
 #define X(type_)                                         \
 static inline usize type_ ## _fmt_sprint (               \
@@ -176,6 +177,11 @@ static inline isize fmt_vsprint(
                 char const *p = VA_ARG(args, char const *);
                 while (dst < end && *p)
                     *dst++ = *p++;
+            } break;
+            case 'S': {
+                string_t s = VA_ARG(args, string_t);
+                while (dst < end && s.len--)
+                    *dst++ = *s.p++;
             } break;
             // @TODO: length-ed string
             default:

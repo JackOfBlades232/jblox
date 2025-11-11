@@ -468,13 +468,347 @@ static interp_result_t interpret_chunk(
     return run_vm(ctx, vm);
 }
 
-static interp_result_t interpret(ctx_t const *ctx, vm_t *vm, string_t code)
-{
-    OUTPUT("Code: [");
-    OUTPUTS(code);
-    OUTPUT("]\n");
+typedef enum {
+  // Single-character tokens.
+  e_tt_left_paren, e_tt_right_paren,
+  e_tt_left_brace, e_tt_right_brace,
+  e_tt_comma, e_tt_dot, e_tt_minus, e_tt_plus,
+  e_tt_semicolon, e_tt_slash, e_tt_star,
+  // One or two character tokens.
+  e_tt_bang, e_tt_bang_equal,
+  e_tt_equal, e_tt_equal_equal,
+  e_tt_greater, e_tt_greater_equal,
+  e_tt_less, e_tt_less_equal,
+  // Literals.
+  e_tt_identifier, e_tt_string, e_tt_number,
+  // Keywords.
+  e_tt_and, e_tt_class, e_tt_else, e_tt_false,
+  e_tt_for, e_tt_fun, e_tt_if, e_tt_nil, e_tt_or,
+  e_tt_print, e_tt_return, e_tt_super, e_tt_this,
+  e_tt_true, e_tt_var, e_tt_while,
 
-    // @TODO
+  e_tt_error, e_tt_eof
+} token_type_t;
+
+typedef struct {
+    token_type_t type;
+    char const *start;
+    int len;
+    int line;
+} token_t;
+
+#define MAKE_TOKEN(t_, sc_) \
+    ((token_t){             \
+        (t_), (sc_)->start, (int)((sc_)->cur - (sc_)->start), (sc_)->line})
+#define ERROR_TOKEN(m_, sc_) \
+    ((token_t){e_tt_error, (m_), STRLITLEN(m_), (sc_)->line})
+
+#define IS_ALPHA(c_)                    \
+    (((c_) >= 'A' && (c_) <= 'Z')       \
+        || ((c_) >= 'a' && (c_) <= 'z') \
+        || (c_) == '_')
+#define IS_DIGIT(c_) ((c_) >= '0' && (c_) <= '9')
+
+typedef struct {
+    char const *start;
+    char const *cur;
+    char const *end;
+    int line;
+} scanner_t;
+
+static b32 scanner_is_at_end(ctx_t const *ctx, scanner_t const *scanner)
+{
+    (void)ctx;
+    return scanner->cur == scanner->end;
+}
+
+static char scanner_advance(ctx_t const *ctx, scanner_t *scanner)
+{
+    (void)ctx;
+    return *scanner->cur++;
+}
+
+static b32 scanner_match(ctx_t const *ctx, char e, scanner_t *scanner)
+{
+    (void)ctx;
+    if (scanner_is_at_end(ctx, scanner))
+        return false;
+    if (*scanner->cur != e)
+        return false;
+    ++scanner->cur;
+    return true;
+}
+
+static char scanner_peek(ctx_t const *ctx, scanner_t const *scanner)
+{
+    (void)ctx;
+    return *scanner->cur;
+}
+
+static char scanner_peek_next(ctx_t const *ctx, scanner_t const *scanner)
+{
+    return scanner_is_at_end(ctx, scanner) ? '\0' : scanner->cur[1];
+}
+
+static void skip_ws(ctx_t const *ctx, scanner_t *scanner)
+{
+    for (;;) {
+        switch (scanner_peek(ctx, scanner)) {
+        case ' ':
+        case '\t':
+        case '\r':
+            break;
+        case '\n':
+            ++scanner->line;
+            break;
+        case '/':
+            if (scanner_peek_next(ctx, scanner) == '/') {
+                while (
+                    scanner_peek(ctx, scanner) != '\n' &&
+                    !scanner_is_at_end(ctx, scanner))
+                {
+                    scanner_advance(ctx, scanner);
+                }
+            } else {
+                return;
+            }
+        default:
+            return;
+        }
+
+        scanner_advance(ctx, scanner);
+    }
+}
+
+static token_t scan_string(ctx_t const *ctx, scanner_t *scanner)
+{
+    char c;
+    while (
+        (c = scanner_peek(ctx, scanner)) != '"' &&
+        !scanner_is_at_end(ctx, scanner))
+    {
+        if (c == '\n')
+            ++scanner->line;
+        scanner_advance(ctx, scanner);
+    }
+
+    if (scanner_is_at_end(ctx, scanner))
+        return ERROR_TOKEN("Unterminated string.", scanner);
+
+    scanner_advance(ctx, scanner);
+    return MAKE_TOKEN(e_tt_string, scanner);
+}
+
+static token_t scan_number(ctx_t const *ctx, scanner_t *scanner)
+{
+    while (IS_DIGIT(scanner_peek(ctx, scanner)))
+        scanner_advance(ctx, scanner);
+
+    if (scanner_peek(ctx, scanner) == '.') {
+        scanner_advance(ctx, scanner);
+        while (IS_DIGIT(scanner_peek(ctx, scanner)))
+            scanner_advance(ctx, scanner);
+    }
+
+    return MAKE_TOKEN(e_tt_number, scanner);
+}
+
+static token_type_t scanner_check_kw(
+    ctx_t const *ctx,
+    int start, string_t rest, token_type_t type,
+    scanner_t const *scanner)
+{
+    (void)ctx;
+    if (scanner->cur - scanner->start == (isize)start + (isize)rest.len) {
+        char const *p = scanner->start + start;
+        while (rest.len--) {
+            if (*p++ != *rest.p++)
+                goto ret_id;
+        }
+        return type;
+    }
+
+ret_id:
+    return e_tt_identifier;
+}
+
+static token_type_t scanner_id_type(ctx_t const *ctx, scanner_t const *scanner)
+{
+    switch (scanner->start[0]) {
+    case 'a':
+        return scanner_check_kw(ctx, 1, LITSTR("nd"), e_tt_and, scanner);
+    case 'c':
+        return scanner_check_kw(ctx, 1, LITSTR("lass"), e_tt_class, scanner);
+    case 'e':
+        return scanner_check_kw(ctx, 1, LITSTR("lse"), e_tt_else, scanner);
+    case 'f':
+        if (scanner->cur - scanner->start > 1) {
+            switch (scanner->start[1]) {
+                case 'a':
+                    return scanner_check_kw(
+                        ctx, 2, LITSTR("lse"), e_tt_false, scanner);
+                case 'o':
+                    return scanner_check_kw(
+                        ctx, 2, LITSTR("r"), e_tt_for, scanner);
+                case 'u':
+                    return scanner_check_kw(
+                        ctx, 2, LITSTR("n"), e_tt_fun, scanner);
+                default:
+                    break;
+            }
+        }
+        break;
+    case 'i':
+        return scanner_check_kw(ctx, 1, LITSTR("f"), e_tt_if, scanner);
+    case 'n':
+        return scanner_check_kw(ctx, 1, LITSTR("il"), e_tt_nil, scanner);
+    case 'o':
+        return scanner_check_kw(ctx, 1, LITSTR("r"), e_tt_or, scanner);
+    case 'p':
+        return scanner_check_kw(ctx, 1, LITSTR("rint"), e_tt_print, scanner);
+    case 'r':
+        return scanner_check_kw(ctx, 1, LITSTR("eturn"), e_tt_return, scanner);
+    case 's':
+        return scanner_check_kw(ctx, 1, LITSTR("uper"), e_tt_super, scanner);
+    case 't':
+        if (scanner->cur - scanner->start > 1) {
+            switch (scanner->start[1]) {
+                case 'h':
+                    return scanner_check_kw(
+                        ctx, 2, LITSTR("is"), e_tt_this, scanner);
+                case 'r':
+                    return scanner_check_kw(
+                        ctx, 2, LITSTR("ue"), e_tt_true, scanner);
+                default:
+                    break;
+            }
+        }
+        break;
+    case 'v':
+        return scanner_check_kw(ctx, 1, LITSTR("ar"), e_tt_var, scanner);
+    case 'w':
+        return scanner_check_kw(ctx, 1, LITSTR("hile"), e_tt_while, scanner);
+    default:
+        break;
+    }
+
+    return e_tt_identifier;
+}
+
+static token_t scan_id(ctx_t const *ctx, scanner_t *scanner)
+{
+    while (
+        IS_ALPHA(scanner_peek(ctx, scanner)) ||
+        IS_DIGIT(scanner_peek(ctx, scanner)))
+    {
+        scanner_advance(ctx, scanner);
+    }
+    return MAKE_TOKEN(scanner_id_type(ctx, scanner), scanner);
+}
+
+static token_t scan_token(ctx_t const *ctx, scanner_t *scanner)
+{
+    skip_ws(ctx, scanner);
+    scanner->start = scanner->cur;
+
+    if (scanner_is_at_end(ctx, scanner))
+        return MAKE_TOKEN(e_tt_eof, scanner);
+
+    char c = scanner_advance(ctx, scanner);
+
+    if (IS_ALPHA(c))
+        return scan_id(ctx, scanner);
+    if (IS_DIGIT(c))
+        return scan_number(ctx, scanner);
+
+    switch (c) {
+    case '(':
+        return MAKE_TOKEN(e_tt_left_paren, scanner);
+    case ')':
+        return MAKE_TOKEN(e_tt_right_paren, scanner);
+    case '{':
+        return MAKE_TOKEN(e_tt_left_brace, scanner);
+    case '}':
+        return MAKE_TOKEN(e_tt_right_brace, scanner);
+    case ';':
+        return MAKE_TOKEN(e_tt_semicolon, scanner);
+    case ',':
+        return MAKE_TOKEN(e_tt_comma, scanner);
+    case '.':
+        return MAKE_TOKEN(e_tt_dot, scanner);
+    case '-':
+        return MAKE_TOKEN(e_tt_minus, scanner);
+    case '+':
+        return MAKE_TOKEN(e_tt_plus, scanner);
+    case '/':
+        return MAKE_TOKEN(e_tt_slash, scanner);
+    case '*':
+        return MAKE_TOKEN(e_tt_star, scanner);
+    case '!':
+        return MAKE_TOKEN(
+            scanner_match(ctx, '=', scanner)
+                ? e_tt_bang_equal
+                : e_tt_bang,
+            scanner);
+    case '=':
+        return MAKE_TOKEN(
+            scanner_match(ctx, '=', scanner)
+                ? e_tt_equal_equal
+                : e_tt_equal,
+            scanner);
+    case '<':
+        return MAKE_TOKEN(
+            scanner_match(ctx, '=', scanner)
+                ? e_tt_less_equal
+                : e_tt_less,
+            scanner);
+    case '>':
+        return MAKE_TOKEN(
+            scanner_match(ctx, '=', scanner)
+                ? e_tt_greater_equal
+                : e_tt_greater,
+            scanner);
+    case '"':
+        return scan_string(ctx, scanner);
+    }
+
+    return ERROR_TOKEN("Unexpected character.", scanner);
+}
+
+static void compile(ctx_t const *ctx, string_t source)
+{
+    scanner_t scanner = {source.p, source.p, source.p + source.len, 1}; 
+    int cur_line = -1;
+    for (;;) {
+        token_t tok = scan_token(ctx, &scanner);
+
+        // @TEST
+        if (tok.line != cur_line) {
+            isize chars = LOGF_NONL("%u ", tok.line);
+            for (isize i = chars; i < 6; ++i)
+                LOG_NONL(" ");
+            cur_line = tok.line;
+        } else {
+            LOG_NONL("|");
+            for (isize i = 0; i < 5; ++i)
+                LOG_NONL(" ");
+        }
+
+        {
+            isize chars = LOGF_NONL("%u", tok.type);
+            if (chars < 2)
+                LOG_NONL(" ");
+            LOGF(" %S", (string_t){(char *)tok.start, tok.len});
+        }
+
+        if (tok.type == e_tt_eof)
+            break;
+    }
+}
+
+static interp_result_t interpret(ctx_t const *ctx, vm_t *vm, string_t source)
+{
+    compile(ctx, source);
 
     (void)vm;
 
@@ -489,31 +823,40 @@ static void repl(ctx_t const *ctx, vm_t *vm)
 {
     char line[1024];
     usize buffered_chars = 0;
+    b32 eof = false;
 
-    for (;;) {
+    while (!eof || buffered_chars) {
         OUTPUT("> ");
 
-        isize chars_read = io_read(
-            ctx, &ctx->os->hstdin,
-            (u8 *)line + buffered_chars, sizeof(line) - buffered_chars);
-        if (chars_read <= 0)
-            break;
+        isize chars_read = 0;
 
+        if (!eof) {
+            chars_read = io_read(
+                ctx, &ctx->os->hstdin,
+                (u8 *)line + buffered_chars, sizeof(line) - buffered_chars);
+        }
+        if (chars_read <= 0) {
+            eof = true;
+            chars_read = 0;
+        }
+
+        buffered_chars += (usize)chars_read;
         usize line_break = 0;
-        while (line_break < (usize)chars_read && line[line_break] != '\n')
+        while (line_break < buffered_chars && line[line_break] != '\n')
             ++line_break;
 
-        if (line_break == (usize)chars_read) {
+        if (line_break == buffered_chars) {
             LOG("Max repl line is 1023 characters long");
             buffered_chars = 0;
             continue;
         }
 
         line[line_break] = '\0';
-        
-        interpret(ctx, vm, (string_t){line, (usize)line_break});
 
-        buffered_chars = (usize)chars_read - line_break - 1;
+        string_t source = {line, line_break};
+        interpret(ctx, vm, source);
+
+        buffered_chars -= line_break + 1;
         char *src = &line[line_break + 1], *dst = line;
         for (usize i = 0; i < buffered_chars; ++i)
             *dst++ = *src++;
@@ -533,7 +876,8 @@ static void run_file(ctx_t const *ctx, vm_t *vm, char const *fname)
     VERIFY(chars_read == f.len, "Failed to read script.");
     script[f.len] = '\0';
 
-    interp_result_t res = interpret(ctx, vm, (string_t){script, f.len});
+    string_t source = {script, f.len};
+    interp_result_t res = interpret(ctx, vm, source);
 
     if (res == e_interp_compile_err)
         os_exit(ctx, 70);
