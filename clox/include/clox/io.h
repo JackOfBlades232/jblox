@@ -72,7 +72,7 @@ static inline io_file_t io_read_open_file(ctx_t const *ctx, char const *fn)
     f.ioh.hnd = ctx->os->sys.create_file_a(
         fn, WIN32_GENERIC_READ, 0, NULL,
         WIN32_OPEN_EXISTING, WIN32_FILE_ATTRIBUTE_NORMAL, NULL);
-    if (!is_valid(ctx, &f.ioh))
+    if (!io_is_valid(ctx, &f.ioh))
         return f;
 
     u32 len_lo = 0, len_hi = 0;
@@ -84,8 +84,8 @@ static inline io_file_t io_read_open_file(ctx_t const *ctx, char const *fn)
 
 static inline void io_close_file(ctx_t const *ctx, io_file_t *f)
 {
-    if (io_file_is_valid(f)) {
-        ctx->os->sys.close_handle(f.ioh.hnd);
+    if (io_file_is_valid(ctx, f)) {
+        ctx->os->sys.close_handle(f->ioh.hnd);
         *f = (io_file_t){0};
     }
 }

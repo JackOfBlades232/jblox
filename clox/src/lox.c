@@ -496,14 +496,14 @@ static void repl(ctx_t const *ctx, vm_t *vm)
         isize chars_read = io_read(
             ctx, &ctx->os->hstdin,
             (u8 *)line + buffered_chars, sizeof(line) - buffered_chars);
-        if (chars_read == 0)
+        if (chars_read <= 0)
             break;
 
-        isize line_break = 0;
-        while (line_break < chars_read && line[line_break] != '\n')
+        usize line_break = 0;
+        while (line_break < (usize)chars_read && line[line_break] != '\n')
             ++line_break;
 
-        if (line_break == chars_read) {
+        if (line_break == (usize)chars_read) {
             LOG("Max repl line is 1023 characters long");
             buffered_chars = 0;
             continue;
@@ -513,7 +513,7 @@ static void repl(ctx_t const *ctx, vm_t *vm)
         
         interpret(ctx, vm, (string_t){line, (usize)line_break});
 
-        buffered_chars = chars_read - line_break - 1;
+        buffered_chars = (usize)chars_read - line_break - 1;
         char *src = &line[line_break + 1], *dst = line;
         for (usize i = 0; i < buffered_chars; ++i)
             *dst++ = *src++;
@@ -528,8 +528,8 @@ static void run_file(ctx_t const *ctx, vm_t *vm, char const *fname)
         os_exit(ctx, 65);
     }
 
-    char *script = reallocate(ctx, NULL, 0, f.len + 1);
-    usize chars_read = io_read(ctx, &f.ioh, (u8 *)script, f.len);
+    char *script = (char *)reallocate(ctx, NULL, 0, f.len + 1);
+    usize chars_read = (usize)io_read(ctx, &f.ioh, (u8 *)script, f.len);
     VERIFY(chars_read == f.len, "Failed to read script.");
     script[f.len] = '\0';
 
