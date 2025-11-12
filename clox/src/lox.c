@@ -186,7 +186,7 @@ static void print_value(ctx_t const *ctx, value_t val)
     OUTPUTF("%f", val);
 }
 
-#if DEBUG_TRACE_EXECUTION || DEBUG_DISASM
+#if DEBUG_TRACE_EXECUTION || DEBUG_PRINT_CODE
 
 static void disasm_value(ctx_t const *ctx, value_t val)
 {
@@ -283,7 +283,7 @@ static uint disasm_instruction(ctx_t const *ctx, chunk_t const *chunk, uint at)
     }
 }
 
-#if DEBUG_DISASM
+#if DEBUG_PRINT_CODE
 
 static void disasm_chunk(
     ctx_t const *ctx, chunk_t const *chunk, char const *name)
@@ -376,7 +376,7 @@ typedef enum {
     e_interp_runtime_err
 } interp_result_t;
 
-static interp_result_t run_vm(ctx_t const *ctx, vm_t *vm)
+static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
 {
 #define READ_BYTE() (*vm->ip++)
 #define READ_CONSTANT() (vm->chunk->constants.values[READ_BYTE()])
@@ -458,14 +458,6 @@ static interp_result_t run_vm(ctx_t const *ctx, vm_t *vm)
 #undef READ_CONSTANT
 #undef READ_CONSTANT_LONG
 #undef BINARY_OP
-}
-
-static interp_result_t interpret_chunk(
-    ctx_t const *ctx, vm_t *vm, chunk_t *chunk)
-{
-    vm->chunk = chunk;
-    vm->ip = chunk->code;
-    return run_vm(ctx, vm);
 }
 
 typedef enum {
@@ -775,50 +767,301 @@ static token_t scan_token(ctx_t const *ctx, scanner_t *scanner)
     return ERROR_TOKEN("Unexpected character.", scanner);
 }
 
-static void compile(ctx_t const *ctx, string_t source)
+typedef struct {
+    token_t cur;
+    token_t prev;
+    scanner_t *scanner;
+    b32 had_error;
+    b32 panic_mode;
+} parser_t;
+
+static void parser_error_at(
+    ctx_t const *ctx, token_t const *tok, char const *msg, parser_t *parser)
+{
+    if (parser->panic_mode)
+        return;
+    parser->panic_mode = true;
+    LOGF_NONL("[line %d] Error", tok->line);
+    if (tok->type == e_tt_eof)
+        LOG_NONL(" at end");
+    else if (tok->type == e_tt_error)
+        ;
+    else
+        LOGF_NONL(" at '%S'", (string_t){(char *)tok->start, (usize)tok->len});
+    LOGF(": %s", msg);
+    parser->had_error = true;
+}
+
+static void parser_error_at_current(
+    ctx_t const *ctx, char const *msg, parser_t *parser)
+{
+    parser_error_at(ctx, &parser->cur, msg, parser);
+}
+
+static void parser_error(
+    ctx_t const *ctx, char const *msg, parser_t *parser)
+{
+    parser_error_at(ctx, &parser->prev, msg, parser);
+}
+
+static void parser_advance(ctx_t const *ctx, parser_t *parser)
+{
+    parser->prev = parser->cur;
+    for (;;) {
+        parser->cur = scan_token(ctx, parser->scanner);
+        if (parser->cur.type != e_tt_error)
+            break;
+
+        parser_error_at_current(ctx, parser->cur.start, parser);
+    }
+}
+
+static void parser_consume(
+    ctx_t const *ctx, token_type_t tt, char const *err_msg, parser_t *parser)
+{
+    if (parser->cur.type == tt) {
+        parser_advance(ctx, parser);
+        return;
+    }
+
+    parser_error_at_current(ctx, err_msg, parser);
+}
+
+typedef struct {
+    parser_t *parser;
+    chunk_t *compiling_chunk;
+} compiler_t;
+
+static void emit_byte(ctx_t const *ctx, u8 byte, compiler_t *compiler)
+{
+    write_chunk(
+        ctx, compiler->compiling_chunk, byte,
+        (uint)compiler->parser->prev.line);
+}
+
+static void emit_constant(ctx_t const *ctx, value_t val, compiler_t *compiler)
+{
+    write_constant(
+        ctx, compiler->compiling_chunk, val,
+        (uint)compiler->parser->prev.line);
+}
+
+static void emit_return(ctx_t const *ctx, compiler_t *compiler)
+{
+    emit_byte(ctx, e_op_return, compiler);
+}
+
+static void end_compiler(ctx_t const *ctx, compiler_t *compiler)
+{
+    emit_return(ctx, compiler);
+#if DEBUG_PRINT_CODE
+    if (!compiler->parser->had_error)
+        DISASSEMBLE_CHUNK(compiler->compiling_chunk, "code");
+#endif
+}
+
+typedef enum {
+    e_prec_none,
+    e_prec_assignment, // =
+    e_prec_or,         // or
+    e_prec_and,        // and
+    e_prec_equality,   // == !=
+    e_prec_comparison, // < > <= >=
+    e_prec_term,       // + -
+    e_prec_factor,     // * /
+    e_prec_unary,      // ! -
+    e_prec_call,       // . ()
+    e_prec_primary
+} precedence_t;
+
+typedef void (*parse_fn_t)(ctx_t const *, compiler_t *);
+
+typedef struct {
+    parse_fn_t prefix;
+    parse_fn_t infix;
+    precedence_t precedence;
+} parse_rule_t;
+
+static void compile_number(ctx_t const *ctx, compiler_t *compiler);
+static void compile_grouping(ctx_t const *ctx, compiler_t *compiler);
+static void compile_unary(ctx_t const *ctx, compiler_t *compiler);
+static void compile_binary(ctx_t const *ctx, compiler_t *compiler);
+
+// @TODO: ternary ?: once we have 1) bools 2) branches for short circtuiting
+
+parse_rule_t const c_parse_rules[] = {
+    [e_tt_left_paren]    = {&compile_grouping, NULL,            e_prec_none},
+    [e_tt_right_paren]   = {NULL,              NULL,            e_prec_none},
+    [e_tt_left_brace]    = {NULL,              NULL,            e_prec_none}, 
+    [e_tt_right_brace]   = {NULL,              NULL,            e_prec_none},
+    [e_tt_comma]         = {NULL,              NULL,            e_prec_none},
+    [e_tt_dot]           = {NULL,              NULL,            e_prec_none},
+    [e_tt_minus]         = {&compile_unary,    &compile_binary, e_prec_term},
+    [e_tt_plus]          = {NULL,              &compile_binary, e_prec_term},
+    [e_tt_semicolon]     = {NULL,              NULL,            e_prec_none},
+    [e_tt_slash]         = {NULL,              &compile_binary, e_prec_factor},
+    [e_tt_star]          = {NULL,              &compile_binary, e_prec_factor},
+    [e_tt_bang]          = {NULL,              NULL,            e_prec_none},
+    [e_tt_bang_equal]    = {NULL,              NULL,            e_prec_none},
+    [e_tt_equal]         = {NULL,              NULL,            e_prec_none},
+    [e_tt_equal_equal]   = {NULL,              NULL,            e_prec_none},
+    [e_tt_greater]       = {NULL,              NULL,            e_prec_none},
+    [e_tt_greater_equal] = {NULL,              NULL,            e_prec_none},
+    [e_tt_less]          = {NULL,              NULL,            e_prec_none},
+    [e_tt_less_equal]    = {NULL,              NULL,            e_prec_none},
+    [e_tt_identifier]    = {NULL,              NULL,            e_prec_none},
+    [e_tt_string]        = {NULL,              NULL,            e_prec_none},
+    [e_tt_number]        = {&compile_number,   NULL,            e_prec_none},
+    [e_tt_and]           = {NULL,              NULL,            e_prec_none},
+    [e_tt_class]         = {NULL,              NULL,            e_prec_none},
+    [e_tt_else]          = {NULL,              NULL,            e_prec_none},
+    [e_tt_false]         = {NULL,              NULL,            e_prec_none},
+    [e_tt_for]           = {NULL,              NULL,            e_prec_none},
+    [e_tt_fun]           = {NULL,              NULL,            e_prec_none},
+    [e_tt_if]            = {NULL,              NULL,            e_prec_none},
+    [e_tt_nil]           = {NULL,              NULL,            e_prec_none},
+    [e_tt_or]            = {NULL,              NULL,            e_prec_none},
+    [e_tt_print]         = {NULL,              NULL,            e_prec_none},
+    [e_tt_return]        = {NULL,              NULL,            e_prec_none},
+    [e_tt_super]         = {NULL,              NULL,            e_prec_none},
+    [e_tt_this]          = {NULL,              NULL,            e_prec_none},
+    [e_tt_true]          = {NULL,              NULL,            e_prec_none},
+    [e_tt_var]           = {NULL,              NULL,            e_prec_none},
+    [e_tt_while]         = {NULL,              NULL,            e_prec_none},
+    [e_tt_error]         = {NULL,              NULL,            e_prec_none},
+    [e_tt_eof]           = {NULL,              NULL,            e_prec_none},
+};
+
+static parse_rule_t const *get_rule(ctx_t const *ctx, token_type_t tt)
+{
+    (void)ctx;
+    return &c_parse_rules[tt];
+}
+
+static void compile_precedence(
+    ctx_t const *ctx, precedence_t prec, compiler_t *compiler)
+{
+    parser_advance(ctx, compiler->parser);
+    parse_fn_t prefix_rule = get_rule(ctx, compiler->parser->prev.type)->prefix;
+    if (!prefix_rule) {
+        parser_error(ctx, "Expected expression.", compiler->parser);
+        return;
+    }
+
+    prefix_rule(ctx, compiler);
+
+    while (prec < get_rule(ctx, compiler->parser->cur.type)->precedence) {
+        parser_advance(ctx, compiler->parser);
+        parse_fn_t infix_rule =
+            get_rule(ctx, compiler->parser->prev.type)->infix;
+        infix_rule(ctx, compiler);
+    }
+}
+
+static void compile_number(ctx_t const *ctx, compiler_t *compiler)
+{
+    char const *str = compiler->parser->prev.start;
+    f64 num = 0.0;
+    while (IS_DIGIT(*str))
+        num = num * 10.0 + (f64)(*str++ - '0');
+    if (*str++ == '.') {
+        f64 frac = 0.0, mul = 0.1;
+        while (IS_DIGIT(*str)) {
+            frac += mul * (f64)(*str++ - '0');
+            mul *= 0.1f;
+        }
+        num += frac;
+    }
+
+    emit_constant(ctx, num, compiler);
+}
+
+static void compile_expression(ctx_t const *ctx, compiler_t *compiler)
+{
+    compile_precedence(ctx, e_prec_assignment, compiler);
+}
+
+static void compile_grouping(ctx_t const *ctx, compiler_t *compiler)
+{
+    compile_expression(ctx, compiler);
+    parser_consume(
+        ctx, e_tt_right_paren, "Expect ')' after expression.",
+        compiler->parser);
+}
+
+static void compile_unary(ctx_t const *ctx, compiler_t *compiler)
+{
+    token_type_t tt = compiler->parser->prev.type;
+
+    compile_precedence(ctx, e_prec_unary, compiler);
+
+    switch (tt) {
+    case e_tt_minus:
+        emit_byte(ctx, e_op_negate, compiler);
+        break;
+    default:
+        ASSERT(0);
+        break;
+    }
+}
+
+static void compile_binary(ctx_t const *ctx, compiler_t *compiler)
+{
+    token_type_t tt = compiler->parser->prev.type;
+    parse_rule_t const *rule = get_rule(ctx, tt);
+    compile_precedence(ctx, (precedence_t)(rule->precedence + 1), compiler);
+
+    switch (tt) {
+    case e_tt_plus:
+        emit_byte(ctx, e_op_add, compiler);
+        break;
+    case e_tt_minus:
+        emit_byte(ctx, e_op_subtract, compiler);
+        break;
+    case e_tt_star:
+        emit_byte(ctx, e_op_multiply, compiler);
+        break;
+    case e_tt_slash:
+        emit_byte(ctx, e_op_divide, compiler);
+        break;
+    default:
+        ASSERT(0);
+        break;
+    }
+}
+
+static b32 compile(ctx_t const *ctx, string_t source, chunk_t *chunk)
 {
     scanner_t scanner = {source.p, source.p, source.p + source.len, 1}; 
-    int cur_line = -1;
-    for (;;) {
-        token_t tok = scan_token(ctx, &scanner);
+    parser_t parser = {{0}, {0}, &scanner, false, false};
+    compiler_t compiler = {&parser, chunk};
 
-        // @TEST
-        if (tok.line != cur_line) {
-            isize chars = LOGF_NONL("%u ", tok.line);
-            for (isize i = chars; i < 6; ++i)
-                LOG_NONL(" ");
-            cur_line = tok.line;
-        } else {
-            LOG_NONL("|");
-            for (isize i = 0; i < 5; ++i)
-                LOG_NONL(" ");
-        }
+    parser_advance(ctx, &parser);
+    compile_expression(ctx, &compiler);
+    parser_consume(ctx, e_tt_eof, "Expected end of expression.", &parser);
+    end_compiler(ctx, &compiler);
 
-        {
-            isize chars = LOGF_NONL("%u", tok.type);
-            if (chars < 2)
-                LOG_NONL(" ");
-            LOGF(" %S", (string_t){(char *)tok.start, tok.len});
-        }
-
-        if (tok.type == e_tt_eof)
-            break;
-    }
+    return !parser.had_error;
 }
 
 static interp_result_t interpret(ctx_t const *ctx, vm_t *vm, string_t source)
 {
-    compile(ctx, source);
+    chunk_t chunk = make_chunk(ctx);
 
-    (void)vm;
+    if (!compile(ctx, source, &chunk)) {
+        free_chunk(ctx, &chunk);
+        return e_interp_compile_err;
+    }
 
-    (void)interpret_chunk;
-    (void)disasm_chunk;
+    vm->chunk = &chunk;
+    vm->ip = chunk.code;
 
-    return e_interp_ok;
+    interp_result_t res = run_chunk(ctx, vm);
+
+    free_chunk(ctx, &chunk);
+    return res;
 }
 
-// @TODO: fix for files with <
 static void repl(ctx_t const *ctx, vm_t *vm)
 {
     char line[1024];
@@ -838,6 +1081,8 @@ static void repl(ctx_t const *ctx, vm_t *vm)
         if (chars_read <= 0) {
             eof = true;
             chars_read = 0;
+            if (buffered_chars == 0)
+                break;
         }
 
         buffered_chars += (usize)chars_read;
@@ -878,6 +1123,8 @@ static void run_file(ctx_t const *ctx, vm_t *vm, char const *fname)
 
     string_t source = {script, f.len};
     interp_result_t res = interpret(ctx, vm, source);
+
+    reallocate(ctx, script, f.len + 1, 0);
 
     if (res == e_interp_compile_err)
         os_exit(ctx, 70);

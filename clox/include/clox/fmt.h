@@ -88,13 +88,13 @@ static inline usize fmt_sprint_double(
             f >>= -e;
     }
 
-    usize len = 0;
+    usize off = 0;
     if (buf && bufsize && s) {
         *buf++ = '-';
         --bufsize;
-        ++len;
+        ++off;
     }
-    len += FMT_SPRINT_INT(buf, bufsize, (i64)w);
+    usize len = FMT_SPRINT_INT(buf, bufsize, (i64)w);
     if (f && len < bufsize) {
         buf[len++] = '.';
         uint significant_digits = 15;
@@ -106,7 +106,7 @@ static inline usize fmt_sprint_double(
         }
     }
     
-    return len;
+    return len + off;
 }
 
 static inline usize fmt_sprint_ptr(
