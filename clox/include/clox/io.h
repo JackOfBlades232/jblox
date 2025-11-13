@@ -116,14 +116,20 @@ static inline void io_close_file(ctx_t const *ctx, io_file_t *f)
 
 #endif
 
-static inline isize fmt_print(ctx_t const *ctx,
-    io_handle_t *hnd, char const *fmt, ...)
+static inline isize fmt_vprint(
+    ctx_t const *ctx, io_handle_t *hnd, char const *fmt, VA_LIST args)
 {
     char buf[256]; // Lazy...
+    usize chars = (usize)fmt_vsprint(ctx, buf, sizeof(buf), fmt, args);
+    return io_write(ctx, hnd, (u8 const *)buf, chars);
+}
+
+static inline isize fmt_print(
+    ctx_t const *ctx, io_handle_t *hnd, char const *fmt, ...)
+{
     VA_LIST args;
     VA_START(args, fmt);
-    usize chars = (usize)fmt_vsprint(ctx, buf, sizeof(buf), fmt, args);
-    isize written_chars = io_write(ctx, hnd, (u8 const *)buf, chars);
+    isize written_chars = fmt_vprint(ctx, hnd, fmt, args);
     VA_END(args);
     return written_chars;
 }

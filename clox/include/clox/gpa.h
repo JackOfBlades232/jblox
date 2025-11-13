@@ -71,7 +71,7 @@ static inline void *gpa_allocate(ctx_t const *ctx, gpa_t *gpa, usize bytes)
 
 static inline void gpa_deallocate(ctx_t const *ctx, gpa_t *gpa, void const *p)
 {
-    (void)ctx;
+    ASSERT(p);
     gpa_allocated_header_t *alloc =
         (gpa_allocated_header_t *)((u8 *)p - GPA_ALIGNMENT);
     usize size = alloc->size;

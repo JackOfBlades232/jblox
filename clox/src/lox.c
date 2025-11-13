@@ -37,17 +37,78 @@ static inline void *reallocate(
     reallocate(ctx, (ptr_), sizeof(type_) * (cap_), 0)
 
 typedef enum {
+    e_vt_bool,
+    e_vt_nil,
+    e_vt_number,
+} value_type_t;
+
+typedef struct {
+    value_type_t type;
+    union {
+        b32 boolean;
+        f64 number;
+    } as;
+} value_t;
+
+#define IS_BOOL(value_)    ((value_).type == e_vt_bool)
+#define IS_NIL(value_)     ((value_).type == e_vt_nil)
+#define IS_NUMBER(value_)  ((value_).type == e_vt_number)
+
+#define AS_BOOL(value_)    ((value_).as.boolean)
+#define AS_NUMBER(value_)  ((value_).as.number)
+
+#define BOOL_VAL(value_)   ((value_t){e_vt_bool,   {.boolean = (value_)}})
+#define NIL_VAL            ((value_t){e_vt_nil,    {.number  = 0.0     }})
+#define NUMBER_VAL(value_) ((value_t){e_vt_number, {.number  = (value_)}})
+
+static b32 is_truthy(ctx_t const *ctx, value_t val)
+{
+    (void)ctx;
+    return !IS_NIL(val) && (!IS_BOOL(val) || AS_BOOL(val));
+}
+
+static b32 is_falsey(ctx_t const *ctx, value_t val)
+{
+    (void)ctx;
+    return !is_truthy(ctx, val);
+}
+
+static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
+{
+    (void)ctx;
+    if (v1.type != v2.type)
+        return false;
+
+    switch (v1.type) {
+    case e_vt_bool:
+        return AS_BOOL(v1) == AS_BOOL(v2);
+    case e_vt_nil:
+        return true;
+    case e_vt_number:
+        return ABS(AS_NUMBER(v1) - AS_NUMBER(v2)) < 1e-16;
+    }
+}
+
+typedef enum {
     e_op_constant,
     e_op_constant_long,
+    e_op_nil,
+    e_op_true,
+    e_op_false,
+    e_op_eq,
+    e_op_neq,
+    e_op_gt,
+    e_op_ge,
+    e_op_lt,
+    e_op_le,
     e_op_add,
     e_op_subtract,
     e_op_multiply,
     e_op_divide,
+    e_op_not,
     e_op_negate,
     e_op_return,
 } opcode_t;
-
-typedef f64 value_t;
 
 typedef struct {
     uint cnt, cap;
@@ -74,6 +135,8 @@ static inline void write_value_array(
 
 static inline void free_value_array(ctx_t const *ctx, value_array_t *arr)
 {
+    if (!arr || !arr->values)
+        return;
     FREE_ARRAY(value_t, arr->values, arr->cap);
     *arr = make_value_array(ctx);
 }
@@ -109,6 +172,8 @@ static inline void write_line_info(
 
 static inline void free_line_info(ctx_t const *ctx, line_info_t *info)
 {
+    if (!info || !info->entries)
+        return;
     FREE_ARRAY(value_t, info->entries, info->cap);
     *info = make_line_info(ctx);
 }
@@ -175,7 +240,10 @@ static inline void write_constant(
 
 static inline void free_chunk(ctx_t const *ctx, chunk_t *chunk)
 {
-    FREE_ARRAY(u8, chunk->code, chunk->cap);
+    if (!chunk)
+        return;
+    if (chunk->code)
+        FREE_ARRAY(u8, chunk->code, chunk->cap);
     free_value_array(ctx, &chunk->constants);
     free_line_info(ctx, &chunk->lines);
     *chunk = make_chunk(ctx);
@@ -183,14 +251,34 @@ static inline void free_chunk(ctx_t const *ctx, chunk_t *chunk)
 
 static void print_value(ctx_t const *ctx, value_t val)
 {
-    OUTPUTF("%f", val);
+    switch (val.type) {
+    case e_vt_bool:
+        OUTPUTF("%s", AS_BOOL(val) ? "true" : "false");
+        break;
+    case e_vt_nil:
+        OUTPUT("nil");
+        break;
+    case e_vt_number:
+        OUTPUTF("%f", AS_NUMBER(val));
+        break;
+    }
 }
 
 #if DEBUG_TRACE_EXECUTION || DEBUG_PRINT_CODE
 
 static void disasm_value(ctx_t const *ctx, value_t val)
 {
-    LOGF_NONL("%f", val);
+    switch (val.type) {
+    case e_vt_bool:
+        LOGF_NONL("%s", AS_BOOL(val) ? "true" : "false");
+        break;
+    case e_vt_nil:
+        LOG_NONL("nil");
+        break;
+    case e_vt_number:
+        LOGF_NONL("%f", AS_NUMBER(val));
+        break;
+    }
 }
 
 static uint disasm_simple_instruction(
@@ -259,9 +347,33 @@ static uint disasm_instruction(ctx_t const *ctx, chunk_t const *chunk, uint at)
     case e_op_constant_long:
         return disasm_long_constant_instruction(
             ctx, "OP_CONSTANT_LONG", chunk, at);
-    case e_op_negate:
+    case e_op_nil:
         return disasm_simple_instruction(
-            ctx, "OP_NEGATE", at);
+            ctx, "OP_NIL", at);
+    case e_op_true:
+        return disasm_simple_instruction(
+            ctx, "OP_TRUE", at);
+    case e_op_false:
+        return disasm_simple_instruction(
+            ctx, "OP_FALSE", at);
+    case e_op_eq:
+        return disasm_simple_instruction(
+            ctx, "OP_EQ", at);
+    case e_op_neq:
+        return disasm_simple_instruction(
+            ctx, "OP_NEQ", at);
+    case e_op_gt:
+        return disasm_simple_instruction(
+            ctx, "OP_GT", at);
+    case e_op_ge:
+        return disasm_simple_instruction(
+            ctx, "OP_GE", at);
+    case e_op_lt:
+        return disasm_simple_instruction(
+            ctx, "OP_LT", at);
+    case e_op_le:
+        return disasm_simple_instruction(
+            ctx, "OP_LE", at);
     case e_op_add:
         return disasm_simple_instruction(
             ctx, "OP_ADD", at);
@@ -274,6 +386,12 @@ static uint disasm_instruction(ctx_t const *ctx, chunk_t const *chunk, uint at)
     case e_op_divide:
         return disasm_simple_instruction(
             ctx, "OP_DIVIDE", at);
+    case e_op_not:
+        return disasm_simple_instruction(
+            ctx, "OP_NOT", at);
+    case e_op_negate:
+        return disasm_simple_instruction(
+            ctx, "OP_NEGATE", at);
     case e_op_return:
         return disasm_simple_instruction(
             ctx, "OP_RETURN", at);
@@ -316,14 +434,14 @@ typedef struct vm {
     u8 *ip;
     vm_stack_segment_t stack;
     vm_stack_segment_t *cur_stack_seg; 
-    value_t *stack_top;
+    value_t *stack_head;
 } vm_t;
 
 static void reset_stack(ctx_t const *ctx, vm_t *vm)
 {
     (void)ctx;
     vm->cur_stack_seg = &vm->stack;
-    vm->stack_top = vm->stack.values;
+    vm->stack_head = vm->stack.values;
 }
 
 static void init_vm(ctx_t const *ctx, vm_t *vm)
@@ -340,34 +458,55 @@ static void init_vm(ctx_t const *ctx, vm_t *vm)
         new_seg_->prev = (vm_)->cur_stack_seg;                 \
         new_seg_->next = NULL;                                 \
         (vm_)->cur_stack_seg = new_seg_;                       \
-        (vm_)->stack_top = new_seg_->values;                   \
+        (vm_)->stack_head = new_seg_->values;                   \
     } while (0)
 
 #define POP_STACK_SEG(vm_)                                        \
     do {                                                          \
-        ASSERT((vm_)->cur_stack_seg->prev);                       \
         vm_stack_segment_t *old_seg_ = (vm_)->cur_stack_seg;      \
         (vm_)->cur_stack_seg = old_seg_->prev;                    \
         (vm_)->cur_stack_seg->next = NULL;                        \
         reallocate(ctx, old_seg_, sizeof(vm_stack_segment_t), 0); \
-        (vm_)->stack_top =                                        \
+        (vm_)->stack_head =                                        \
             (vm_)->cur_stack_seg->values + VM_STACK_SEGMENT_SIZE; \
     } while (0)
 
 static void push_stack(ctx_t const *ctx, vm_t *vm, value_t val)
 {
-    if (vm->stack_top - vm->cur_stack_seg->values >= VM_STACK_SEGMENT_SIZE)
+    if (vm->stack_head - vm->cur_stack_seg->values >= VM_STACK_SEGMENT_SIZE)
         PUSH_STACK_SEG(vm);
 
-    *vm->stack_top++ = val;
+    *vm->stack_head++ = val;
 }
 
 static value_t pop_stack(ctx_t const *ctx, vm_t *vm)
 {
-    if (vm->stack_top == vm->cur_stack_seg->values)
+    ASSERT(vm->stack_head > vm->cur_stack_seg->values);
+    value_t res = *(--vm->stack_head);
+
+    if (vm->stack_head == vm->cur_stack_seg->values && vm->cur_stack_seg->prev)
         POP_STACK_SEG(vm);
 
-    return *(--vm->stack_top);
+    return res;
+}
+
+#define STACK_TOP(vm_) (*(vm->stack_head - 1))
+
+static value_t peek_stack(ctx_t const *ctx, vm_t const *vm, int dist)
+{
+    (void)ctx;
+    if (dist == 0)
+        return STACK_TOP(vm);
+
+    value_t const *p = vm->stack_head - 1;
+    vm_stack_segment_t const *s = vm->cur_stack_seg;
+    while (s && p - s->values < dist) {
+        dist -= (p - s->values);
+        s = s->prev;
+        p = &s->values[VM_STACK_SEGMENT_SIZE - 1];
+    }
+    ASSERT(s);
+    return p[-dist];
 }
 
 typedef enum {
@@ -376,6 +515,27 @@ typedef enum {
     e_interp_runtime_err
 } interp_result_t;
 
+static void runtime_error(ctx_t const *ctx, vm_t *vm, char const *fmt, ...)
+{
+    VA_LIST args;
+    VA_START(args, fmt);
+    fmt_vprint(ctx, &ctx->os->hstderr, fmt, args);
+    VA_END(args);
+
+    uint instr = (uint)(vm->ip - vm->chunk->code - 1);
+    uint line = 0;
+    for (usize i = 0; i < vm->chunk->lines.cnt; ++i) {
+        if (instr < vm->chunk->lines.entries[i].instr_range_end) {
+            line = vm->chunk->lines.entries[i].line;
+            break;
+        }
+    }
+
+    LOGF("\n[line %d] in script", line);
+
+    reset_stack(ctx, vm);
+}
+
 static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
 {
 #define READ_BYTE() (*vm->ip++)
@@ -383,10 +543,15 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
 #define READ_CONSTANT_LONG()     \
     (vm->chunk->constants.values \
         [(u32)READ_BYTE() | ((u32)READ_BYTE() << 8) | ((u32)READ_BYTE() << 16)])
-#define BINARY_OP(op_) \
-    do {                                                    \
-        f64 b_ = pop_stack(ctx, vm);                        \
-        *(vm->stack_top - 1) = *(vm->stack_top - 1) op_ b_; \
+#define BINARY_OP(op_, vt_)                                      \
+    do {                                                         \
+        if (!IS_NUMBER(peek_stack(ctx, vm, 0)) ||                \
+            !IS_NUMBER(peek_stack(ctx, vm, 1))) {                \
+            runtime_error(ctx, vm, "Operands must be numbers."); \
+            return e_interp_runtime_err;                         \
+        }                                                        \
+        f64 b_ = AS_NUMBER(pop_stack(ctx, vm));                  \
+        STACK_TOP(vm) = vt_(AS_NUMBER(STACK_TOP(vm)) op_ b_);    \
     } while (0)
 
     for (;;) {
@@ -397,7 +562,7 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
                 value_t const
                     *slot = seg->values,
                     *end = seg == vm->cur_stack_seg
-                        ? vm->stack_top
+                        ? vm->stack_head
                         : seg->values + VM_STACK_SEGMENT_SIZE;
                 slot < end;
                 ++slot)
@@ -417,33 +582,70 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
             value_t constant = READ_CONSTANT();
             push_stack(ctx, vm, constant);
         } break;
-
         case e_op_constant_long: {
             value_t constant = READ_CONSTANT_LONG();
             push_stack(ctx, vm, constant);
         } break;
 
+        case e_op_nil:
+            push_stack(ctx, vm, NIL_VAL);
+            break;
+        case e_op_true:
+            push_stack(ctx, vm, BOOL_VAL(true));
+            break;
+        case e_op_false:
+            push_stack(ctx, vm, BOOL_VAL(false));
+            break;
+
+        case e_op_eq: {
+            value_t b = pop_stack(ctx, vm);
+            STACK_TOP(vm) = BOOL_VAL(are_equal(ctx, STACK_TOP(vm), b));
+        } break;
+        case e_op_neq: {
+            value_t b = pop_stack(ctx, vm);
+            STACK_TOP(vm) = BOOL_VAL(!are_equal(ctx, STACK_TOP(vm), b));
+        } break;
+
+        case e_op_gt:
+            BINARY_OP(>, BOOL_VAL);
+            break;
+        case e_op_ge:
+            BINARY_OP(>=, BOOL_VAL);
+            break;
+        case e_op_lt:
+            BINARY_OP(<, BOOL_VAL);
+            break;
+        case e_op_le:
+            BINARY_OP(<=, BOOL_VAL);
+            break;
         case e_op_add:
-            BINARY_OP(+);
+            BINARY_OP(+, NUMBER_VAL);
             break;
-
         case e_op_subtract:
-            BINARY_OP(-);
+            BINARY_OP(-, NUMBER_VAL);
             break;
-
         case e_op_multiply:
-            BINARY_OP(*);
+            BINARY_OP(*, NUMBER_VAL);
             break;
-
         case e_op_divide:
-            BINARY_OP(/); // @TODO: zero div check
+            BINARY_OP(/, NUMBER_VAL); // @TODO: zero div check
             break;
 
+        case e_op_not:
+            STACK_TOP(vm) = BOOL_VAL(is_falsey(ctx, STACK_TOP(vm)));
+            break;
         case e_op_negate:
-            *(vm->stack_top - 1) = -*(vm->stack_top - 1);
+            if (!IS_NUMBER(STACK_TOP(vm))) {
+                runtime_error(ctx, vm, "Operand must be a number.");
+                return e_interp_runtime_err;
+            }
+            STACK_TOP(vm) = NUMBER_VAL(-AS_NUMBER(STACK_TOP(vm)));
             break;
 
         case e_op_return:
+#if DEBUG_TRACE_EXECUTION
+            LOG("");
+#endif
             print_value(ctx, pop_stack(ctx, vm));
             OUTPUT("\n");
             return e_interp_ok;
@@ -869,8 +1071,8 @@ typedef enum {
     e_prec_assignment, // =
     e_prec_or,         // or
     e_prec_and,        // and
-    e_prec_equality,   // == !=
-    e_prec_comparison, // < > <= >=
+    e_prec_eql,        // == !=
+    e_prec_cmp,        // < > <= >=
     e_prec_term,       // + -
     e_prec_factor,     // * /
     e_prec_unary,      // ! -
@@ -887,6 +1089,7 @@ typedef struct {
 } parse_rule_t;
 
 static void compile_number(ctx_t const *ctx, compiler_t *compiler);
+static void compile_literal(ctx_t const *ctx, compiler_t *compiler);
 static void compile_grouping(ctx_t const *ctx, compiler_t *compiler);
 static void compile_unary(ctx_t const *ctx, compiler_t *compiler);
 static void compile_binary(ctx_t const *ctx, compiler_t *compiler);
@@ -905,31 +1108,31 @@ parse_rule_t const c_parse_rules[] = {
     [e_tt_semicolon]     = {NULL,              NULL,            e_prec_none},
     [e_tt_slash]         = {NULL,              &compile_binary, e_prec_factor},
     [e_tt_star]          = {NULL,              &compile_binary, e_prec_factor},
-    [e_tt_bang]          = {NULL,              NULL,            e_prec_none},
-    [e_tt_bang_equal]    = {NULL,              NULL,            e_prec_none},
+    [e_tt_bang]          = {&compile_unary,    NULL,            e_prec_none},
+    [e_tt_bang_equal]    = {NULL,              &compile_binary, e_prec_eql},
     [e_tt_equal]         = {NULL,              NULL,            e_prec_none},
-    [e_tt_equal_equal]   = {NULL,              NULL,            e_prec_none},
-    [e_tt_greater]       = {NULL,              NULL,            e_prec_none},
-    [e_tt_greater_equal] = {NULL,              NULL,            e_prec_none},
-    [e_tt_less]          = {NULL,              NULL,            e_prec_none},
-    [e_tt_less_equal]    = {NULL,              NULL,            e_prec_none},
+    [e_tt_equal_equal]   = {NULL,              &compile_binary, e_prec_eql},
+    [e_tt_greater]       = {NULL,              &compile_binary, e_prec_cmp},
+    [e_tt_greater_equal] = {NULL,              &compile_binary, e_prec_cmp},
+    [e_tt_less]          = {NULL,              &compile_binary, e_prec_cmp},
+    [e_tt_less_equal]    = {NULL,              &compile_binary, e_prec_cmp},
     [e_tt_identifier]    = {NULL,              NULL,            e_prec_none},
     [e_tt_string]        = {NULL,              NULL,            e_prec_none},
     [e_tt_number]        = {&compile_number,   NULL,            e_prec_none},
     [e_tt_and]           = {NULL,              NULL,            e_prec_none},
     [e_tt_class]         = {NULL,              NULL,            e_prec_none},
     [e_tt_else]          = {NULL,              NULL,            e_prec_none},
-    [e_tt_false]         = {NULL,              NULL,            e_prec_none},
+    [e_tt_false]         = {&compile_literal,  NULL,            e_prec_none},
     [e_tt_for]           = {NULL,              NULL,            e_prec_none},
     [e_tt_fun]           = {NULL,              NULL,            e_prec_none},
     [e_tt_if]            = {NULL,              NULL,            e_prec_none},
-    [e_tt_nil]           = {NULL,              NULL,            e_prec_none},
+    [e_tt_nil]           = {&compile_literal,  NULL,            e_prec_none},
     [e_tt_or]            = {NULL,              NULL,            e_prec_none},
     [e_tt_print]         = {NULL,              NULL,            e_prec_none},
     [e_tt_return]        = {NULL,              NULL,            e_prec_none},
     [e_tt_super]         = {NULL,              NULL,            e_prec_none},
     [e_tt_this]          = {NULL,              NULL,            e_prec_none},
-    [e_tt_true]          = {NULL,              NULL,            e_prec_none},
+    [e_tt_true]          = {&compile_literal,  NULL,            e_prec_none},
     [e_tt_var]           = {NULL,              NULL,            e_prec_none},
     [e_tt_while]         = {NULL,              NULL,            e_prec_none},
     [e_tt_error]         = {NULL,              NULL,            e_prec_none},
@@ -977,7 +1180,24 @@ static void compile_number(ctx_t const *ctx, compiler_t *compiler)
         num += frac;
     }
 
-    emit_constant(ctx, num, compiler);
+    emit_constant(ctx, NUMBER_VAL(num), compiler);
+}
+
+static void compile_literal(ctx_t const *ctx, compiler_t *compiler)
+{
+    switch (compiler->parser->prev.type) {
+    case e_tt_false:
+        emit_byte(ctx, e_op_false, compiler);
+        break;
+    case e_tt_nil:
+        emit_byte(ctx, e_op_nil, compiler);
+        break;
+    case e_tt_true:
+        emit_byte(ctx, e_op_true, compiler);
+        break;
+    default:
+        return;
+    }
 }
 
 static void compile_expression(ctx_t const *ctx, compiler_t *compiler)
@@ -1000,6 +1220,9 @@ static void compile_unary(ctx_t const *ctx, compiler_t *compiler)
     compile_precedence(ctx, e_prec_unary, compiler);
 
     switch (tt) {
+    case e_tt_bang:
+        emit_byte(ctx, e_op_not, compiler);
+        break;
     case e_tt_minus:
         emit_byte(ctx, e_op_negate, compiler);
         break;
@@ -1016,6 +1239,24 @@ static void compile_binary(ctx_t const *ctx, compiler_t *compiler)
     compile_precedence(ctx, (precedence_t)(rule->precedence + 1), compiler);
 
     switch (tt) {
+    case e_tt_bang_equal:
+        emit_byte(ctx, e_op_neq, compiler);
+        break;
+    case e_tt_equal_equal:
+        emit_byte(ctx, e_op_eq, compiler);
+        break;
+    case e_tt_greater:
+        emit_byte(ctx, e_op_gt, compiler);
+        break;
+    case e_tt_greater_equal:
+        emit_byte(ctx, e_op_ge, compiler);
+        break;
+    case e_tt_less:
+        emit_byte(ctx, e_op_lt, compiler);
+        break;
+    case e_tt_less_equal:
+        emit_byte(ctx, e_op_le, compiler);
+        break;
     case e_tt_plus:
         emit_byte(ctx, e_op_add, compiler);
         break;

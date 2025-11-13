@@ -32,6 +32,7 @@ static int common_main(ctx_t const *ctx)
 
 // Ugh
 int _fltused=0;
+void __chkstk(void) {}
 
 typedef struct win32_list_entry {
     struct win32_list_entry *flink;

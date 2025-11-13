@@ -19,6 +19,7 @@ if (MSVC)
         -Wno-declaration-after-statement -Wno-pre-c11-compat -Wno-padded
         -Wno-class-varargs -Wno-implicit-int-enum-cast -Wno-switch-enum
         -Wno-cast-align -Wno-cast-qual -Wno-bad-function-cast
+        -Wno-switch-default
         -Wno-reserved-identifier -Wno-missing-variable-declarations
         -nostdinc -fno-builtin -fno-builtin-memcpy -fno-builtin-memset
         -fno-ident)
