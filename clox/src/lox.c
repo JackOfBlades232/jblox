@@ -564,6 +564,7 @@ static void skip_ws(ctx_t const *ctx, scanner_t *scanner)
             } else {
                 return;
             }
+            break;
         default:
             return;
         }
@@ -762,6 +763,9 @@ static token_t scan_token(ctx_t const *ctx, scanner_t *scanner)
             scanner);
     case '"':
         return scan_string(ctx, scanner);
+    default:
+        ASSERT(0);
+        break;
     }
 
     return ERROR_TOKEN("Unexpected character.", scanner);
@@ -968,7 +972,7 @@ static void compile_number(ctx_t const *ctx, compiler_t *compiler)
         f64 frac = 0.0, mul = 0.1;
         while (IS_DIGIT(*str)) {
             frac += mul * (f64)(*str++ - '0');
-            mul *= 0.1f;
+            mul *= 0.1;
         }
         num += frac;
     }
@@ -1033,8 +1037,12 @@ static void compile_binary(ctx_t const *ctx, compiler_t *compiler)
 static b32 compile(ctx_t const *ctx, string_t source, chunk_t *chunk)
 {
     scanner_t scanner = {source.p, source.p, source.p + source.len, 1}; 
-    parser_t parser = {{0}, {0}, &scanner, false, false};
-    compiler_t compiler = {&parser, chunk};
+    parser_t parser = {0};
+    compiler_t compiler = {0};
+
+    parser.scanner = &scanner;
+    compiler.parser = &parser;
+    compiler.compiling_chunk = chunk;
 
     parser_advance(ctx, &parser);
     compile_expression(ctx, &compiler);
