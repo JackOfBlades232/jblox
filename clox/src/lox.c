@@ -29,6 +29,10 @@ static inline void *reallocate(
     return res;
 }
 
+#define ALLOCATE(type_, count_) \
+    (type_ *)reallocate(ctx, NULL, 0, sizeof(type_) * (count_))
+#define FREE(ptr_) reallocate(ctx, ptr_, 0, 0)
+
 #define GROW_CAP(cap_) ((cap_) < 8 ? 8 : 2 * (cap_))
 #define GROW_ARRAY(type_, ptr_, oldcap_, newcap_) \
     (type_ *)reallocate(                          \
@@ -40,26 +44,34 @@ typedef enum {
     e_vt_bool,
     e_vt_nil,
     e_vt_number,
+    e_vt_obj,
 } value_type_t;
+
+typedef struct obj obj_t;
+typedef struct obj_string obj_string_t;
 
 typedef struct {
     value_type_t type;
     union {
         b32 boolean;
         f64 number;
+        obj_t *obj;
     } as;
 } value_t;
 
 #define IS_BOOL(value_)    ((value_).type == e_vt_bool)
 #define IS_NIL(value_)     ((value_).type == e_vt_nil)
 #define IS_NUMBER(value_)  ((value_).type == e_vt_number)
+#define IS_OBJ(value_)     ((value_).type == e_vt_obj)
 
 #define AS_BOOL(value_)    ((value_).as.boolean)
 #define AS_NUMBER(value_)  ((value_).as.number)
+#define AS_OBJ(value_)     ((value_).as.obj)
 
 #define BOOL_VAL(value_)   ((value_t){e_vt_bool,   {.boolean = (value_)}})
 #define NIL_VAL            ((value_t){e_vt_nil,    {.number  = 0.0     }})
 #define NUMBER_VAL(value_) ((value_t){e_vt_number, {.number  = (value_)}})
+#define OBJ_VAL(value_)    ((value_t){e_vt_obj,    {.obj     = (value_)}})
 
 static b32 is_truthy(ctx_t const *ctx, value_t val)
 {
@@ -72,6 +84,40 @@ static b32 is_falsey(ctx_t const *ctx, value_t val)
     (void)ctx;
     return !is_truthy(ctx, val);
 }
+
+typedef enum {
+    e_ot_string,
+} obj_type_t;
+
+typedef struct obj {
+    obj_type_t type;
+    struct obj *next;
+} obj_t;
+
+typedef enum {
+    e_st_allocated,
+    e_st_ref
+} obj_string_type_t;
+
+typedef struct obj_string {
+    obj_t obj;
+    obj_string_type_t type;
+    string_t s;
+} obj_string_t;
+
+static inline b32 is_obj_type(ctx_t const *ctx, value_t val, obj_type_t ot)
+{
+    (void)ctx;
+    return IS_OBJ(val) && AS_OBJ(val)->type == ot;
+}
+
+#define OBJ_TYPE(value_)      (AS_OBJ(value_)->type)
+
+#define IS_STRING(value_)     (is_obj_type(ctx, (value_), e_ot_string))
+
+#define AS_STRING_OBJ(value_) ((obj_string_t *)AS_OBJ(value_))
+#define AS_STRING(value_)     (((obj_string_t *)AS_OBJ(value_))->s)
+#define AS_CSTRING(value_)    (((obj_string_t *)AS_OBJ(value_))->s.p)
 
 static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
 {
@@ -86,6 +132,11 @@ static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
         return true;
     case e_vt_number:
         return ABS(AS_NUMBER(v1) - AS_NUMBER(v2)) < 1e-16;
+    case e_vt_obj: {
+        ASSERT(IS_STRING(v1));
+        ASSERT(IS_STRING(v2));
+        return string_eq(AS_STRING(v1), AS_STRING(v2));
+    } break;
     }
 }
 
@@ -249,6 +300,15 @@ static inline void free_chunk(ctx_t const *ctx, chunk_t *chunk)
     *chunk = make_chunk(ctx);
 }
 
+static void print_obj(ctx_t const *ctx, io_handle_t *hnd, value_t val)
+{
+    switch (OBJ_TYPE(val)) {
+    case e_ot_string:
+        fmt_print(ctx, hnd, "%S", AS_STRING(val));
+        break;
+    }
+}
+
 static void print_value(ctx_t const *ctx, value_t val)
 {
     switch (val.type) {
@@ -260,6 +320,9 @@ static void print_value(ctx_t const *ctx, value_t val)
         break;
     case e_vt_number:
         OUTPUTF("%f", AS_NUMBER(val));
+        break;
+    case e_vt_obj:
+        print_obj(ctx, &ctx->os->hstdout, val);
         break;
     }
 }
@@ -277,6 +340,9 @@ static void disasm_value(ctx_t const *ctx, value_t val)
         break;
     case e_vt_number:
         LOGF_NONL("%f", AS_NUMBER(val));
+        break;
+    case e_vt_obj:
+        print_obj(ctx, &ctx->os->hstderr, val);
         break;
     }
 }
@@ -435,7 +501,35 @@ typedef struct vm {
     vm_stack_segment_t stack;
     vm_stack_segment_t *cur_stack_seg; 
     value_t *stack_head;
+    obj_t *objects;
 } vm_t;
+
+static inline obj_t *allocate_obj(
+    ctx_t const *ctx, vm_t *vm, usize sz, obj_type_t ot)
+{
+    ASSERT(sz > sizeof(obj_t));
+    obj_t *obj = (obj_t *)reallocate(ctx, NULL, 0, sz);
+    obj->type = ot;
+    obj->next = vm->objects;
+    vm->objects = obj;
+    return obj;
+}
+
+static inline obj_t *allocate_string(ctx_t const *ctx, vm_t *vm, usize len)
+{
+    obj_t *obj = allocate_obj(
+        ctx, vm, sizeof(obj_string_t) + len + 1, e_ot_string);
+    ((obj_string_t *)obj)->type = e_st_allocated;
+    ((obj_string_t *)obj)->s.p = (char *)(obj + sizeof(obj_string_t));
+    ((obj_string_t *)obj)->s.len = len;
+    return obj;
+}
+
+#define ALLOCATE_OBJ(type_, ot_, vm_) \
+    ((type_ *)allocate_obj(ctx, (vm_), sizeof(type_), (ot_)))
+
+#define ALLOCATE_STR(len_, vm_) \
+    ((obj_string_t *)allocate_string(ctx, (vm_), (len_)))
 
 static void reset_stack(ctx_t const *ctx, vm_t *vm)
 {
@@ -447,18 +541,27 @@ static void reset_stack(ctx_t const *ctx, vm_t *vm)
 static void init_vm(ctx_t const *ctx, vm_t *vm)
 {
     reset_stack(ctx, vm);
+    vm->objects = NULL;
 }
 
-#define PUSH_STACK_SEG(vm_)                                    \
-    do {                                                       \
-        vm_stack_segment_t *new_seg_ =                         \
-            (vm_stack_segment_t *)reallocate(                  \
-                    ctx, NULL, 0, sizeof(vm_stack_segment_t)); \
-        (vm_)->cur_stack_seg->next = new_seg_;                 \
-        new_seg_->prev = (vm_)->cur_stack_seg;                 \
-        new_seg_->next = NULL;                                 \
-        (vm_)->cur_stack_seg = new_seg_;                       \
-        (vm_)->stack_head = new_seg_->values;                   \
+static void free_vm(ctx_t const *ctx, vm_t *vm)
+{
+    obj_t *obj = vm->objects;
+    while (obj) {
+        obj_t *next = obj->next;
+        FREE(obj);
+        obj = next;
+    }
+}
+
+#define PUSH_STACK_SEG(vm_)                                             \
+    do {                                                                \
+        vm_stack_segment_t *new_seg_ = ALLOCATE(vm_stack_segment_t, 1); \
+        (vm_)->cur_stack_seg->next = new_seg_;                          \
+        new_seg_->prev = (vm_)->cur_stack_seg;                          \
+        new_seg_->next = NULL;                                          \
+        (vm_)->cur_stack_seg = new_seg_;                                \
+        (vm_)->stack_head = new_seg_->values;                           \
     } while (0)
 
 #define POP_STACK_SEG(vm_)                                        \
@@ -466,8 +569,8 @@ static void init_vm(ctx_t const *ctx, vm_t *vm)
         vm_stack_segment_t *old_seg_ = (vm_)->cur_stack_seg;      \
         (vm_)->cur_stack_seg = old_seg_->prev;                    \
         (vm_)->cur_stack_seg->next = NULL;                        \
-        reallocate(ctx, old_seg_, sizeof(vm_stack_segment_t), 0); \
-        (vm_)->stack_head =                                        \
+        FREE(old_seg_);                                           \
+        (vm_)->stack_head =                                       \
             (vm_)->cur_stack_seg->values + VM_STACK_SEGMENT_SIZE; \
     } while (0)
 
@@ -619,7 +722,27 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
             BINARY_OP(<=, BOOL_VAL);
             break;
         case e_op_add:
-            BINARY_OP(+, NUMBER_VAL);
+            if (IS_STRING(peek_stack(ctx, vm, 0)) &&
+                IS_STRING(peek_stack(ctx, vm, 1)))
+            {
+                string_t b = AS_STRING(pop_stack(ctx, vm));
+                string_t a = AS_STRING(STACK_TOP(vm));
+                uint len = a.len + b.len;
+                obj_string_t *c = ALLOCATE_STR(len, vm);
+                memcpy(c->s.p, a.p, a.len);
+                memcpy(c->s.p + a.len, b.p, b.len);
+                c->s.p[len] = '\0';
+                STACK_TOP(vm) = OBJ_VAL((obj_t *)c);
+            } else if (
+                IS_NUMBER(peek_stack(ctx, vm, 0)) &&
+                IS_NUMBER(peek_stack(ctx, vm, 1)))
+            {
+                f64 b = AS_NUMBER(pop_stack(ctx, vm));
+                STACK_TOP(vm) = NUMBER_VAL(AS_NUMBER(STACK_TOP(vm)) + b);
+            } else {
+                runtime_error(ctx, vm, "Operands must be numbers.");
+                return e_interp_runtime_err;
+            }
             break;
         case e_op_subtract:
             BINARY_OP(-, NUMBER_VAL);
@@ -1080,7 +1203,7 @@ typedef enum {
     e_prec_primary
 } precedence_t;
 
-typedef void (*parse_fn_t)(ctx_t const *, compiler_t *);
+typedef void (*parse_fn_t)(ctx_t const *, compiler_t *, vm_t *);
 
 typedef struct {
     parse_fn_t prefix;
@@ -1088,11 +1211,12 @@ typedef struct {
     precedence_t precedence;
 } parse_rule_t;
 
-static void compile_number(ctx_t const *ctx, compiler_t *compiler);
-static void compile_literal(ctx_t const *ctx, compiler_t *compiler);
-static void compile_grouping(ctx_t const *ctx, compiler_t *compiler);
-static void compile_unary(ctx_t const *ctx, compiler_t *compiler);
-static void compile_binary(ctx_t const *ctx, compiler_t *compiler);
+static void compile_number(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
+static void compile_string(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
+static void compile_literal(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
+static void compile_grouping(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
+static void compile_unary(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
+static void compile_binary(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
 
 // @TODO: ternary ?: once we have 1) bools 2) branches for short circtuiting
 
@@ -1117,7 +1241,7 @@ parse_rule_t const c_parse_rules[] = {
     [e_tt_less]          = {NULL,              &compile_binary, e_prec_cmp},
     [e_tt_less_equal]    = {NULL,              &compile_binary, e_prec_cmp},
     [e_tt_identifier]    = {NULL,              NULL,            e_prec_none},
-    [e_tt_string]        = {NULL,              NULL,            e_prec_none},
+    [e_tt_string]        = {&compile_string,   NULL,            e_prec_none},
     [e_tt_number]        = {&compile_number,   NULL,            e_prec_none},
     [e_tt_and]           = {NULL,              NULL,            e_prec_none},
     [e_tt_class]         = {NULL,              NULL,            e_prec_none},
@@ -1146,7 +1270,7 @@ static parse_rule_t const *get_rule(ctx_t const *ctx, token_type_t tt)
 }
 
 static void compile_precedence(
-    ctx_t const *ctx, precedence_t prec, compiler_t *compiler)
+    ctx_t const *ctx, precedence_t prec, compiler_t *compiler, vm_t *vm)
 {
     parser_advance(ctx, compiler->parser);
     parse_fn_t prefix_rule = get_rule(ctx, compiler->parser->prev.type)->prefix;
@@ -1155,18 +1279,19 @@ static void compile_precedence(
         return;
     }
 
-    prefix_rule(ctx, compiler);
+    prefix_rule(ctx, compiler, vm);
 
     while (prec < get_rule(ctx, compiler->parser->cur.type)->precedence) {
         parser_advance(ctx, compiler->parser);
         parse_fn_t infix_rule =
             get_rule(ctx, compiler->parser->prev.type)->infix;
-        infix_rule(ctx, compiler);
+        infix_rule(ctx, compiler, vm);
     }
 }
 
-static void compile_number(ctx_t const *ctx, compiler_t *compiler)
+static void compile_number(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
+    (void)vm;
     char const *str = compiler->parser->prev.start;
     f64 num = 0.0;
     while (IS_DIGIT(*str))
@@ -1183,8 +1308,18 @@ static void compile_number(ctx_t const *ctx, compiler_t *compiler)
     emit_constant(ctx, NUMBER_VAL(num), compiler);
 }
 
-static void compile_literal(ctx_t const *ctx, compiler_t *compiler)
+static void compile_string(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
+    obj_string_t *str = ALLOCATE_OBJ(obj_string_t, e_ot_string, vm);
+    str->type = e_st_ref;
+    str->s.p = (char *)(compiler->parser->prev.start + 1);
+    str->s.len = compiler->parser->prev.len - 2;
+    emit_constant(ctx, OBJ_VAL((obj_t *)str), compiler);
+}
+
+static void compile_literal(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    (void)vm;
     switch (compiler->parser->prev.type) {
     case e_tt_false:
         emit_byte(ctx, e_op_false, compiler);
@@ -1200,24 +1335,24 @@ static void compile_literal(ctx_t const *ctx, compiler_t *compiler)
     }
 }
 
-static void compile_expression(ctx_t const *ctx, compiler_t *compiler)
+static void compile_expression(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
-    compile_precedence(ctx, e_prec_assignment, compiler);
+    compile_precedence(ctx, e_prec_assignment, compiler, vm);
 }
 
-static void compile_grouping(ctx_t const *ctx, compiler_t *compiler)
+static void compile_grouping(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
-    compile_expression(ctx, compiler);
+    compile_expression(ctx, compiler, vm);
     parser_consume(
         ctx, e_tt_right_paren, "Expect ')' after expression.",
         compiler->parser);
 }
 
-static void compile_unary(ctx_t const *ctx, compiler_t *compiler)
+static void compile_unary(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     token_type_t tt = compiler->parser->prev.type;
 
-    compile_precedence(ctx, e_prec_unary, compiler);
+    compile_precedence(ctx, e_prec_unary, compiler, vm);
 
     switch (tt) {
     case e_tt_bang:
@@ -1232,11 +1367,11 @@ static void compile_unary(ctx_t const *ctx, compiler_t *compiler)
     }
 }
 
-static void compile_binary(ctx_t const *ctx, compiler_t *compiler)
+static void compile_binary(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     token_type_t tt = compiler->parser->prev.type;
     parse_rule_t const *rule = get_rule(ctx, tt);
-    compile_precedence(ctx, (precedence_t)(rule->precedence + 1), compiler);
+    compile_precedence(ctx, (precedence_t)(rule->precedence + 1), compiler, vm);
 
     switch (tt) {
     case e_tt_bang_equal:
@@ -1275,7 +1410,7 @@ static void compile_binary(ctx_t const *ctx, compiler_t *compiler)
     }
 }
 
-static b32 compile(ctx_t const *ctx, string_t source, chunk_t *chunk)
+static b32 compile(ctx_t const *ctx, string_t source, chunk_t *chunk, vm_t *vm)
 {
     scanner_t scanner = {source.p, source.p, source.p + source.len, 1}; 
     parser_t parser = {0};
@@ -1286,7 +1421,7 @@ static b32 compile(ctx_t const *ctx, string_t source, chunk_t *chunk)
     compiler.compiling_chunk = chunk;
 
     parser_advance(ctx, &parser);
-    compile_expression(ctx, &compiler);
+    compile_expression(ctx, &compiler, vm);
     parser_consume(ctx, e_tt_eof, "Expected end of expression.", &parser);
     end_compiler(ctx, &compiler);
 
@@ -1297,7 +1432,7 @@ static interp_result_t interpret(ctx_t const *ctx, vm_t *vm, string_t source)
 {
     chunk_t chunk = make_chunk(ctx);
 
-    if (!compile(ctx, source, &chunk)) {
+    if (!compile(ctx, source, &chunk, vm)) {
         free_chunk(ctx, &chunk);
         return e_interp_compile_err;
     }
@@ -1365,7 +1500,7 @@ static void run_file(ctx_t const *ctx, vm_t *vm, char const *fname)
         os_exit(ctx, 65);
     }
 
-    char *script = (char *)reallocate(ctx, NULL, 0, f.len + 1);
+    char *script = ALLOCATE(char, f.len + 1);
     usize chars_read = (usize)io_read(ctx, &f.ioh, (u8 *)script, f.len);
     VERIFY(chars_read == f.len, "Failed to read script.");
     script[f.len] = '\0';
@@ -1373,7 +1508,7 @@ static void run_file(ctx_t const *ctx, vm_t *vm, char const *fname)
     string_t source = {script, f.len};
     interp_result_t res = interpret(ctx, vm, source);
 
-    reallocate(ctx, script, f.len + 1, 0);
+    FREE(script);
 
     if (res == e_interp_compile_err)
         os_exit(ctx, 70);
@@ -1394,6 +1529,8 @@ static int lox_main(ctx_t const *ctx)
         LOG("Usage: clox [file].");
         os_exit(ctx, 64);
     }
+
+    free_vm(ctx, &vm);
 
     return 0;
 }

@@ -28,3 +28,14 @@ static inline string_t string_from_cstr(char *cstr)
     }
     return res;
 }
+
+static inline b32 string_eq(string_t s1, string_t s2)
+{
+    if (s1.len != s2.len)
+        return false;
+    while (s1.len--) {
+        if (*s1.p++ != *s2.p++)
+            return false;
+    }
+    return true;
+}

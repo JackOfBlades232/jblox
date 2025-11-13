@@ -1,5 +1,5 @@
 #!/bin/bash
-cd tests
+cd cpplox_tests
 
 INTERP=
 
@@ -33,10 +33,6 @@ function run_all_tests {
 
 INTERP=../reference/craftinginterpreters/jlox
 echo -e "jlox (reference):\n"
-run_all_tests
-
-INTERP=../reference/craftinginterpreters/clox
-echo -e "\nclox (reference):\n"
 run_all_tests
 
 INTERP=../cpplox/build/cpplox $@

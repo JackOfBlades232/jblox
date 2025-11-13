@@ -1,5 +1,5 @@
 @echo off
-pushd tests
+pushd cpplox_tests
 echo jb-cpplox:
 
 call :RunTest hello.lox %*
