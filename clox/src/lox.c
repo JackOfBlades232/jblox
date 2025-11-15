@@ -40,9 +40,20 @@ static inline void *reallocate(
 #define FREE_ARRAY(type_, ptr_, cap_) \
     reallocate(ctx, (ptr_), sizeof(type_) * (cap_), 0)
 
+static inline u32 hash_string(ctx_t const *ctx, char const *p, uint len)
+{
+    (void)ctx;
+     u32 hash = 2166136261u;
+     for (uint i = 0; i < len; i++) {
+         hash ^= (u32)p[i];
+         hash *= 16777619;
+     }
+     return hash;
+}
+
 typedef enum {
-    e_vt_bool,
     e_vt_nil,
+    e_vt_bool,
     e_vt_number,
     e_vt_obj,
 } value_type_t;
@@ -102,7 +113,9 @@ typedef enum {
 typedef struct obj_string {
     obj_t obj;
     obj_string_type_t type;
-    string_t s;
+    uint len;
+    u32 hash;
+    char *p;
 } obj_string_t;
 
 static inline b32 is_obj_type(ctx_t const *ctx, value_t val, obj_type_t ot)
@@ -111,13 +124,20 @@ static inline b32 is_obj_type(ctx_t const *ctx, value_t val, obj_type_t ot)
     return IS_OBJ(val) && AS_OBJ(val)->type == ot;
 }
 
+static inline string_t obj_as_string(ctx_t const *ctx, value_t val)
+{
+    (void)ctx;
+    obj_string_t *ostr = (obj_string_t *)AS_OBJ(val);
+    return (string_t){ostr->p, (u64)ostr->len};
+}
+
 #define OBJ_TYPE(value_)      (AS_OBJ(value_)->type)
 
 #define IS_STRING(value_)     (is_obj_type(ctx, (value_), e_ot_string))
 
 #define AS_STRING_OBJ(value_) ((obj_string_t *)AS_OBJ(value_))
-#define AS_STRING(value_)     (((obj_string_t *)AS_OBJ(value_))->s)
-#define AS_CSTRING(value_)    (((obj_string_t *)AS_OBJ(value_))->s.p)
+#define AS_STRING(value_)     (obj_as_string(ctx, (value_)))
+#define AS_CSTRING(value_)    (((obj_string_t *)AS_OBJ(value_))->p)
 
 static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
 {
@@ -132,11 +152,169 @@ static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
         return true;
     case e_vt_number:
         return ABS(AS_NUMBER(v1) - AS_NUMBER(v2)) < 1e-16;
-    case e_vt_obj: {
-        ASSERT(IS_STRING(v1));
-        ASSERT(IS_STRING(v2));
-        return string_eq(AS_STRING(v1), AS_STRING(v2));
-    } break;
+    case e_vt_obj:
+        // Due to string interning equal strings are always equal obj ptrs.
+        return AS_OBJ(v1) == AS_OBJ(v2);
+    }
+}
+
+#define TABLE_MAX_LOAD_FACTOR 0.75
+
+typedef struct {
+    obj_string_t *key;
+    value_t value;
+} table_entry_t;
+
+typedef struct {
+    uint cnt, cap;
+    table_entry_t *entries;
+} table_t;
+
+static table_t make_table(ctx_t const *ctx)
+{
+    (void)ctx;
+    return (table_t){0, 0, NULL};
+}
+
+static void free_table(ctx_t const *ctx, table_t *table)
+{
+    if (!table || !table->entries)
+        return;
+    FREE_ARRAY(table_entry_t, table->entries, table->cap);
+    *table = make_table(ctx);
+}
+
+static table_entry_t *table_find_entry(
+    ctx_t const *ctx, table_entry_t const *entries, uint cap,
+    obj_string_t const *key)
+{
+    (void)ctx;
+    u32 idx = key->hash % cap;
+    table_entry_t const *tombstone = NULL;
+    for (;;) {
+        table_entry_t const *e = &entries[idx];
+        if (!e->key) {
+            if (IS_NIL(e->value))
+                return (table_entry_t *)(tombstone ? tombstone : e);
+            else if (!tombstone)
+                tombstone = e;
+        } else if (e->key == key) {
+            return (table_entry_t *)e;
+        }
+
+        idx = (idx + 1) % cap;
+    }
+}
+
+static void table_adjust_cap(
+    ctx_t const *ctx, table_t *table, uint new_cap)
+{
+    table_entry_t *entries = ALLOCATE(table_entry_t, new_cap);
+    memset(entries, 0, new_cap * sizeof(table_entry_t));
+
+    table->cnt = 0;
+    for (uint i = 0; i < MIN(table->cap, new_cap); ++i) {
+        table_entry_t *e = &table->entries[i];
+        if (!e->key)
+            continue;
+
+        table_entry_t *dest =
+            table_find_entry(ctx, entries, new_cap, e->key);
+        dest->key = e->key;
+        dest->value = e->value;
+        ++table->cnt;
+    }
+
+    if (table->entries)
+        FREE_ARRAY(table_entry_t, table->entries, table->cap);
+    table->entries = entries;
+    table->cap = new_cap;
+}
+
+static b32 table_set(
+    ctx_t const *ctx, table_t *table, obj_string_t const *key, value_t val)
+{
+    if ((f64)(table->cnt + 1) > (f64)table->cap * TABLE_MAX_LOAD_FACTOR) {
+        uint cap = GROW_CAP(table->cap);
+        table_adjust_cap(ctx, table, cap);
+    }
+
+    table_entry_t *entry =
+        table_find_entry(ctx, table->entries, table->cap, key);
+    b32 key_is_new = !entry->key;
+    if (key_is_new && IS_NIL(entry->value))
+        ++table->cnt;
+
+    entry->key = (obj_string_t *)key;
+    entry->value = val;
+    return key_is_new;
+}
+
+static void table_add_all(
+    ctx_t const *ctx, table_t *to, table_t *from)
+{
+    for (uint i = 0; i < from->cap; ++i) {
+        table_entry_t *e = &from->entries[i];
+        if (e->key)
+            table_set(ctx, to, e->key, e->value);
+    }
+}
+
+static b32 table_get(
+    ctx_t const *ctx, table_t const *table,
+    obj_string_t const *key, value_t *val)
+{
+    if (!table->cnt)
+        return false;
+
+    table_entry_t const *entry =
+        table_find_entry(ctx, table->entries, table->cap, key);
+    if (!entry->key)
+        return false;
+
+    *val = entry->value;
+    return true;
+}
+
+static b32 table_delete(
+    ctx_t const *ctx, table_t *table, obj_string_t const *key)
+{
+    if (!table->cnt)
+        return false;
+
+    table_entry_t *entry =
+        table_find_entry(ctx, table->entries, table->cap, key);
+    if (!entry->key)
+        return false;
+
+    entry->key = NULL;
+    entry->value = BOOL_VAL(true); // tombstone
+    return true;
+}
+
+static obj_string_t *table_find_string(
+    ctx_t const *ctx, table_t const *table, char const *s, uint len, u32 hash)
+{
+    (void)ctx;
+    if (!table->cnt)
+        return NULL;
+    u32 idx = hash % table->cap;
+    for (;;) {
+        table_entry_t const *e = &table->entries[idx];
+        if (!e->key) {
+            if (IS_NIL(e->value))
+                return NULL;
+        } else if (
+            e->key->len == len &&
+            e->key->hash == hash &&
+            string_eq(
+                (string_t){(char *)s, (u64)len},
+                (string_t){e->key->p, (u64)e->key->len}))
+        {
+            return e->key;
+        }
+
+        idx = (idx + 1) % table->cap;
     }
 }
 
@@ -501,6 +679,7 @@ typedef struct vm {
     vm_stack_segment_t stack;
     vm_stack_segment_t *cur_stack_seg; 
     value_t *stack_head;
+    table_t strings;
     obj_t *objects;
 } vm_t;
 
@@ -515,13 +694,13 @@ static inline obj_t *allocate_obj(
     return obj;
 }
 
-static inline obj_t *allocate_string(ctx_t const *ctx, vm_t *vm, usize len)
+static inline obj_t *allocate_string(ctx_t const *ctx, vm_t *vm, uint len)
 {
     obj_t *obj = allocate_obj(
         ctx, vm, sizeof(obj_string_t) + len + 1, e_ot_string);
     ((obj_string_t *)obj)->type = e_st_allocated;
-    ((obj_string_t *)obj)->s.p = (char *)(obj + sizeof(obj_string_t));
-    ((obj_string_t *)obj)->s.len = len;
+    ((obj_string_t *)obj)->p = (char *)(obj) + sizeof(obj_string_t);
+    ((obj_string_t *)obj)->len = len;
     return obj;
 }
 
@@ -541,11 +720,13 @@ static void reset_stack(ctx_t const *ctx, vm_t *vm)
 static void init_vm(ctx_t const *ctx, vm_t *vm)
 {
     reset_stack(ctx, vm);
+    vm->strings = make_table(ctx);
     vm->objects = NULL;
 }
 
 static void free_vm(ctx_t const *ctx, vm_t *vm)
 {
+    free_table(ctx, &vm->strings);
     obj_t *obj = vm->objects;
     while (obj) {
         obj_t *next = obj->next;
@@ -727,12 +908,20 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
             {
                 string_t b = AS_STRING(pop_stack(ctx, vm));
                 string_t a = AS_STRING(STACK_TOP(vm));
-                uint len = a.len + b.len;
-                obj_string_t *c = ALLOCATE_STR(len, vm);
-                memcpy(c->s.p, a.p, a.len);
-                memcpy(c->s.p + a.len, b.p, b.len);
-                c->s.p[len] = '\0';
-                STACK_TOP(vm) = OBJ_VAL((obj_t *)c);
+                obj_string_t *c = ALLOCATE_STR((uint)(a.len + b.len), vm);
+                memcpy(c->p, a.p, a.len);
+                memcpy(c->p + a.len, b.p, b.len);
+                c->p[c->len] = '\0';
+                c->hash = hash_string(ctx, c->p, c->len);
+                obj_string_t *str =
+                    table_find_string(ctx, &vm->strings, c->p, c->len, c->hash);
+                if (str) {
+                    FREE(c);
+                } else {
+                    str = c;
+                    table_set(ctx, &vm->strings, str, NIL_VAL);
+                }
+                STACK_TOP(vm) = OBJ_VAL((obj_t *)str);
             } else if (
                 IS_NUMBER(peek_stack(ctx, vm, 0)) &&
                 IS_NUMBER(peek_stack(ctx, vm, 1)))
@@ -1310,10 +1499,19 @@ static void compile_number(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 
 static void compile_string(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
-    obj_string_t *str = ALLOCATE_OBJ(obj_string_t, e_ot_string, vm);
-    str->type = e_st_ref;
-    str->s.p = (char *)(compiler->parser->prev.start + 1);
-    str->s.len = compiler->parser->prev.len - 2;
+    char *p = (char *)(compiler->parser->prev.start + 1);
+    uint len = (uint)(compiler->parser->prev.len - 2);
+    u32 hash = hash_string(ctx, p, len);
+    obj_string_t *str = table_find_string(ctx, &vm->strings, p, len, hash);
+    if (!str) {
+        str = ALLOCATE_OBJ(obj_string_t, e_ot_string, vm);
+        str->type = e_st_ref;
+        str->p = p;
+        str->len = len;
+        str->hash = hash;
+        table_set(ctx, &vm->strings, str, NIL_VAL);
+    }
+        
     emit_constant(ctx, OBJ_VAL((obj_t *)str), compiler);
 }
 
@@ -1518,6 +1716,10 @@ static void run_file(ctx_t const *ctx, vm_t *vm, char const *fname)
 
 static int lox_main(ctx_t const *ctx)
 {
+    (void)table_add_all;
+    (void)table_get;
+    (void)table_delete;
+
     vm_t vm = {0};
     init_vm(ctx, &vm);
 
