@@ -324,6 +324,7 @@ typedef enum {
     e_op_nil,
     e_op_true,
     e_op_false,
+    e_op_pop,
     e_op_eq,
     e_op_neq,
     e_op_gt,
@@ -336,6 +337,7 @@ typedef enum {
     e_op_divide,
     e_op_not,
     e_op_negate,
+    e_op_print,
     e_op_return,
 } opcode_t;
 
@@ -600,6 +602,9 @@ static uint disasm_instruction(ctx_t const *ctx, chunk_t const *chunk, uint at)
     case e_op_false:
         return disasm_simple_instruction(
             ctx, "OP_FALSE", at);
+    case e_op_pop:
+        return disasm_simple_instruction(
+            ctx, "OP_POP", at);
     case e_op_eq:
         return disasm_simple_instruction(
             ctx, "OP_EQ", at);
@@ -636,6 +641,9 @@ static uint disasm_instruction(ctx_t const *ctx, chunk_t const *chunk, uint at)
     case e_op_negate:
         return disasm_simple_instruction(
             ctx, "OP_NEGATE", at);
+    case e_op_print:
+        return disasm_simple_instruction(
+            ctx, "OP_PRINT", at);
     case e_op_return:
         return disasm_simple_instruction(
             ctx, "OP_RETURN", at);
@@ -881,6 +889,10 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
             push_stack(ctx, vm, BOOL_VAL(false));
             break;
 
+        case e_op_pop:
+            pop_stack(ctx, vm);
+            break;
+
         case e_op_eq: {
             value_t b = pop_stack(ctx, vm);
             STACK_TOP(vm) = BOOL_VAL(are_equal(ctx, STACK_TOP(vm), b));
@@ -954,12 +966,15 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
             STACK_TOP(vm) = NUMBER_VAL(-AS_NUMBER(STACK_TOP(vm)));
             break;
 
-        case e_op_return:
+        case e_op_print:
 #if DEBUG_TRACE_EXECUTION
             LOG("");
 #endif
             print_value(ctx, pop_stack(ctx, vm));
             OUTPUT("\n");
+            break;
+
+        case e_op_return:
             return e_interp_ok;
 
         default:
@@ -1334,6 +1349,16 @@ static void parser_advance(ctx_t const *ctx, parser_t *parser)
     }
 }
 
+static b32 parser_match(ctx_t const *ctx, token_type_t tt, parser_t *parser)
+{
+    if (parser->cur.type == tt) {
+        parser_advance(ctx, parser);
+        return true;
+    }
+    
+    return false;
+}
+
 static void parser_consume(
     ctx_t const *ctx, token_type_t tt, char const *err_msg, parser_t *parser)
 {
@@ -1343,6 +1368,33 @@ static void parser_consume(
     }
 
     parser_error_at_current(ctx, err_msg, parser);
+}
+
+static void parser_sync(ctx_t const *ctx, parser_t *parser)
+{
+    parser->panic_mode = false;
+
+    while (parser->cur.type != e_tt_eof) {
+        if (parser->prev.type == e_tt_semicolon)
+            return;
+
+        switch (parser->cur.type) {
+        case e_tt_class:
+        case e_tt_fun:
+        case e_tt_var:
+        case e_tt_for:
+        case e_tt_if:
+        case e_tt_while:
+        case e_tt_print:
+        case e_tt_return:
+            return;
+
+        default:
+            break;
+        }
+
+        parser_advance(ctx, parser);
+    }
 }
 
 typedef struct {
@@ -1608,6 +1660,40 @@ static void compile_binary(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     }
 }
 
+static void compile_expr_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    
+    compile_expression(ctx, compiler, vm);
+    parser_consume(
+        ctx, e_tt_semicolon, "Expected ';' after expression.",
+        compiler->parser);
+    emit_byte(ctx, e_op_pop, compiler);
+}
+
+static void compile_print(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    compile_expression(ctx, compiler, vm);
+    parser_consume(
+        ctx, e_tt_semicolon, "Expected ';' after value.", compiler->parser);
+    emit_byte(ctx, e_op_print, compiler);
+}
+
+static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    if (parser_match(ctx, e_tt_print, compiler->parser))
+        compile_print(ctx, compiler, vm);
+    else
+        compile_expr_stmt(ctx, compiler, vm);
+}
+
+static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    compile_stmt(ctx, compiler, vm);
+
+    if (compiler->parser->panic_mode)
+        parser_sync(ctx, compiler->parser);
+}
+
 static b32 compile(ctx_t const *ctx, string_t source, chunk_t *chunk, vm_t *vm)
 {
     scanner_t scanner = {source.p, source.p, source.p + source.len, 1}; 
@@ -1619,8 +1705,10 @@ static b32 compile(ctx_t const *ctx, string_t source, chunk_t *chunk, vm_t *vm)
     compiler.compiling_chunk = chunk;
 
     parser_advance(ctx, &parser);
-    compile_expression(ctx, &compiler, vm);
-    parser_consume(ctx, e_tt_eof, "Expected end of expression.", &parser);
+
+    while (!parser_match(ctx, e_tt_eof, &parser))
+        compile_decl(ctx, &compiler, vm);
+
     end_compiler(ctx, &compiler);
 
     return !parser.had_error;
