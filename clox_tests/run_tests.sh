@@ -11,6 +11,7 @@ function run_test {
 
 function run_all_tests {
     run_test hello.lox
+    run_test gvars.lox
 }
 
 INTERP=../reference/craftinginterpreters/clox

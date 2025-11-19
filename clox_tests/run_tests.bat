@@ -3,6 +3,7 @@ pushd clox_tests
 echo jb-cpplox:
 
 call :RunTest hello.lox %*
+call :RunTest gvars.lox %*
 
 popd
 exit /b

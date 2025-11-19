@@ -1,0 +1,14 @@
+var a = "global a";
+var b = "global b";
+var c = "global c";
+
+var d = 3 * 2;
+var e = b + c;
+
+print a;
+print b;
+print c;
+print d;
+print d * 38;
+print e;
+print e + b;

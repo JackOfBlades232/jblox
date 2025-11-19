@@ -325,6 +325,12 @@ typedef enum {
     e_op_true,
     e_op_false,
     e_op_pop,
+    e_op_define_glob,
+    e_op_define_glob_long,
+    e_op_get_glob,
+    e_op_get_glob_long,
+    e_op_set_glob,
+    e_op_set_glob_long,
     e_op_eq,
     e_op_neq,
     e_op_gt,
@@ -449,24 +455,32 @@ static inline uint add_constant(ctx_t const *ctx, chunk_t *chunk, value_t val)
     return chunk->constants.cnt - 1;
 }
 
-static inline void write_constant(
-    ctx_t const *ctx, chunk_t *chunk, value_t val, uint line)
+static inline void write_constant_ref(
+    ctx_t const *ctx, chunk_t *chunk,
+    opcode_t op, opcode_t long_op, uint id, uint line)
 {
-    uint constant = add_constant(ctx, chunk, val);
-    if (constant <= 255) {
-        write_chunk(ctx, chunk, e_op_constant, line);
-        write_chunk(ctx, chunk, (u8)constant, line);
-    } else if (constant <= 16777215) {
-        write_chunk(ctx, chunk, e_op_constant_long, line);
-        write_chunk(ctx, chunk, (u8)(constant & 0xFF), line);
-        write_chunk(ctx, chunk, (u8)((constant >> 8) & 0xFF), line);
-        write_chunk(ctx, chunk, (u8)((constant >> 16) & 0xFF), line);
+    if (id <= 255) {
+        write_chunk(ctx, chunk, (u8)op, line);
+        write_chunk(ctx, chunk, (u8)id, line);
+    } else if (id <= 16777215) {
+        write_chunk(ctx, chunk, (u8)long_op, line);
+        write_chunk(ctx, chunk, (u8)(id & 0xFF), line);
+        write_chunk(ctx, chunk, (u8)((id >> 8) & 0xFF), line);
+        write_chunk(ctx, chunk, (u8)((id >> 16) & 0xFF), line);
     } else {
         // @TODO: a more gracious error?
         PANIC(
             "Constants overflow: "
             "one chunk can't contain more than 16777215 constants.");
     }
+}
+
+static inline void write_constant(
+    ctx_t const *ctx, chunk_t *chunk,
+    opcode_t op, opcode_t long_op, value_t val, uint line)
+{
+    uint constant = add_constant(ctx, chunk, val);
+    write_constant_ref(ctx, chunk, op, long_op, constant, line);
 }
 
 static inline void free_chunk(ctx_t const *ctx, chunk_t *chunk)
@@ -605,6 +619,24 @@ static uint disasm_instruction(ctx_t const *ctx, chunk_t const *chunk, uint at)
     case e_op_pop:
         return disasm_simple_instruction(
             ctx, "OP_POP", at);
+    case e_op_define_glob:
+        return disasm_constant_instruction(
+            ctx, "OP_DEFINE_GLOB", chunk, at);
+    case e_op_define_glob_long:
+        return disasm_long_constant_instruction(
+            ctx, "OP_DEFINE_GLOB_LONG", chunk, at);
+    case e_op_get_glob:
+        return disasm_constant_instruction(
+            ctx, "OP_GET_GLOB", chunk, at);
+    case e_op_get_glob_long:
+        return disasm_long_constant_instruction(
+            ctx, "OP_GET_GLOB_LONG", chunk, at);
+    case e_op_set_glob:
+        return disasm_constant_instruction(
+            ctx, "OP_SET_GLOB", chunk, at);
+    case e_op_set_glob_long:
+        return disasm_long_constant_instruction(
+            ctx, "OP_SET_GLOB_LONG", chunk, at);
     case e_op_eq:
         return disasm_simple_instruction(
             ctx, "OP_EQ", at);
@@ -687,6 +719,7 @@ typedef struct vm {
     vm_stack_segment_t stack;
     vm_stack_segment_t *cur_stack_seg; 
     value_t *stack_head;
+    table_t globals;
     table_t strings;
     obj_t *objects;
 } vm_t;
@@ -718,6 +751,23 @@ static inline obj_t *allocate_string(ctx_t const *ctx, vm_t *vm, uint len)
 #define ALLOCATE_STR(len_, vm_) \
     ((obj_string_t *)allocate_string(ctx, (vm_), (len_)))
 
+static inline obj_t *add_string_ref(
+    ctx_t const *ctx, vm_t *vm, char const *p, uint len)
+{
+    u32 hash = hash_string(ctx, p, len);
+    obj_string_t *str = table_find_string(ctx, &vm->strings, p, len, hash);
+    if (!str) {
+        str = ALLOCATE_OBJ(obj_string_t, e_ot_string, vm);
+        str->type = e_st_ref;
+        str->p = (char *)p;
+        str->len = len;
+        str->hash = hash;
+        table_set(ctx, &vm->strings, str, NIL_VAL);
+    }
+
+    return (obj_t *)str;
+}
+
 static void reset_stack(ctx_t const *ctx, vm_t *vm)
 {
     (void)ctx;
@@ -728,12 +778,14 @@ static void reset_stack(ctx_t const *ctx, vm_t *vm)
 static void init_vm(ctx_t const *ctx, vm_t *vm)
 {
     reset_stack(ctx, vm);
+    vm->globals = make_table(ctx);
     vm->strings = make_table(ctx);
     vm->objects = NULL;
 }
 
 static void free_vm(ctx_t const *ctx, vm_t *vm)
 {
+    free_table(ctx, &vm->globals);
     free_table(ctx, &vm->strings);
     obj_t *obj = vm->objects;
     while (obj) {
@@ -835,6 +887,8 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
 #define READ_CONSTANT_LONG()     \
     (vm->chunk->constants.values \
         [(u32)READ_BYTE() | ((u32)READ_BYTE() << 8) | ((u32)READ_BYTE() << 16)])
+#define READ_STRING() AS_STRING_OBJ(READ_CONSTANT())
+#define READ_STRING_LONG() AS_STRING_OBJ(READ_CONSTANT_LONG())
 #define BINARY_OP(op_, vt_)                                      \
     do {                                                         \
         if (!IS_NUMBER(peek_stack(ctx, vm, 0)) ||                \
@@ -892,6 +946,62 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
         case e_op_pop:
             pop_stack(ctx, vm);
             break;
+
+        case e_op_define_glob:
+            table_set(
+                ctx, &vm->globals, READ_STRING(), pop_stack(ctx, vm));
+            break;
+
+        case e_op_define_glob_long:
+            table_set(
+                ctx, &vm->globals, READ_STRING_LONG(), pop_stack(ctx, vm));
+            break;
+
+        case e_op_get_glob: {
+            value_t val;
+            obj_string_t *name = READ_STRING();
+            if (!table_get(ctx, &vm->globals, name, &val)) {
+                runtime_error(
+                    ctx, vm, "Undefined variable '%S'.",
+                    AS_STRING(OBJ_VAL((obj_t *)name)));
+                return e_interp_runtime_err;
+            }
+            push_stack(ctx, vm, val);
+        } break;
+
+        case e_op_get_glob_long: {
+            value_t val;
+            obj_string_t *name = READ_STRING_LONG();
+            if (!table_get(ctx, &vm->globals, name, &val)) {
+                runtime_error(
+                    ctx, vm, "Undefined variable '%S'.",
+                    AS_STRING(OBJ_VAL((obj_t *)name)));
+                return e_interp_runtime_err;
+            }
+            push_stack(ctx, vm, val);
+        } break;
+
+        case e_op_set_glob: {
+            obj_string_t *name = READ_STRING();
+            if (table_set(ctx, &vm->globals, name, STACK_TOP(vm))) {
+                table_delete(ctx, &vm->globals, name);
+                runtime_error(
+                    ctx, vm, "Undefined variable '%S'.",
+                    AS_STRING(OBJ_VAL((obj_t *)name)));
+                return e_interp_runtime_err;
+            }
+        } break;
+
+        case e_op_set_glob_long: {
+            obj_string_t *name = READ_STRING_LONG();
+            if (table_set(ctx, &vm->globals, name, STACK_TOP(vm))) {
+                table_delete(ctx, &vm->globals, name);
+                runtime_error(
+                    ctx, vm, "Undefined variable '%S'.",
+                    AS_STRING(OBJ_VAL((obj_t *)name)));
+                return e_interp_runtime_err;
+            }
+        } break;
 
         case e_op_eq: {
             value_t b = pop_stack(ctx, vm);
@@ -984,6 +1094,8 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
     }
 
 #undef READ_BYTE
+#undef READ_STRING
+#undef READ_STRING_LONG
 #undef READ_CONSTANT
 #undef READ_CONSTANT_LONG
 #undef BINARY_OP
@@ -1412,13 +1524,31 @@ static void emit_byte(ctx_t const *ctx, u8 byte, compiler_t *compiler)
 static void emit_constant(ctx_t const *ctx, value_t val, compiler_t *compiler)
 {
     write_constant(
-        ctx, compiler->compiling_chunk, val,
+        ctx, compiler->compiling_chunk,
+        e_op_constant, e_op_constant_long, val,
         (uint)compiler->parser->prev.line);
+}
+
+static void emit_constant_ref(
+    ctx_t const *ctx,
+    uint id, opcode_t op, opcode_t long_op,
+    compiler_t *compiler)
+{
+    write_constant_ref(
+        ctx, compiler->compiling_chunk,
+        op, long_op, id, (uint)compiler->parser->prev.line);
 }
 
 static void emit_return(ctx_t const *ctx, compiler_t *compiler)
 {
     emit_byte(ctx, e_op_return, compiler);
+}
+
+static uint register_id_const(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, token_t name)
+{
+    obj_t *str = add_string_ref(ctx, vm, name.start, (uint)(name.len));
+    return add_constant(ctx, compiler->compiling_chunk, OBJ_VAL(str));
 }
 
 static void end_compiler(ctx_t const *ctx, compiler_t *compiler)
@@ -1444,7 +1574,7 @@ typedef enum {
     e_prec_primary
 } precedence_t;
 
-typedef void (*parse_fn_t)(ctx_t const *, compiler_t *, vm_t *);
+typedef void (*parse_fn_t)(ctx_t const *, compiler_t *, vm_t *, b32);
 
 typedef struct {
     parse_fn_t prefix;
@@ -1452,56 +1582,67 @@ typedef struct {
     precedence_t precedence;
 } parse_rule_t;
 
-static void compile_number(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
-static void compile_string(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
-static void compile_literal(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
-static void compile_grouping(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
-static void compile_unary(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
-static void compile_binary(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
+static void compile_expression(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
+
+static void compile_number(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+static void compile_string(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+static void compile_literal(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+static void compile_variable(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+static void compile_grouping(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+static void compile_unary(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+static void compile_binary(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 
 // @TODO: ternary ?: once we have 1) bools 2) branches for short circtuiting
 
 parse_rule_t const c_parse_rules[] = {
-    [e_tt_left_paren]    = {&compile_grouping, NULL,            e_prec_none},
-    [e_tt_right_paren]   = {NULL,              NULL,            e_prec_none},
-    [e_tt_left_brace]    = {NULL,              NULL,            e_prec_none}, 
-    [e_tt_right_brace]   = {NULL,              NULL,            e_prec_none},
-    [e_tt_comma]         = {NULL,              NULL,            e_prec_none},
-    [e_tt_dot]           = {NULL,              NULL,            e_prec_none},
-    [e_tt_minus]         = {&compile_unary,    &compile_binary, e_prec_term},
-    [e_tt_plus]          = {NULL,              &compile_binary, e_prec_term},
-    [e_tt_semicolon]     = {NULL,              NULL,            e_prec_none},
+    [e_tt_left_paren]    = {&compile_grouping, NULL,            e_prec_none  },
+    [e_tt_right_paren]   = {NULL,              NULL,            e_prec_none  },
+    [e_tt_left_brace]    = {NULL,              NULL,            e_prec_none  }, 
+    [e_tt_right_brace]   = {NULL,              NULL,            e_prec_none  },
+    [e_tt_comma]         = {NULL,              NULL,            e_prec_none  },
+    [e_tt_dot]           = {NULL,              NULL,            e_prec_none  },
+    [e_tt_minus]         = {&compile_unary,    &compile_binary, e_prec_term  },
+    [e_tt_plus]          = {NULL,              &compile_binary, e_prec_term  },
+    [e_tt_semicolon]     = {NULL,              NULL,            e_prec_none  },
     [e_tt_slash]         = {NULL,              &compile_binary, e_prec_factor},
     [e_tt_star]          = {NULL,              &compile_binary, e_prec_factor},
-    [e_tt_bang]          = {&compile_unary,    NULL,            e_prec_none},
-    [e_tt_bang_equal]    = {NULL,              &compile_binary, e_prec_eql},
-    [e_tt_equal]         = {NULL,              NULL,            e_prec_none},
-    [e_tt_equal_equal]   = {NULL,              &compile_binary, e_prec_eql},
-    [e_tt_greater]       = {NULL,              &compile_binary, e_prec_cmp},
-    [e_tt_greater_equal] = {NULL,              &compile_binary, e_prec_cmp},
-    [e_tt_less]          = {NULL,              &compile_binary, e_prec_cmp},
-    [e_tt_less_equal]    = {NULL,              &compile_binary, e_prec_cmp},
-    [e_tt_identifier]    = {NULL,              NULL,            e_prec_none},
-    [e_tt_string]        = {&compile_string,   NULL,            e_prec_none},
-    [e_tt_number]        = {&compile_number,   NULL,            e_prec_none},
-    [e_tt_and]           = {NULL,              NULL,            e_prec_none},
-    [e_tt_class]         = {NULL,              NULL,            e_prec_none},
-    [e_tt_else]          = {NULL,              NULL,            e_prec_none},
-    [e_tt_false]         = {&compile_literal,  NULL,            e_prec_none},
-    [e_tt_for]           = {NULL,              NULL,            e_prec_none},
-    [e_tt_fun]           = {NULL,              NULL,            e_prec_none},
-    [e_tt_if]            = {NULL,              NULL,            e_prec_none},
-    [e_tt_nil]           = {&compile_literal,  NULL,            e_prec_none},
-    [e_tt_or]            = {NULL,              NULL,            e_prec_none},
-    [e_tt_print]         = {NULL,              NULL,            e_prec_none},
-    [e_tt_return]        = {NULL,              NULL,            e_prec_none},
-    [e_tt_super]         = {NULL,              NULL,            e_prec_none},
-    [e_tt_this]          = {NULL,              NULL,            e_prec_none},
-    [e_tt_true]          = {&compile_literal,  NULL,            e_prec_none},
-    [e_tt_var]           = {NULL,              NULL,            e_prec_none},
-    [e_tt_while]         = {NULL,              NULL,            e_prec_none},
-    [e_tt_error]         = {NULL,              NULL,            e_prec_none},
-    [e_tt_eof]           = {NULL,              NULL,            e_prec_none},
+    [e_tt_bang]          = {&compile_unary,    NULL,            e_prec_none  },
+    [e_tt_bang_equal]    = {NULL,              &compile_binary, e_prec_eql   },
+    [e_tt_equal]         = {NULL,              NULL,            e_prec_none  },
+    [e_tt_equal_equal]   = {NULL,              &compile_binary, e_prec_eql   },
+    [e_tt_greater]       = {NULL,              &compile_binary, e_prec_cmp   },
+    [e_tt_greater_equal] = {NULL,              &compile_binary, e_prec_cmp   },
+    [e_tt_less]          = {NULL,              &compile_binary, e_prec_cmp   },
+    [e_tt_less_equal]    = {NULL,              &compile_binary, e_prec_cmp   },
+    [e_tt_identifier]    = {&compile_variable, NULL,            e_prec_none  },
+    [e_tt_string]        = {&compile_string,   NULL,            e_prec_none  },
+    [e_tt_number]        = {&compile_number,   NULL,            e_prec_none  },
+    [e_tt_and]           = {NULL,              NULL,            e_prec_none  },
+    [e_tt_class]         = {NULL,              NULL,            e_prec_none  },
+    [e_tt_else]          = {NULL,              NULL,            e_prec_none  },
+    [e_tt_false]         = {&compile_literal,  NULL,            e_prec_none  },
+    [e_tt_for]           = {NULL,              NULL,            e_prec_none  },
+    [e_tt_fun]           = {NULL,              NULL,            e_prec_none  },
+    [e_tt_if]            = {NULL,              NULL,            e_prec_none  },
+    [e_tt_nil]           = {&compile_literal,  NULL,            e_prec_none  },
+    [e_tt_or]            = {NULL,              NULL,            e_prec_none  },
+    [e_tt_print]         = {NULL,              NULL,            e_prec_none  },
+    [e_tt_return]        = {NULL,              NULL,            e_prec_none  },
+    [e_tt_super]         = {NULL,              NULL,            e_prec_none  },
+    [e_tt_this]          = {NULL,              NULL,            e_prec_none  },
+    [e_tt_true]          = {&compile_literal,  NULL,            e_prec_none  },
+    [e_tt_var]           = {NULL,              NULL,            e_prec_none  },
+    [e_tt_while]         = {NULL,              NULL,            e_prec_none  },
+    [e_tt_error]         = {NULL,              NULL,            e_prec_none  },
+    [e_tt_eof]           = {NULL,              NULL,            e_prec_none  },
 };
 
 static parse_rule_t const *get_rule(ctx_t const *ctx, token_type_t tt)
@@ -1520,19 +1661,25 @@ static void compile_precedence(
         return;
     }
 
-    prefix_rule(ctx, compiler, vm);
+    b32 can_assign = prec <= e_prec_assignment;
+    prefix_rule(ctx, compiler, vm, can_assign);
 
     while (prec < get_rule(ctx, compiler->parser->cur.type)->precedence) {
         parser_advance(ctx, compiler->parser);
         parse_fn_t infix_rule =
             get_rule(ctx, compiler->parser->prev.type)->infix;
-        infix_rule(ctx, compiler, vm);
+        infix_rule(ctx, compiler, vm, can_assign);
     }
+
+    if (can_assign && parser_match(ctx, e_tt_equal, compiler->parser))
+        parser_error(ctx, "Invalid assignment target.", compiler->parser);
 }
 
-static void compile_number(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+static void compile_number(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
 {
     (void)vm;
+    (void)can_assign;
     char const *str = compiler->parser->prev.start;
     f64 num = 0.0;
     while (IS_DIGIT(*str))
@@ -1549,27 +1696,21 @@ static void compile_number(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     emit_constant(ctx, NUMBER_VAL(num), compiler);
 }
 
-static void compile_string(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+static void compile_string(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
 {
-    char *p = (char *)(compiler->parser->prev.start + 1);
-    uint len = (uint)(compiler->parser->prev.len - 2);
-    u32 hash = hash_string(ctx, p, len);
-    obj_string_t *str = table_find_string(ctx, &vm->strings, p, len, hash);
-    if (!str) {
-        str = ALLOCATE_OBJ(obj_string_t, e_ot_string, vm);
-        str->type = e_st_ref;
-        str->p = p;
-        str->len = len;
-        str->hash = hash;
-        table_set(ctx, &vm->strings, str, NIL_VAL);
-    }
-        
-    emit_constant(ctx, OBJ_VAL((obj_t *)str), compiler);
+    (void)can_assign;
+    obj_t *str = add_string_ref(
+        ctx, vm, compiler->parser->prev.start + 1,
+        (uint)(compiler->parser->prev.len - 2));
+    emit_constant(ctx, OBJ_VAL(str), compiler);
 }
 
-static void compile_literal(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+static void compile_literal(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
 {
     (void)vm;
+    (void)can_assign;
     switch (compiler->parser->prev.type) {
     case e_tt_false:
         emit_byte(ctx, e_op_false, compiler);
@@ -1585,21 +1726,49 @@ static void compile_literal(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     }
 }
 
-static void compile_expression(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+static void compile_named_variable(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm,
+    token_t name, b32 can_assign)
+{
+    uint vid = register_id_const(ctx, compiler, vm, name);
+
+    if (can_assign && parser_match(ctx, e_tt_equal, compiler->parser)) {
+        compile_expression(ctx, compiler, vm);
+        emit_constant_ref(
+            ctx, vid, e_op_set_glob, e_op_set_glob_long, compiler);
+    } else {
+        emit_constant_ref(
+            ctx, vid, e_op_get_glob, e_op_get_glob_long, compiler);
+    }
+}
+
+static void compile_variable(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+{
+    compile_named_variable(
+        ctx, compiler, vm, compiler->parser->prev, can_assign);
+}
+
+static void compile_expression(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     compile_precedence(ctx, e_prec_assignment, compiler, vm);
 }
 
-static void compile_grouping(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+static void compile_grouping(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
 {
+    (void)can_assign;
     compile_expression(ctx, compiler, vm);
     parser_consume(
         ctx, e_tt_right_paren, "Expect ')' after expression.",
         compiler->parser);
 }
 
-static void compile_unary(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+static void compile_unary(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
 {
+    (void)can_assign;
     token_type_t tt = compiler->parser->prev.type;
 
     compile_precedence(ctx, e_prec_unary, compiler, vm);
@@ -1617,8 +1786,10 @@ static void compile_unary(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     }
 }
 
-static void compile_binary(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+static void compile_binary(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
 {
+    (void)can_assign;
     token_type_t tt = compiler->parser->prev.type;
     parse_rule_t const *rule = get_rule(ctx, tt);
     compile_precedence(ctx, (precedence_t)(rule->precedence + 1), compiler, vm);
@@ -1660,9 +1831,15 @@ static void compile_binary(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     }
 }
 
+static uint compile_new_variable(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, char const *err)
+{
+    parser_consume(ctx, e_tt_identifier, err, compiler->parser);
+    return register_id_const(ctx, compiler, vm, compiler->parser->prev);
+}
+
 static void compile_expr_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
-    
     compile_expression(ctx, compiler, vm);
     parser_consume(
         ctx, e_tt_semicolon, "Expected ';' after expression.",
@@ -1686,9 +1863,29 @@ static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         compile_expr_stmt(ctx, compiler, vm);
 }
 
+static void compile_var_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    uint glob = compile_new_variable(
+        ctx, compiler, vm, "Expected variable name.");
+
+    if (parser_match(ctx, e_tt_equal, compiler->parser))
+        compile_expression(ctx, compiler, vm);
+    else
+        emit_byte(ctx, e_op_nil, compiler);
+
+    parser_consume(
+        ctx, e_tt_semicolon, "Expected ';' after var decl.", compiler->parser);
+
+    emit_constant_ref(
+        ctx, glob, e_op_define_glob, e_op_define_glob_long, compiler);
+}
+
 static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
-    compile_stmt(ctx, compiler, vm);
+    if (parser_match(ctx, e_tt_var, compiler->parser))
+        compile_var_decl(ctx, compiler, vm);
+    else
+        compile_stmt(ctx, compiler, vm);
 
     if (compiler->parser->panic_mode)
         parser_sync(ctx, compiler->parser);
@@ -1738,6 +1935,11 @@ static void repl(ctx_t const *ctx, vm_t *vm)
     usize buffered_chars = 0;
     b32 eof = false;
 
+    struct source_lines {
+        string_t line;
+        struct source_lines *next;
+    } *lines_storage = NULL;
+
     while (!eof || buffered_chars) {
         OUTPUT("> ");
 
@@ -1768,13 +1970,26 @@ static void repl(ctx_t const *ctx, vm_t *vm)
 
         line[line_break] = '\0';
 
-        string_t source = {line, line_break};
-        interpret(ctx, vm, source);
+        struct source_lines *node = ALLOCATE(struct source_lines, 1);
+        node->line = (string_t){ALLOCATE(char, line_break + 1), line_break};
+        node->next = lines_storage;
+        lines_storage = node;
+
+        memcpy(node->line.p, line, line_break + 1);
+
+        interpret(ctx, vm, node->line);
 
         buffered_chars -= line_break + 1;
         char *src = &line[line_break + 1], *dst = line;
         for (usize i = 0; i < buffered_chars; ++i)
             *dst++ = *src++;
+    }
+
+    while (lines_storage) {
+        struct source_lines *tmp = lines_storage;
+        lines_storage = lines_storage->next;
+        FREE(tmp->line.p);
+        FREE(tmp);
     }
 }
 
@@ -1805,7 +2020,6 @@ static void run_file(ctx_t const *ctx, vm_t *vm, char const *fname)
 static int lox_main(ctx_t const *ctx)
 {
     (void)table_add_all;
-    (void)table_get;
     (void)table_delete;
 
     vm_t vm = {0};
