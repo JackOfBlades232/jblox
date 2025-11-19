@@ -56,6 +56,8 @@ typedef enum {
     e_vt_bool,
     e_vt_number,
     e_vt_obj,
+
+    e_vt_vacant = -1,
 } value_type_t;
 
 typedef struct obj obj_t;
@@ -74,6 +76,7 @@ typedef struct {
 #define IS_NIL(value_)     ((value_).type == e_vt_nil)
 #define IS_NUMBER(value_)  ((value_).type == e_vt_number)
 #define IS_OBJ(value_)     ((value_).type == e_vt_obj)
+#define IS_VACANT(value_)  ((value_).type == e_vt_vacant)
 
 #define AS_BOOL(value_)    ((value_).as.boolean)
 #define AS_NUMBER(value_)  ((value_).as.number)
@@ -83,6 +86,9 @@ typedef struct {
 #define NIL_VAL            ((value_t){e_vt_nil,    {.number  = 0.0     }})
 #define NUMBER_VAL(value_) ((value_t){e_vt_number, {.number  = (value_)}})
 #define OBJ_VAL(value_)    ((value_t){e_vt_obj,    {.obj     = (value_)}})
+#define VACANT_VAL         ((value_t){e_vt_vacant, {.obj     = NULL    }})
+
+#define VACANT_VAL_NAMED(nm_obj_) ((value_t){e_vt_vacant, {.obj = (nm_obj_)}})
 
 static b32 is_truthy(ctx_t const *ctx, value_t val)
 {
@@ -155,6 +161,9 @@ static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
     case e_vt_obj:
         // Due to string interning equal strings are always equal obj ptrs.
         return AS_OBJ(v1) == AS_OBJ(v2);
+    case e_vt_vacant:
+        ASSERT(0);
+        return false;
     }
 }
 
@@ -288,7 +297,7 @@ static b32 table_delete(
         return false;
 
     entry->key = NULL;
-    entry->value = BOOL_VAL(true); // tombstone
+    entry->value = VACANT_VAL; // tombstone
     return true;
 }
 
@@ -365,6 +374,8 @@ static inline void write_value_array(
         uint old_cap = arr->cap;
         arr->cap = GROW_CAP(old_cap);
         arr->values = GROW_ARRAY(value_t, arr->values, old_cap, arr->cap);
+        for (uint i = old_cap; i < arr->cap; ++i)
+            arr->values[i] = VACANT_VAL;
     }
 
     arr->values[arr->cnt++] = val;
@@ -455,7 +466,7 @@ static inline uint add_constant(ctx_t const *ctx, chunk_t *chunk, value_t val)
     return chunk->constants.cnt - 1;
 }
 
-static inline void write_constant_ref(
+static inline void write_id_ref(
     ctx_t const *ctx, chunk_t *chunk,
     opcode_t op, opcode_t long_op, uint id, uint line)
 {
@@ -471,7 +482,7 @@ static inline void write_constant_ref(
         // @TODO: a more gracious error?
         PANIC(
             "Constants overflow: "
-            "one chunk can't contain more than 16777215 constants.");
+            "one chunk can't contain more than 16777215 consts/entities.");
     }
 }
 
@@ -480,7 +491,7 @@ static inline void write_constant(
     opcode_t op, opcode_t long_op, value_t val, uint line)
 {
     uint constant = add_constant(ctx, chunk, val);
-    write_constant_ref(ctx, chunk, op, long_op, constant, line);
+    write_id_ref(ctx, chunk, op, long_op, constant, line);
 }
 
 static inline void free_chunk(ctx_t const *ctx, chunk_t *chunk)
@@ -518,6 +529,9 @@ static void print_value(ctx_t const *ctx, value_t val)
     case e_vt_obj:
         print_obj(ctx, &ctx->os->hstdout, val);
         break;
+    case e_vt_vacant:
+        ASSERT(0);
+        break;
     }
 }
 
@@ -537,6 +551,9 @@ static void disasm_value(ctx_t const *ctx, value_t val)
         break;
     case e_vt_obj:
         print_obj(ctx, &ctx->os->hstderr, val);
+        break;
+    case e_vt_vacant:
+        LOG_NONL("<vacant>");
         break;
     }
 }
@@ -571,7 +588,27 @@ static uint disasm_long_constant_instruction(
     return at + 4;
 }
 
-static uint disasm_instruction(ctx_t const *ctx, chunk_t const *chunk, uint at)
+static uint disasm_gvar_instruction(
+    ctx_t const *ctx, char const *name, chunk_t const *chunk, uint at)
+{
+    u8 gvar = chunk->code[at + 1];
+    LOGF("%s %u", name, gvar);
+    return at + 2;
+}
+
+static uint disasm_long_gvar_instruction(
+    ctx_t const *ctx, char const *name, chunk_t const *chunk, uint at)
+{
+    uint gvar =
+        chunk->code[at + 1]
+        | ((uint)chunk->code[at + 2] << 8)
+        | ((uint)chunk->code[at + 3] << 16);
+    LOGF("%s %u", name, gvar);
+    return at + 4;
+}
+
+static uint disasm_instruction(
+    ctx_t const *ctx, chunk_t const *chunk, uint at)
 {
     {
         isize chars = LOGF_NONL("%u:", at);
@@ -620,22 +657,22 @@ static uint disasm_instruction(ctx_t const *ctx, chunk_t const *chunk, uint at)
         return disasm_simple_instruction(
             ctx, "OP_POP", at);
     case e_op_define_glob:
-        return disasm_constant_instruction(
+        return disasm_gvar_instruction(
             ctx, "OP_DEFINE_GLOB", chunk, at);
     case e_op_define_glob_long:
-        return disasm_long_constant_instruction(
+        return disasm_long_gvar_instruction(
             ctx, "OP_DEFINE_GLOB_LONG", chunk, at);
     case e_op_get_glob:
-        return disasm_constant_instruction(
+        return disasm_gvar_instruction(
             ctx, "OP_GET_GLOB", chunk, at);
     case e_op_get_glob_long:
-        return disasm_long_constant_instruction(
+        return disasm_long_gvar_instruction(
             ctx, "OP_GET_GLOB_LONG", chunk, at);
     case e_op_set_glob:
-        return disasm_constant_instruction(
+        return disasm_gvar_instruction(
             ctx, "OP_SET_GLOB", chunk, at);
     case e_op_set_glob_long:
-        return disasm_long_constant_instruction(
+        return disasm_long_gvar_instruction(
             ctx, "OP_SET_GLOB_LONG", chunk, at);
     case e_op_eq:
         return disasm_simple_instruction(
@@ -719,8 +756,9 @@ typedef struct vm {
     vm_stack_segment_t stack;
     vm_stack_segment_t *cur_stack_seg; 
     value_t *stack_head;
-    table_t globals;
     table_t strings;
+    table_t globals;
+    value_array_t globals_values;
     obj_t *objects;
 } vm_t;
 
@@ -778,15 +816,17 @@ static void reset_stack(ctx_t const *ctx, vm_t *vm)
 static void init_vm(ctx_t const *ctx, vm_t *vm)
 {
     reset_stack(ctx, vm);
-    vm->globals = make_table(ctx);
     vm->strings = make_table(ctx);
+    vm->globals = make_table(ctx);
+    vm->globals_values = make_value_array(ctx);
     vm->objects = NULL;
 }
 
 static void free_vm(ctx_t const *ctx, vm_t *vm)
 {
-    free_table(ctx, &vm->globals);
     free_table(ctx, &vm->strings);
+    free_table(ctx, &vm->globals);
+    free_value_array(ctx, &vm->globals_values);
     obj_t *obj = vm->objects;
     while (obj) {
         obj_t *next = obj->next;
@@ -883,10 +923,10 @@ static void runtime_error(ctx_t const *ctx, vm_t *vm, char const *fmt, ...)
 static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
 {
 #define READ_BYTE() (*vm->ip++)
+#define READ_LONG() \
+    ((u32)READ_BYTE() | ((u32)READ_BYTE() << 8) | ((u32)READ_BYTE() << 16))
 #define READ_CONSTANT() (vm->chunk->constants.values[READ_BYTE()])
-#define READ_CONSTANT_LONG()     \
-    (vm->chunk->constants.values \
-        [(u32)READ_BYTE() | ((u32)READ_BYTE() << 8) | ((u32)READ_BYTE() << 16)])
+#define READ_CONSTANT_LONG() (vm->chunk->constants.values[READ_LONG()])
 #define READ_STRING() AS_STRING_OBJ(READ_CONSTANT())
 #define READ_STRING_LONG() AS_STRING_OBJ(READ_CONSTANT_LONG())
 #define BINARY_OP(op_, vt_)                                      \
@@ -948,59 +988,59 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
             break;
 
         case e_op_define_glob:
-            table_set(
-                ctx, &vm->globals, READ_STRING(), pop_stack(ctx, vm));
+            vm->globals_values.values[READ_BYTE()] = pop_stack(ctx, vm);
             break;
 
         case e_op_define_glob_long:
-            table_set(
-                ctx, &vm->globals, READ_STRING_LONG(), pop_stack(ctx, vm));
+            vm->globals_values.values[READ_LONG()] = pop_stack(ctx, vm);
             break;
 
         case e_op_get_glob: {
-            value_t val;
-            obj_string_t *name = READ_STRING();
-            if (!table_get(ctx, &vm->globals, name, &val)) {
+            uint gid = READ_BYTE();
+            if (IS_VACANT(vm->globals_values.values[gid])) {
+                ASSERT(AS_OBJ(vm->globals_values.values[gid]));
                 runtime_error(
                     ctx, vm, "Undefined variable '%S'.",
-                    AS_STRING(OBJ_VAL((obj_t *)name)));
+                    AS_STRING(vm->globals_values.values[gid]));
                 return e_interp_runtime_err;
             }
-            push_stack(ctx, vm, val);
+            push_stack(ctx, vm, vm->globals_values.values[gid]);
         } break;
 
         case e_op_get_glob_long: {
-            value_t val;
-            obj_string_t *name = READ_STRING_LONG();
-            if (!table_get(ctx, &vm->globals, name, &val)) {
+            uint gid = READ_LONG();
+            if (IS_VACANT(vm->globals_values.values[gid])) {
+                ASSERT(AS_OBJ(vm->globals_values.values[gid]));
                 runtime_error(
                     ctx, vm, "Undefined variable '%S'.",
-                    AS_STRING(OBJ_VAL((obj_t *)name)));
+                    AS_STRING(vm->globals_values.values[gid]));
                 return e_interp_runtime_err;
             }
-            push_stack(ctx, vm, val);
+            push_stack(ctx, vm, vm->globals_values.values[gid]);
         } break;
 
         case e_op_set_glob: {
-            obj_string_t *name = READ_STRING();
-            if (table_set(ctx, &vm->globals, name, STACK_TOP(vm))) {
-                table_delete(ctx, &vm->globals, name);
+            uint gid = READ_BYTE();
+            if (IS_VACANT(vm->globals_values.values[gid])) {
+                ASSERT(AS_OBJ(vm->globals_values.values[gid]));
                 runtime_error(
                     ctx, vm, "Undefined variable '%S'.",
-                    AS_STRING(OBJ_VAL((obj_t *)name)));
+                    AS_STRING(vm->globals_values.values[gid]));
                 return e_interp_runtime_err;
             }
+            vm->globals_values.values[gid] = STACK_TOP(vm);
         } break;
 
         case e_op_set_glob_long: {
-            obj_string_t *name = READ_STRING_LONG();
-            if (table_set(ctx, &vm->globals, name, STACK_TOP(vm))) {
-                table_delete(ctx, &vm->globals, name);
+            uint gid = READ_LONG();
+            if (IS_VACANT(vm->globals_values.values[gid])) {
+                ASSERT(AS_OBJ(vm->globals_values.values[gid]));
                 runtime_error(
                     ctx, vm, "Undefined variable '%S'.",
-                    AS_STRING(OBJ_VAL((obj_t *)name)));
+                    AS_STRING(vm->globals_values.values[gid]));
                 return e_interp_runtime_err;
             }
+            vm->globals_values.values[gid] = STACK_TOP(vm);
         } break;
 
         case e_op_eq: {
@@ -1529,12 +1569,12 @@ static void emit_constant(ctx_t const *ctx, value_t val, compiler_t *compiler)
         (uint)compiler->parser->prev.line);
 }
 
-static void emit_constant_ref(
+static void emit_id_ref(
     ctx_t const *ctx,
     uint id, opcode_t op, opcode_t long_op,
     compiler_t *compiler)
 {
-    write_constant_ref(
+    write_id_ref(
         ctx, compiler->compiling_chunk,
         op, long_op, id, (uint)compiler->parser->prev.line);
 }
@@ -1544,11 +1584,19 @@ static void emit_return(ctx_t const *ctx, compiler_t *compiler)
     emit_byte(ctx, e_op_return, compiler);
 }
 
-static uint register_id_const(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, token_t name)
+static uint register_gvar_name(ctx_t const *ctx, vm_t *vm, token_t name)
 {
-    obj_t *str = add_string_ref(ctx, vm, name.start, (uint)(name.len));
-    return add_constant(ctx, compiler->compiling_chunk, OBJ_VAL(str));
+    obj_string_t *str =
+        (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
+    value_t id;
+    if (!table_get(ctx, &vm->globals, str, &id)) {
+        write_value_array(
+            ctx, &vm->globals_values, VACANT_VAL_NAMED((obj_t *)str));
+        id = NUMBER_VAL((f64)(vm->globals_values.cnt - 1));
+        table_set(ctx, &vm->globals, str, id);
+    }
+
+    return (uint)AS_NUMBER(id);
 }
 
 static void end_compiler(ctx_t const *ctx, compiler_t *compiler)
@@ -1730,15 +1778,13 @@ static void compile_named_variable(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm,
     token_t name, b32 can_assign)
 {
-    uint vid = register_id_const(ctx, compiler, vm, name);
+    uint vid = register_gvar_name(ctx, vm, name);
 
     if (can_assign && parser_match(ctx, e_tt_equal, compiler->parser)) {
         compile_expression(ctx, compiler, vm);
-        emit_constant_ref(
-            ctx, vid, e_op_set_glob, e_op_set_glob_long, compiler);
+        emit_id_ref(ctx, vid, e_op_set_glob, e_op_set_glob_long, compiler);
     } else {
-        emit_constant_ref(
-            ctx, vid, e_op_get_glob, e_op_get_glob_long, compiler);
+        emit_id_ref(ctx, vid, e_op_get_glob, e_op_get_glob_long, compiler);
     }
 }
 
@@ -1835,7 +1881,7 @@ static uint compile_new_variable(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, char const *err)
 {
     parser_consume(ctx, e_tt_identifier, err, compiler->parser);
-    return register_id_const(ctx, compiler, vm, compiler->parser->prev);
+    return register_gvar_name(ctx, vm, compiler->parser->prev);
 }
 
 static void compile_expr_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
@@ -1876,8 +1922,7 @@ static void compile_var_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     parser_consume(
         ctx, e_tt_semicolon, "Expected ';' after var decl.", compiler->parser);
 
-    emit_constant_ref(
-        ctx, glob, e_op_define_glob, e_op_define_glob_long, compiler);
+    emit_id_ref(ctx, glob, e_op_define_glob, e_op_define_glob_long, compiler);
 }
 
 static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)

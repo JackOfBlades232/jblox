@@ -72,6 +72,8 @@ static inline io_file_t io_read_open_file(ctx_t const *ctx, char const *fn)
     f.ioh.hnd = ctx->os->sys.create_file_a(
         fn, WIN32_GENERIC_READ, 0, NULL,
         WIN32_OPEN_EXISTING, WIN32_FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f.ioh.hnd == WIN32_INVALID_HANDLE_VALUE)
+        f.ioh.hnd = NULL;
     if (!io_is_valid(ctx, &f.ioh))
         return f;
 
