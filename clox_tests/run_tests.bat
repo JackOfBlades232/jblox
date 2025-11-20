@@ -4,6 +4,7 @@ echo jb-cpplox:
 
 call :RunTest hello.lox %*
 call :RunTest gvars.lox %*
+call :RunTest scopes.lox %*
 
 popd
 exit /b
