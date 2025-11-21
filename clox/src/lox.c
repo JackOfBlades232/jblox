@@ -1557,6 +1557,7 @@ static void parser_sync(ctx_t const *ctx, parser_t *parser)
 
 typedef struct {
     int depth;
+    int slot;
 } lvar_semdata_t;
 
 typedef struct {
@@ -1594,9 +1595,9 @@ static inline void free_lvar_semdata_array(
 typedef struct {
     parser_t *parser;
     chunk_t *compiling_chunk;
-    table_t lvar_map;
-    lvar_semdata_array_t lvars;
+    table_t lvar_map; // string name -> lvar_semdata_array_t masked as obj_t *
     int current_scope_depth;
+    int current_live_lvars;
 } compiler_t;
 
 static void emit_byte(ctx_t const *ctx, u8 byte, compiler_t *compiler)
@@ -1641,6 +1642,28 @@ static uint register_gvar_name(ctx_t const *ctx, vm_t *vm, token_t name)
     }
 
     return (uint)AS_NUMBER(id);
+}
+
+static uint register_lvar(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, token_t name)
+{
+    obj_string_t *str =
+        (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
+    value_t entry_ptr;
+    if (!table_get(ctx, &compiler->lvar_map, str, &entry_ptr)) {
+        lvar_semdata_array_t *arr = ALLOCATE(lvar_semdata_array_t, 1);
+        write_lvar_semdata_array(
+            ctx, arr,
+            (lvar_semdata_t){
+                compiler->current_scope_depth,
+                compiler->current_live_lvars++
+            }
+        );
+        entry_ptr = OBJ_VAL((obj_t *)arr);
+        table_set(ctx, &vm->gvar_map, str, entry_ptr);
+    } else {
+        lvar_semdata_array_t *arr = (lvar_semdata_array_t *)AS_OBJ(entry_ptr);
+    }
 }
 
 static void begin_compiler(ctx_t const *ctx, compiler_t *compiler)
@@ -1946,7 +1969,10 @@ static uint compile_new_variable(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, char const *err)
 {
     parser_consume(ctx, e_tt_identifier, err, compiler->parser);
-    return register_gvar_name(ctx, vm, compiler->parser->prev);
+    if (compiler->current_scope_depth == 0)
+        return register_gvar_name(ctx, vm, compiler->parser->prev);
+    else
+        return register_lvar(ctx, compiler, vm, compiler->parser->prev);
 }
 
 static void compile_expr_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
@@ -2005,7 +2031,10 @@ static void compile_var_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     parser_consume(
         ctx, e_tt_semicolon, "Expected ';' after var decl.", compiler->parser);
 
-    emit_id_ref(ctx, glob, e_op_define_glob, e_op_define_glob_long, compiler);
+    if (compiler->current_scope_depth == 0) {
+        emit_id_ref(
+            ctx, glob, e_op_define_glob, e_op_define_glob_long, compiler);
+    }
 }
 
 static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
