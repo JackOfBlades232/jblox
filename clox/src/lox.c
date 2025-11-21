@@ -334,12 +334,18 @@ typedef enum {
     e_op_true,
     e_op_false,
     e_op_pop,
+    e_op_popn,
+    e_op_popn_long,
     e_op_define_glob,
     e_op_define_glob_long,
     e_op_get_glob,
     e_op_get_glob_long,
     e_op_set_glob,
     e_op_set_glob_long,
+    e_op_get_loc,
+    e_op_get_loc_long,
+    e_op_set_loc,
+    e_op_set_loc_long,
     e_op_eq,
     e_op_neq,
     e_op_gt,
@@ -588,7 +594,7 @@ static uint disasm_long_constant_instruction(
     return at + 4;
 }
 
-static uint disasm_gvar_instruction(
+static uint disasm_id_instruction(
     ctx_t const *ctx, char const *name, chunk_t const *chunk, uint at)
 {
     u8 gvar = chunk->code[at + 1];
@@ -596,7 +602,7 @@ static uint disasm_gvar_instruction(
     return at + 2;
 }
 
-static uint disasm_long_gvar_instruction(
+static uint disasm_long_id_instruction(
     ctx_t const *ctx, char const *name, chunk_t const *chunk, uint at)
 {
     uint gvar =
@@ -656,24 +662,42 @@ static uint disasm_instruction(
     case e_op_pop:
         return disasm_simple_instruction(
             ctx, "OP_POP", at);
+    case e_op_popn:
+        return disasm_id_instruction(
+            ctx, "OP_POPN", chunk, at);
+    case e_op_popn_long:
+        return disasm_long_id_instruction(
+            ctx, "OP_POPN", chunk, at);
     case e_op_define_glob:
-        return disasm_gvar_instruction(
+        return disasm_id_instruction(
             ctx, "OP_DEFINE_GLOB", chunk, at);
     case e_op_define_glob_long:
-        return disasm_long_gvar_instruction(
+        return disasm_long_id_instruction(
             ctx, "OP_DEFINE_GLOB_LONG", chunk, at);
     case e_op_get_glob:
-        return disasm_gvar_instruction(
+        return disasm_id_instruction(
             ctx, "OP_GET_GLOB", chunk, at);
     case e_op_get_glob_long:
-        return disasm_long_gvar_instruction(
+        return disasm_long_id_instruction(
             ctx, "OP_GET_GLOB_LONG", chunk, at);
     case e_op_set_glob:
-        return disasm_gvar_instruction(
+        return disasm_id_instruction(
             ctx, "OP_SET_GLOB", chunk, at);
     case e_op_set_glob_long:
-        return disasm_long_gvar_instruction(
+        return disasm_long_id_instruction(
             ctx, "OP_SET_GLOB_LONG", chunk, at);
+    case e_op_get_loc:
+        return disasm_id_instruction(
+            ctx, "OP_GET_LOC", chunk, at);
+    case e_op_get_loc_long:
+        return disasm_long_id_instruction(
+            ctx, "OP_GET_LOC_LONG", chunk, at);
+    case e_op_set_loc:
+        return disasm_id_instruction(
+            ctx, "OP_SET_LOC", chunk, at);
+    case e_op_set_loc_long:
+        return disasm_long_id_instruction(
+            ctx, "OP_SET_LOC_LONG", chunk, at);
     case e_op_eq:
         return disasm_simple_instruction(
             ctx, "OP_EQ", at);
@@ -755,6 +779,7 @@ typedef struct vm {
     u8 *ip;
     vm_stack_segment_t stack;
     vm_stack_segment_t *cur_stack_seg; 
+    uint stack_seg_count;
     value_t *stack_head;
     table_t strings;
     table_t gvar_map;
@@ -809,8 +834,10 @@ static inline obj_t *add_string_ref(
 static void reset_stack(ctx_t const *ctx, vm_t *vm)
 {
     (void)ctx;
+    memset(&vm->stack, 0, sizeof(vm->stack));
     vm->cur_stack_seg = &vm->stack;
     vm->stack_head = vm->stack.values;
+    vm->stack_seg_count = 1;
 }
 
 static void init_vm(ctx_t const *ctx, vm_t *vm)
@@ -827,6 +854,12 @@ static void free_vm(ctx_t const *ctx, vm_t *vm)
     free_table(ctx, &vm->strings);
     free_table(ctx, &vm->gvar_map);
     free_value_array(ctx, &vm->gvars);
+    vm_stack_segment_t *seg = vm->stack.next;
+    while (seg) {
+        vm_stack_segment_t *tmp = seg;
+        seg = seg->next;
+        FREE(tmp);
+    }
     obj_t *obj = vm->objects;
     while (obj) {
         obj_t *next = obj->next;
@@ -843,6 +876,7 @@ static void free_vm(ctx_t const *ctx, vm_t *vm)
         new_seg_->next = NULL;                                          \
         (vm_)->cur_stack_seg = new_seg_;                                \
         (vm_)->stack_head = new_seg_->values;                           \
+        ++vm->stack_seg_count;                                          \
     } while (0)
 
 #define POP_STACK_SEG(vm_)                                        \
@@ -853,6 +887,7 @@ static void free_vm(ctx_t const *ctx, vm_t *vm)
         FREE(old_seg_);                                           \
         (vm_)->stack_head =                                       \
             (vm_)->cur_stack_seg->values + VM_STACK_SEGMENT_SIZE; \
+        --vm->stack_seg_count;                                    \
     } while (0)
 
 static void push_stack(ctx_t const *ctx, vm_t *vm, value_t val)
@@ -872,6 +907,35 @@ static value_t pop_stack(ctx_t const *ctx, vm_t *vm)
         POP_STACK_SEG(vm);
 
     return res;
+}
+
+static void popn_stack(ctx_t const *ctx, vm_t *vm, uint n)
+{
+    uint full_segments_size = (vm->stack_seg_count - 1) * VM_STACK_SEGMENT_SIZE;
+    uint head_segment_size = (uint)(vm->stack_head - vm->cur_stack_seg->values);
+    ASSERT(n <= full_segments_size + head_segment_size);
+    while (n >= head_segment_size && vm->cur_stack_seg->prev) {
+        POP_STACK_SEG(vm);
+        n -= head_segment_size;
+        head_segment_size = VM_STACK_SEGMENT_SIZE;
+    }
+
+    vm->stack_head -= n;
+}
+
+static value_t *at_stack(ctx_t const *ctx, vm_t *vm, uint at)
+{
+    uint full_segments_size = (vm->stack_seg_count - 1) * VM_STACK_SEGMENT_SIZE;
+    ASSERT(at < full_segments_size +
+        (uint)(vm->stack_head - vm->cur_stack_seg->values));
+    vm_stack_segment_t *seg = vm->cur_stack_seg;
+    while (at < full_segments_size) {
+        ASSERT(seg->prev);
+        ASSERT(full_segments_size >= VM_STACK_SEGMENT_SIZE);
+        full_segments_size -= VM_STACK_SEGMENT_SIZE;
+        seg = seg->prev;
+    }
+    return &seg->values[at - full_segments_size];
 }
 
 #define STACK_TOP(vm_) (*(vm->stack_head - 1))
@@ -986,6 +1050,12 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
         case e_op_pop:
             pop_stack(ctx, vm);
             break;
+        case e_op_popn:
+            popn_stack(ctx, vm, READ_BYTE());
+            break;
+        case e_op_popn_long:
+            popn_stack(ctx, vm, READ_LONG());
+            break;
 
         case e_op_define_glob:
             vm->gvars.values[READ_BYTE()] = pop_stack(ctx, vm);
@@ -1042,6 +1112,19 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
             }
             vm->gvars.values[gid] = STACK_TOP(vm);
         } break;
+
+        case e_op_get_loc:
+            push_stack(ctx, vm, *at_stack(ctx, vm, READ_BYTE()));
+            break;
+        case e_op_get_loc_long:
+            push_stack(ctx, vm, *at_stack(ctx, vm, READ_LONG()));
+            break;
+        case e_op_set_loc:
+            *at_stack(ctx, vm, READ_BYTE()) = STACK_TOP(vm);
+            break;
+        case e_op_set_loc_long:
+            *at_stack(ctx, vm, READ_LONG()) = STACK_TOP(vm);
+            break;
 
         case e_op_eq: {
             value_t b = pop_stack(ctx, vm);
@@ -1556,46 +1639,14 @@ static void parser_sync(ctx_t const *ctx, parser_t *parser)
 }
 
 typedef struct {
-    int depth;
-} lvar_semdata_t;
-
-typedef struct {
-    uint cnt, cap;
-    lvar_semdata_t *datas;
-} lvar_semdata_array_t;
-
-static inline lvar_semdata_array_t make_lvar_semdata_array(ctx_t const *ctx)
-{
-    (void)ctx;
-    return (lvar_semdata_array_t){0};
-}
-
-static inline void write_lvar_semdata_array(
-    ctx_t const *ctx, lvar_semdata_array_t *arr, lvar_semdata_t val)
-{
-    if (arr->cap < arr->cnt + 1) {
-        uint old_cap = arr->cap;
-        arr->cap = GROW_CAP(old_cap);
-        arr->datas = GROW_ARRAY(lvar_semdata_t, arr->datas, old_cap, arr->cap);
-    }
-
-    arr->datas[arr->cnt++] = val;
-}
-
-static inline void free_lvar_semdata_array(
-    ctx_t const *ctx, lvar_semdata_array_t *arr)
-{
-    if (!arr || !arr->datas)
-        return;
-    FREE_ARRAY(lvar_semdata_t, arr->datas, arr->cap);
-    *arr = make_lvar_semdata_array(ctx);
-}
+    table_t map;
+    int cnt_in_prev_blocks;
+} lvar_scope_t;
 
 typedef struct {
     parser_t *parser;
     chunk_t *compiling_chunk;
-    table_t lvar_map;
-    lvar_semdata_array_t lvars;
+    lvar_scope_t scope_lvars[256];
     int current_scope_depth;
 } compiler_t;
 
@@ -1629,7 +1680,7 @@ static void emit_return(ctx_t const *ctx, compiler_t *compiler)
     emit_byte(ctx, e_op_return, compiler);
 }
 
-static uint register_gvar_name(ctx_t const *ctx, vm_t *vm, token_t name)
+static uint register_gvar(ctx_t const *ctx, vm_t *vm, token_t name)
 {
     obj_string_t *str =
         (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
@@ -1643,16 +1694,58 @@ static uint register_gvar_name(ctx_t const *ctx, vm_t *vm, token_t name)
     return (uint)AS_NUMBER(id);
 }
 
+static uint register_lvar(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, token_t name)
+{
+    obj_string_t *str =
+        (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
+    table_t *scope_lvar_table =
+        &compiler->scope_lvars[compiler->current_scope_depth - 1].map;
+    uint id = scope_lvar_table->cnt;
+    value_t lvar_id = NUMBER_VAL(id);
+    if (!table_set(ctx, scope_lvar_table, str, lvar_id)) {
+        parser_error(
+            ctx,
+            "Local variable redeclaration in same scope.",
+            compiler->parser);
+        return (uint)(-1);
+    }
+
+    return id;
+}
+
+static uint resolve_lvar(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, token_t name)
+{
+    if (compiler->current_scope_depth == 0)
+        return (uint)(-1);
+    obj_string_t *str =
+        (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
+    for (int i = compiler->current_scope_depth - 1; i >= 0; --i) {
+        value_t id_val;
+        if (table_get(ctx, &compiler->scope_lvars[i].map, str, &id_val)) {
+            return
+                (uint)AS_NUMBER(id_val) +
+                compiler->scope_lvars[i].cnt_in_prev_blocks;
+        }
+    }
+    return (uint)(-1);
+}
+
 static void begin_compiler(ctx_t const *ctx, compiler_t *compiler)
 {
-    compiler->lvar_map = make_table(ctx);
-    compiler->lvars = make_lvar_semdata_array(ctx);
+    for (uint i = 0; i < ARRCNT(compiler->scope_lvars); ++i) {
+        compiler->scope_lvars[i].map = make_table(ctx);
+        compiler->scope_lvars[i].cnt_in_prev_blocks = 0;
+    }
     compiler->current_scope_depth = 0;
 }
 
 static void end_compiler(ctx_t const *ctx, compiler_t *compiler)
 {
     emit_return(ctx, compiler);
+    for (uint i = 0; i < ARRCNT(compiler->scope_lvars); ++i)
+        free_table(ctx, &compiler->scope_lvars[i].map);
 #if DEBUG_PRINT_CODE
     if (!compiler->parser->had_error)
         DISASSEMBLE_CHUNK(compiler->compiling_chunk, "code");
@@ -1662,13 +1755,40 @@ static void end_compiler(ctx_t const *ctx, compiler_t *compiler)
 static void begin_scope(ctx_t const *ctx, compiler_t *compiler)
 {
     (void)ctx;
+    if (compiler->current_scope_depth >= 256) {
+        parser_error(
+            ctx,
+            "Can't have more than 255 nested blocks in one chunk.",
+            compiler->parser);
+        return;
+    }
+    if (compiler->current_scope_depth > 0) {
+        lvar_scope_t *prev_scope =
+            &compiler->scope_lvars[compiler->current_scope_depth - 1];
+        lvar_scope_t *cur_scope =
+            &compiler->scope_lvars[compiler->current_scope_depth];
+
+        cur_scope->cnt_in_prev_blocks =
+            prev_scope->cnt_in_prev_blocks + prev_scope->map.cnt;
+    }
     ++compiler->current_scope_depth;
 }
 
 static void end_scope(ctx_t const *ctx, compiler_t *compiler)
 {
     (void)ctx;
+    ASSERT(compiler->current_scope_depth);
     --compiler->current_scope_depth;
+
+    table_t *scope_lvar_table =
+        &compiler->scope_lvars[compiler->current_scope_depth].map;
+    emit_id_ref(
+        ctx, scope_lvar_table->cnt, e_op_popn, e_op_popn_long, compiler);
+
+    memset(
+        scope_lvar_table->entries, 0,
+        sizeof(table_entry_t) * scope_lvar_table->cap);
+    scope_lvar_table->cnt = 0;
 }
 
 typedef enum {
@@ -1841,13 +1961,26 @@ static void compile_named_variable(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm,
     token_t name, b32 can_assign)
 {
-    uint vid = register_gvar_name(ctx, vm, name);
+    u8 get_op, set_op, get_lop, set_lop;
+    uint vid = resolve_lvar(ctx, compiler, vm, name);
+    if (vid == (uint)(-1)) {
+        vid = register_gvar(ctx, vm, name);
+        get_op = e_op_get_glob;
+        get_lop = e_op_get_glob_long;
+        set_op = e_op_set_glob;
+        set_lop = e_op_set_glob_long;
+    } else {
+        get_op = e_op_get_loc;
+        get_lop = e_op_get_loc_long;
+        set_op = e_op_set_loc;
+        set_lop = e_op_set_loc_long;
+    }
 
     if (can_assign && parser_match(ctx, e_tt_equal, compiler->parser)) {
         compile_expression(ctx, compiler, vm);
-        emit_id_ref(ctx, vid, e_op_set_glob, e_op_set_glob_long, compiler);
+        emit_id_ref(ctx, vid, set_op, set_lop, compiler);
     } else {
-        emit_id_ref(ctx, vid, e_op_get_glob, e_op_get_glob_long, compiler);
+        emit_id_ref(ctx, vid, get_op, get_lop, compiler);
     }
 }
 
@@ -1946,7 +2079,10 @@ static uint compile_new_variable(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, char const *err)
 {
     parser_consume(ctx, e_tt_identifier, err, compiler->parser);
-    return register_gvar_name(ctx, vm, compiler->parser->prev);
+    if (compiler->current_scope_depth == 0)
+        return register_gvar(ctx, vm, compiler->parser->prev);
+    else
+        return register_lvar(ctx, compiler, vm, compiler->parser->prev);
 }
 
 static void compile_expr_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
@@ -1994,7 +2130,7 @@ static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 
 static void compile_var_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
-    uint glob = compile_new_variable(
+    uint vid = compile_new_variable(
         ctx, compiler, vm, "Expected variable name.");
 
     if (parser_match(ctx, e_tt_equal, compiler->parser))
@@ -2005,7 +2141,10 @@ static void compile_var_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     parser_consume(
         ctx, e_tt_semicolon, "Expected ';' after var decl.", compiler->parser);
 
-    emit_id_ref(ctx, glob, e_op_define_glob, e_op_define_glob_long, compiler);
+    if (compiler->current_scope_depth == 0) {
+        emit_id_ref(
+            ctx, vid, e_op_define_glob, e_op_define_glob_long, compiler);
+    }
 }
 
 static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)

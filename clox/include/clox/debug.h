@@ -4,7 +4,8 @@
 
 #if NDEBUG
 
-#define ASSERT(...)
+#define ASSERT(e_) ((void)e_)
+#define DEBUG_BREAK
 
 #else
 
