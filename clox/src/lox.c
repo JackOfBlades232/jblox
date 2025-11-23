@@ -1241,7 +1241,7 @@ typedef enum {
   e_tt_and, e_tt_class, e_tt_else, e_tt_false,
   e_tt_for, e_tt_fun, e_tt_if, e_tt_nil, e_tt_or,
   e_tt_print, e_tt_return, e_tt_super, e_tt_this,
-  e_tt_true, e_tt_var, e_tt_while,
+  e_tt_true, e_tt_var, e_tt_let, e_tt_while,
 
   e_tt_error, e_tt_eof
 } token_type_t;
@@ -1417,6 +1417,8 @@ static token_type_t scanner_id_type(ctx_t const *ctx, scanner_t const *scanner)
         break;
     case 'i':
         return scanner_check_kw(ctx, 1, LITSTR("f"), e_tt_if, scanner);
+    case 'l':
+        return scanner_check_kw(ctx, 1, LITSTR("et"), e_tt_let, scanner);
     case 'n':
         return scanner_check_kw(ctx, 1, LITSTR("il"), e_tt_nil, scanner);
     case 'o':
@@ -1623,6 +1625,7 @@ static void parser_sync(ctx_t const *ctx, parser_t *parser)
         case e_tt_class:
         case e_tt_fun:
         case e_tt_var:
+        case e_tt_let:
         case e_tt_for:
         case e_tt_if:
         case e_tt_while:
@@ -1681,29 +1684,37 @@ static void emit_return(ctx_t const *ctx, compiler_t *compiler)
     emit_byte(ctx, e_op_return, compiler);
 }
 
-static uint register_gvar(ctx_t const *ctx, vm_t *vm, token_t name)
+typedef struct {
+    uint vid;
+    b32 is_const;
+} resolve_res_t;
+
+static resolve_res_t register_gvar(
+    ctx_t const *ctx, vm_t *vm, token_t name, b32 is_const)
 {
     obj_string_t *str =
         (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
     value_t id;
     if (!table_get(ctx, &vm->gvar_map, str, &id)) {
         write_value_array(ctx, &vm->gvars, VACANT_VAL_NAMED((obj_t *)str));
-        id = NUMBER_VAL((f64)(vm->gvars.cnt - 1));
+        id = NUMBER_VAL((f64)vm->gvars.cnt * (is_const ? -1.0 : 1.0));
         table_set(ctx, &vm->gvar_map, str, id);
     }
 
-    return (uint)AS_NUMBER(id);
+    f64 fvid = AS_NUMBER(id);
+    return (resolve_res_t){(uint)ABS(fvid) - 1, fvid < 0.0};
 }
 
 static uint register_lvar(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, token_t name)
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm,
+    token_t name, b32 is_const)
 {
     obj_string_t *str =
         (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
     table_t *scope_lvar_table =
         &compiler->scope_lvars[compiler->current_scope_depth - 1].map;
     uint id = scope_lvar_table->cnt;
-    value_t lvar_id = NUMBER_VAL(id);
+    value_t lvar_id = NUMBER_VAL((f64)(id + 1) * (is_const ? -1.0 : 1.0));
     if (!table_set(ctx, scope_lvar_table, str, lvar_id)) {
         parser_error(
             ctx,
@@ -1726,29 +1737,31 @@ static void mark_lvar_initialzied(
     ++scope->initialized_cnt;
 }
 
-static uint resolve_lvar(
+static resolve_res_t resolve_lvar(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, token_t name)
 {
     if (compiler->current_scope_depth == 0)
-        return (uint)(-1);
+        return (resolve_res_t){(uint)(-1), true};
     obj_string_t *str =
         (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
     for (int i = compiler->current_scope_depth - 1; i >= 0; --i) {
         lvar_scope_t *scope = &compiler->scope_lvars[i];
         value_t id_val;
         if (table_get(ctx, &scope->map, str, &id_val)) {
-            uint id = (uint)AS_NUMBER(id_val);
+            f64 fvid = AS_NUMBER(id_val);
+            uint id = (uint)ABS(fvid) - 1;
+            b32 is_const = fvid < 0.0;
             if (id >= scope->initialized_cnt) {
                 parser_error(
                     ctx,
                     "Can't read local variable in it's own initializer.",
                     compiler->parser);
-                return (uint)(-1);
+                return (resolve_res_t){(uint)(-1), true};
             }
-            return id + scope->cnt_in_prev_blocks;
+            return (resolve_res_t){id + scope->cnt_in_prev_blocks, is_const};
         }
     }
-    return (uint)(-1);
+    return (resolve_res_t){(uint)(-1), true};
 }
 
 static void begin_compiler(ctx_t const *ctx, compiler_t *compiler)
@@ -1892,6 +1905,7 @@ parse_rule_t const c_parse_rules[] = {
     [e_tt_this]          = {NULL,              NULL,            e_prec_none  },
     [e_tt_true]          = {&compile_literal,  NULL,            e_prec_none  },
     [e_tt_var]           = {NULL,              NULL,            e_prec_none  },
+    [e_tt_let]           = {NULL,              NULL,            e_prec_none  },
     [e_tt_while]         = {NULL,              NULL,            e_prec_none  },
     [e_tt_error]         = {NULL,              NULL,            e_prec_none  },
     [e_tt_eof]           = {NULL,              NULL,            e_prec_none  },
@@ -1983,9 +1997,9 @@ static void compile_named_variable(
     token_t name, b32 can_assign)
 {
     u8 get_op, set_op, get_lop, set_lop;
-    uint vid = resolve_lvar(ctx, compiler, vm, name);
-    if (vid == (uint)(-1)) {
-        vid = register_gvar(ctx, vm, name);
+    resolve_res_t resolved = resolve_lvar(ctx, compiler, vm, name);
+    if (resolved.vid == (uint)(-1)) {
+        resolved = register_gvar(ctx, vm, name, false);
         get_op = e_op_get_glob;
         get_lop = e_op_get_glob_long;
         set_op = e_op_set_glob;
@@ -1998,10 +2012,16 @@ static void compile_named_variable(
     }
 
     if (can_assign && parser_match(ctx, e_tt_equal, compiler->parser)) {
+        if (resolved.is_const) {
+            parser_error(
+                ctx, "Can't assign to an immutable variable.",
+                compiler->parser);
+            return;
+        }
         compile_expression(ctx, compiler, vm);
-        emit_id_ref(ctx, vid, set_op, set_lop, compiler);
+        emit_id_ref(ctx, resolved.vid, set_op, set_lop, compiler);
     } else {
-        emit_id_ref(ctx, vid, get_op, get_lop, compiler);
+        emit_id_ref(ctx, resolved.vid, get_op, get_lop, compiler);
     }
 }
 
@@ -2097,13 +2117,17 @@ static void compile_binary(
 static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
 
 static uint compile_new_variable(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, char const *err)
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm,
+    char const *err, b32 is_const)
 {
     parser_consume(ctx, e_tt_identifier, err, compiler->parser);
-    if (compiler->current_scope_depth == 0)
-        return register_gvar(ctx, vm, compiler->parser->prev);
-    else
-        return register_lvar(ctx, compiler, vm, compiler->parser->prev);
+    if (compiler->current_scope_depth == 0) {
+        return register_gvar(
+            ctx, vm, compiler->parser->prev, is_const).vid;
+    } else {
+        return register_lvar(
+            ctx, compiler, vm, compiler->parser->prev, is_const);
+    }
 }
 
 static void compile_expr_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
@@ -2149,10 +2173,11 @@ static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     }
 }
 
-static void compile_var_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+static void compile_var_decl(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 is_const)
 {
     uint vid = compile_new_variable(
-        ctx, compiler, vm, "Expected variable name.");
+        ctx, compiler, vm, "Expected variable name.", is_const);
 
     if (parser_match(ctx, e_tt_equal, compiler->parser))
         compile_expression(ctx, compiler, vm);
@@ -2173,7 +2198,9 @@ static void compile_var_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     if (parser_match(ctx, e_tt_var, compiler->parser))
-        compile_var_decl(ctx, compiler, vm);
+        compile_var_decl(ctx, compiler, vm, false);
+    else if (parser_match(ctx, e_tt_let, compiler->parser))
+        compile_var_decl(ctx, compiler, vm, true);
     else
         compile_stmt(ctx, compiler, vm);
 

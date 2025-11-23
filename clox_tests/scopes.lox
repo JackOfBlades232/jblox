@@ -1,11 +1,11 @@
 var a = "global a";
-var b = "global b";
+let b = "global b";
 var c = "global c";
 {
-    var a = "outer a";
+    let a = "outer a";
     var b = "outer b";
     {
-        var a = "inner a";
+        let a = "inner a";
         print a;
         print b;
         print c;
