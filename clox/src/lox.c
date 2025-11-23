@@ -1641,6 +1641,7 @@ static void parser_sync(ctx_t const *ctx, parser_t *parser)
 typedef struct {
     table_t map;
     int cnt_in_prev_blocks;
+    uint initialized_cnt;
 } lvar_scope_t;
 
 typedef struct {
@@ -1714,6 +1715,17 @@ static uint register_lvar(
     return id;
 }
 
+static void mark_lvar_initialzied(
+    ctx_t const *ctx, compiler_t *compiler, uint vid)
+{
+    lvar_scope_t *scope=
+        &compiler->scope_lvars[compiler->current_scope_depth - 1];
+    table_t *scope_lvar_table = &scope->map;
+    ASSERT(scope_lvar_table->cnt = scope->initialized_cnt + 1);
+    ASSERT(vid == scope->initialized_cnt);
+    ++scope->initialized_cnt;
+}
+
 static uint resolve_lvar(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, token_t name)
 {
@@ -1722,11 +1734,18 @@ static uint resolve_lvar(
     obj_string_t *str =
         (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
     for (int i = compiler->current_scope_depth - 1; i >= 0; --i) {
+        lvar_scope_t *scope = &compiler->scope_lvars[i];
         value_t id_val;
-        if (table_get(ctx, &compiler->scope_lvars[i].map, str, &id_val)) {
-            return
-                (uint)AS_NUMBER(id_val) +
-                compiler->scope_lvars[i].cnt_in_prev_blocks;
+        if (table_get(ctx, &scope->map, str, &id_val)) {
+            uint id = (uint)AS_NUMBER(id_val);
+            if (id >= scope->initialized_cnt) {
+                parser_error(
+                    ctx,
+                    "Can't read local variable in it's own initializer.",
+                    compiler->parser);
+                return (uint)(-1);
+            }
+            return id + scope->cnt_in_prev_blocks;
         }
     }
     return (uint)(-1);
@@ -1737,6 +1756,7 @@ static void begin_compiler(ctx_t const *ctx, compiler_t *compiler)
     for (uint i = 0; i < ARRCNT(compiler->scope_lvars); ++i) {
         compiler->scope_lvars[i].map = make_table(ctx);
         compiler->scope_lvars[i].cnt_in_prev_blocks = 0;
+        compiler->scope_lvars[i].initialized_cnt = 0;
     }
     compiler->current_scope_depth = 0;
 }
@@ -1770,6 +1790,7 @@ static void begin_scope(ctx_t const *ctx, compiler_t *compiler)
 
         cur_scope->cnt_in_prev_blocks =
             prev_scope->cnt_in_prev_blocks + prev_scope->map.cnt;
+        cur_scope->initialized_cnt = 0;
     }
     ++compiler->current_scope_depth;
 }
@@ -2144,6 +2165,8 @@ static void compile_var_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     if (compiler->current_scope_depth == 0) {
         emit_id_ref(
             ctx, vid, e_op_define_glob, e_op_define_glob_long, compiler);
+    } else {
+        mark_lvar_initialzied(ctx, compiler, vid);
     }
 }
 
