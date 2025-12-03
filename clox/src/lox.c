@@ -362,6 +362,7 @@ typedef enum {
     e_op_jump,
     e_op_jump_if_false,
     e_op_jump_if_true,
+    e_op_loop,
     e_op_return,
 } opcode_t;
 
@@ -757,6 +758,9 @@ static uint disasm_instruction(
     case e_op_jump_if_true:
         return disasm_short_jump_instruction(
             ctx, "OP_JUMP_IF_TRUE", chunk, at, 1);
+    case e_op_loop:
+        return disasm_short_jump_instruction(
+            ctx, "OP_LOOP", chunk, at, -1);
     case e_op_return:
         return disasm_simple_instruction(
             ctx, "OP_RETURN", at);
@@ -1242,6 +1246,10 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
             if (is_truthy(ctx, STACK_TOP(vm)))
                 vm->ip += offset;
         } break;
+
+        case e_op_loop:
+            vm->ip -= READ_SHORT();
+            break;
 
         case e_op_return:
             return e_interp_ok;
@@ -1738,6 +1746,18 @@ static void patch_jump(ctx_t const *ctx, uint at, compiler_t *compiler)
 
     compiler->compiling_chunk->code[at] = jump & 0xFF;
     compiler->compiling_chunk->code[at + 1] = (jump >> 8) & 0xFF;
+}
+
+static void emit_loop(ctx_t const *ctx, uint at, compiler_t *compiler)
+{
+    emit_byte(ctx, e_op_loop, compiler);
+
+    int off = (int)compiler->compiling_chunk->cnt - (int)at + 2;
+    if (off > 0xFFFF)
+        parser_error(ctx, "Too much code in loop body.", compiler->parser);
+
+    emit_byte(ctx, off & 0xFF, compiler);
+    emit_byte(ctx, (off >> 8) & 0xFF, compiler);
 }
 
 static void emit_return(ctx_t const *ctx, compiler_t *compiler)
@@ -2247,6 +2267,25 @@ static void compile_block(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         ctx, e_tt_right_brace, "Expected '}' after block.", compiler->parser);
 }
 
+static void compile_while(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    uint loop_start = compiler->compiling_chunk->cnt;
+
+    parser_consume(ctx, e_tt_left_paren,
+        "Expected '(' after while.", compiler->parser);
+    compile_expression(ctx, compiler, vm);
+    parser_consume(ctx, e_tt_right_paren,
+        "Expected ')' after condition.", compiler->parser);
+
+    uint exit_jump = emit_jump(ctx, e_op_jump_if_false, compiler);
+    emit_byte(ctx, e_op_pop, compiler);
+
+    compile_stmt(ctx, compiler, vm);
+
+    emit_loop(ctx, loop_start, compiler);
+    patch_jump(ctx, exit_jump, compiler);
+}
+
 static void compile_if(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     parser_consume(ctx, e_tt_left_paren,
@@ -2285,6 +2324,8 @@ static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         compile_print(ctx, compiler, vm);
     } else if (parser_match(ctx, e_tt_if, compiler->parser)) {
         compile_if(ctx, compiler, vm);
+    } else if (parser_match(ctx, e_tt_while, compiler->parser)) {
+        compile_while(ctx, compiler, vm);
     } else if (parser_match(ctx, e_tt_left_brace, compiler->parser)) {
         begin_scope(ctx, compiler);
         compile_block(ctx, compiler, vm);

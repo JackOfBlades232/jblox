@@ -24,3 +24,9 @@ if ((x = 3) || (y = 8)) {
 }
 if ((y = nil) && (x = 100)) {}
 else print x;
+
+while (a > 0) {
+    print a;
+    a = a - 1;
+}
+
