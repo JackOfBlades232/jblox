@@ -361,6 +361,7 @@ typedef enum {
     e_op_print,
     e_op_jump,
     e_op_jump_if_false,
+    e_op_jump_if_true,
     e_op_return,
 } opcode_t;
 
@@ -753,6 +754,9 @@ static uint disasm_instruction(
     case e_op_jump_if_false:
         return disasm_short_jump_instruction(
             ctx, "OP_JUMP_IF_FALSE", chunk, at, 1);
+    case e_op_jump_if_true:
+        return disasm_short_jump_instruction(
+            ctx, "OP_JUMP_IF_TRUE", chunk, at, 1);
     case e_op_return:
         return disasm_simple_instruction(
             ctx, "OP_RETURN", at);
@@ -1233,6 +1237,11 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
             if (is_falsey(ctx, STACK_TOP(vm)))
                 vm->ip += offset;
         } break;
+        case e_op_jump_if_true: {
+            u16 offset = READ_SHORT();
+            if (is_truthy(ctx, STACK_TOP(vm)))
+                vm->ip += offset;
+        } break;
 
         case e_op_return:
             return e_interp_ok;
@@ -1554,10 +1563,17 @@ static token_t scan_token(ctx_t const *ctx, scanner_t *scanner)
                 ? e_tt_greater_equal
                 : e_tt_greater,
             scanner);
+    case '&':
+        if (scanner_match(ctx, '&', scanner))
+            return MAKE_TOKEN(e_tt_and, scanner);
+        break;
+    case '|':
+        if (scanner_match(ctx, '|', scanner))
+            return MAKE_TOKEN(e_tt_or, scanner);
+        break;
     case '"':
         return scan_string(ctx, scanner);
     default:
-        ASSERT(0);
         break;
     }
 
@@ -1914,6 +1930,10 @@ static void compile_unary(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_binary(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+static void compile_and(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+static void compile_or(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 
 // @TODO: ternary ?: once we have 1) bools 2) branches for short circtuiting
 
@@ -1940,7 +1960,7 @@ parse_rule_t const c_parse_rules[] = {
     [e_tt_identifier]    = {&compile_variable, NULL,            e_prec_none  },
     [e_tt_string]        = {&compile_string,   NULL,            e_prec_none  },
     [e_tt_number]        = {&compile_number,   NULL,            e_prec_none  },
-    [e_tt_and]           = {NULL,              NULL,            e_prec_none  },
+    [e_tt_and]           = {NULL,              &compile_and,    e_prec_and   },
     [e_tt_class]         = {NULL,              NULL,            e_prec_none  },
     [e_tt_else]          = {NULL,              NULL,            e_prec_none  },
     [e_tt_false]         = {&compile_literal,  NULL,            e_prec_none  },
@@ -1948,7 +1968,7 @@ parse_rule_t const c_parse_rules[] = {
     [e_tt_fun]           = {NULL,              NULL,            e_prec_none  },
     [e_tt_if]            = {NULL,              NULL,            e_prec_none  },
     [e_tt_nil]           = {&compile_literal,  NULL,            e_prec_none  },
-    [e_tt_or]            = {NULL,              NULL,            e_prec_none  },
+    [e_tt_or]            = {NULL,              &compile_or,     e_prec_or    },
     [e_tt_print]         = {NULL,              NULL,            e_prec_none  },
     [e_tt_return]        = {NULL,              NULL,            e_prec_none  },
     [e_tt_super]         = {NULL,              NULL,            e_prec_none  },
@@ -2162,6 +2182,30 @@ static void compile_binary(
         ASSERT(0);
         break;
     }
+}
+
+static void compile_and(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+{
+    (void)can_assign;
+    uint end_jump = emit_jump(ctx, e_op_jump_if_false, compiler);
+    emit_byte(ctx, e_op_pop, compiler);
+
+    compile_precedence(ctx, e_prec_and, compiler, vm);
+
+    patch_jump(ctx, end_jump, compiler);
+}
+
+static void compile_or(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+{
+    (void)can_assign;
+    uint end_jump = emit_jump(ctx, e_op_jump_if_true, compiler);
+    emit_byte(ctx, e_op_pop, compiler);
+
+    compile_precedence(ctx, e_prec_or, compiler, vm);
+
+    patch_jump(ctx, end_jump, compiler);
 }
 
 static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
