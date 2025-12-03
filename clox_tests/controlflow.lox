@@ -41,3 +41,12 @@ while (a > 0) {
     }
 }
 
+var t = true;
+print t ? "ok" : "not ok";
+print (x = 3) || (y = 8) ? (a = "yes") : (b = "no");
+print a;
+print b;
+print (y = nil) && (x = 100) ? (a = nil) : (b = true);
+print a;
+print b;
+

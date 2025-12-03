@@ -1274,6 +1274,7 @@ typedef enum {
   e_tt_left_brace, e_tt_right_brace,
   e_tt_comma, e_tt_dot, e_tt_minus, e_tt_plus,
   e_tt_semicolon, e_tt_slash, e_tt_star,
+  e_tt_colon, e_tt_question,
   // One or two character tokens.
   e_tt_bang, e_tt_bang_equal,
   e_tt_equal, e_tt_equal_equal,
@@ -1547,6 +1548,10 @@ static token_t scan_token(ctx_t const *ctx, scanner_t *scanner)
         return MAKE_TOKEN(e_tt_slash, scanner);
     case '*':
         return MAKE_TOKEN(e_tt_star, scanner);
+    case ':':
+        return MAKE_TOKEN(e_tt_colon, scanner);
+    case '?':
+        return MAKE_TOKEN(e_tt_question, scanner);
     case '!':
         return MAKE_TOKEN(
             scanner_match(ctx, '=', scanner)
@@ -1914,6 +1919,7 @@ static void end_scope(ctx_t const *ctx, compiler_t *compiler)
 typedef enum {
     e_prec_none,
     e_prec_assignment, // =
+    e_prec_choice,     // ?:
     e_prec_or,         // or
     e_prec_and,        // and
     e_prec_eql,        // == !=
@@ -1950,55 +1956,57 @@ static void compile_unary(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_binary(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+static void compile_ternary(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_and(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_or(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 
-// @TODO: ternary ?: once we have 1) bools 2) branches for short circtuiting
-
 parse_rule_t const c_parse_rules[] = {
-    [e_tt_left_paren]    = {&compile_grouping, NULL,            e_prec_none  },
-    [e_tt_right_paren]   = {NULL,              NULL,            e_prec_none  },
-    [e_tt_left_brace]    = {NULL,              NULL,            e_prec_none  }, 
-    [e_tt_right_brace]   = {NULL,              NULL,            e_prec_none  },
-    [e_tt_comma]         = {NULL,              NULL,            e_prec_none  },
-    [e_tt_dot]           = {NULL,              NULL,            e_prec_none  },
-    [e_tt_minus]         = {&compile_unary,    &compile_binary, e_prec_term  },
-    [e_tt_plus]          = {NULL,              &compile_binary, e_prec_term  },
-    [e_tt_semicolon]     = {NULL,              NULL,            e_prec_none  },
-    [e_tt_slash]         = {NULL,              &compile_binary, e_prec_factor},
-    [e_tt_star]          = {NULL,              &compile_binary, e_prec_factor},
-    [e_tt_bang]          = {&compile_unary,    NULL,            e_prec_none  },
-    [e_tt_bang_equal]    = {NULL,              &compile_binary, e_prec_eql   },
-    [e_tt_equal]         = {NULL,              NULL,            e_prec_none  },
-    [e_tt_equal_equal]   = {NULL,              &compile_binary, e_prec_eql   },
-    [e_tt_greater]       = {NULL,              &compile_binary, e_prec_cmp   },
-    [e_tt_greater_equal] = {NULL,              &compile_binary, e_prec_cmp   },
-    [e_tt_less]          = {NULL,              &compile_binary, e_prec_cmp   },
-    [e_tt_less_equal]    = {NULL,              &compile_binary, e_prec_cmp   },
-    [e_tt_identifier]    = {&compile_variable, NULL,            e_prec_none  },
-    [e_tt_string]        = {&compile_string,   NULL,            e_prec_none  },
-    [e_tt_number]        = {&compile_number,   NULL,            e_prec_none  },
-    [e_tt_and]           = {NULL,              &compile_and,    e_prec_and   },
-    [e_tt_class]         = {NULL,              NULL,            e_prec_none  },
-    [e_tt_else]          = {NULL,              NULL,            e_prec_none  },
-    [e_tt_false]         = {&compile_literal,  NULL,            e_prec_none  },
-    [e_tt_for]           = {NULL,              NULL,            e_prec_none  },
-    [e_tt_fun]           = {NULL,              NULL,            e_prec_none  },
-    [e_tt_if]            = {NULL,              NULL,            e_prec_none  },
-    [e_tt_nil]           = {&compile_literal,  NULL,            e_prec_none  },
-    [e_tt_or]            = {NULL,              &compile_or,     e_prec_or    },
-    [e_tt_print]         = {NULL,              NULL,            e_prec_none  },
-    [e_tt_return]        = {NULL,              NULL,            e_prec_none  },
-    [e_tt_super]         = {NULL,              NULL,            e_prec_none  },
-    [e_tt_this]          = {NULL,              NULL,            e_prec_none  },
-    [e_tt_true]          = {&compile_literal,  NULL,            e_prec_none  },
-    [e_tt_var]           = {NULL,              NULL,            e_prec_none  },
-    [e_tt_let]           = {NULL,              NULL,            e_prec_none  },
-    [e_tt_while]         = {NULL,              NULL,            e_prec_none  },
-    [e_tt_error]         = {NULL,              NULL,            e_prec_none  },
-    [e_tt_eof]           = {NULL,              NULL,            e_prec_none  },
+    [e_tt_left_paren]    = {&compile_grouping, NULL,             e_prec_none  },
+    [e_tt_right_paren]   = {NULL,              NULL,             e_prec_none  },
+    [e_tt_left_brace]    = {NULL,              NULL,             e_prec_none  }, 
+    [e_tt_right_brace]   = {NULL,              NULL,             e_prec_none  },
+    [e_tt_comma]         = {NULL,              NULL,             e_prec_none  },
+    [e_tt_dot]           = {NULL,              NULL,             e_prec_none  },
+    [e_tt_minus]         = {&compile_unary,    &compile_binary,  e_prec_term  },
+    [e_tt_plus]          = {NULL,              &compile_binary,  e_prec_term  },
+    [e_tt_semicolon]     = {NULL,              NULL,             e_prec_none  },
+    [e_tt_slash]         = {NULL,              &compile_binary,  e_prec_factor},
+    [e_tt_star]          = {NULL,              &compile_binary,  e_prec_factor},
+    [e_tt_colon]         = {NULL,              NULL,             e_prec_choice},
+    [e_tt_question]      = {NULL,              &compile_ternary, e_prec_choice},
+    [e_tt_bang]          = {&compile_unary,    NULL,             e_prec_none  },
+    [e_tt_bang_equal]    = {NULL,              &compile_binary,  e_prec_eql   },
+    [e_tt_equal]         = {NULL,              NULL,             e_prec_none  },
+    [e_tt_equal_equal]   = {NULL,              &compile_binary,  e_prec_eql   },
+    [e_tt_greater]       = {NULL,              &compile_binary,  e_prec_cmp   },
+    [e_tt_greater_equal] = {NULL,              &compile_binary,  e_prec_cmp   },
+    [e_tt_less]          = {NULL,              &compile_binary,  e_prec_cmp   },
+    [e_tt_less_equal]    = {NULL,              &compile_binary,  e_prec_cmp   },
+    [e_tt_identifier]    = {&compile_variable, NULL,             e_prec_none  },
+    [e_tt_string]        = {&compile_string,   NULL,             e_prec_none  },
+    [e_tt_number]        = {&compile_number,   NULL,             e_prec_none  },
+    [e_tt_and]           = {NULL,              &compile_and,     e_prec_and   },
+    [e_tt_class]         = {NULL,              NULL,             e_prec_none  },
+    [e_tt_else]          = {NULL,              NULL,             e_prec_none  },
+    [e_tt_false]         = {&compile_literal,  NULL,             e_prec_none  },
+    [e_tt_for]           = {NULL,              NULL,             e_prec_none  },
+    [e_tt_fun]           = {NULL,              NULL,             e_prec_none  },
+    [e_tt_if]            = {NULL,              NULL,             e_prec_none  },
+    [e_tt_nil]           = {&compile_literal,  NULL,             e_prec_none  },
+    [e_tt_or]            = {NULL,              &compile_or,      e_prec_or    },
+    [e_tt_print]         = {NULL,              NULL,             e_prec_none  },
+    [e_tt_return]        = {NULL,              NULL,             e_prec_none  },
+    [e_tt_super]         = {NULL,              NULL,             e_prec_none  },
+    [e_tt_this]          = {NULL,              NULL,             e_prec_none  },
+    [e_tt_true]          = {&compile_literal,  NULL,             e_prec_none  },
+    [e_tt_var]           = {NULL,              NULL,             e_prec_none  },
+    [e_tt_let]           = {NULL,              NULL,             e_prec_none  },
+    [e_tt_while]         = {NULL,              NULL,             e_prec_none  },
+    [e_tt_error]         = {NULL,              NULL,             e_prec_none  },
+    [e_tt_eof]           = {NULL,              NULL,             e_prec_none  },
 };
 
 static parse_rule_t const *get_rule(ctx_t const *ctx, token_type_t tt)
@@ -2202,6 +2210,31 @@ static void compile_binary(
         ASSERT(0);
         break;
     }
+}
+
+static void compile_ternary(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+{
+    (void)can_assign;
+    token_type_t tt = compiler->parser->prev.type;
+    ASSERT(tt == e_tt_question);
+    parse_rule_t const *rule = get_rule(ctx, tt);
+
+    uint lhs_jump = emit_jump(ctx, e_op_jump_if_false, compiler);
+    emit_byte(ctx, e_op_pop, compiler);
+
+    compile_precedence(ctx, (precedence_t)(rule->precedence + 1), compiler, vm);
+    uint end_jump = emit_jump(ctx, e_op_jump, compiler);
+
+    parser_consume(
+        ctx, e_tt_colon, "Expected ':' after choice lhs.", compiler->parser);
+
+    patch_jump(ctx, lhs_jump, compiler);
+    emit_byte(ctx, e_op_pop, compiler);
+
+    compile_precedence(ctx, (precedence_t)(rule->precedence + 1), compiler, vm);
+
+    patch_jump(ctx, end_jump, compiler);
 }
 
 static void compile_and(
