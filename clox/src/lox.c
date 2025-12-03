@@ -2230,6 +2230,8 @@ static void compile_or(
 
 static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
 static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
+static void compile_var_decl(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 is_const);
 
 static uint compile_new_variable(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm,
@@ -2267,6 +2269,56 @@ static void compile_block(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         ctx, e_tt_right_brace, "Expected '}' after block.", compiler->parser);
 }
 
+static void compile_for(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    begin_scope(ctx, compiler);
+
+    parser_consume(ctx, e_tt_left_paren,
+        "Expected '(' after for.", compiler->parser);
+    if (parser_match(ctx, e_tt_semicolon, compiler->parser))
+        ;
+    else if (parser_match(ctx, e_tt_var, compiler->parser))
+        compile_var_decl(ctx, compiler, vm, false);
+    else if (parser_match(ctx, e_tt_let, compiler->parser))
+        compile_var_decl(ctx, compiler, vm, true);
+    else 
+        compile_expr_stmt(ctx, compiler, vm);
+
+    uint loop_start = compiler->compiling_chunk->cnt;
+    uint exit_jump = (uint)(-1);
+
+    if (!parser_match(ctx, e_tt_semicolon, compiler->parser)) {
+        compile_expression(ctx, compiler, vm);
+        parser_consume(ctx, e_tt_semicolon,
+            "Expected ';' after for condition.", compiler->parser);
+        exit_jump = emit_jump(ctx, e_op_jump_if_false, compiler);
+        emit_byte(ctx, e_op_pop, compiler);
+    }
+
+    if (!parser_match(ctx, e_tt_right_paren, compiler->parser)) {
+        uint body_jump = emit_jump(ctx, e_op_jump, compiler);
+        uint increment_start = compiler->compiling_chunk->cnt;
+        compile_expression(ctx, compiler, vm);
+        emit_byte(ctx, e_op_pop, compiler);
+        parser_consume(ctx, e_tt_right_paren,
+            "Expected ')' after for clause.", compiler->parser);
+
+        emit_loop(ctx, loop_start, compiler);
+        loop_start = increment_start;
+        patch_jump(ctx, body_jump, compiler);
+    }
+
+    compile_stmt(ctx, compiler, vm);
+    emit_loop(ctx, loop_start, compiler);
+
+    if (exit_jump != (uint)(-1)) {
+        patch_jump(ctx, exit_jump, compiler);
+        emit_byte(ctx, e_op_pop, compiler);
+    }
+
+    end_scope(ctx, compiler);
+}
+
 static void compile_while(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     uint loop_start = compiler->compiling_chunk->cnt;
@@ -2283,7 +2335,9 @@ static void compile_while(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     compile_stmt(ctx, compiler, vm);
 
     emit_loop(ctx, loop_start, compiler);
+
     patch_jump(ctx, exit_jump, compiler);
+    emit_byte(ctx, e_op_pop, compiler);
 }
 
 static void compile_if(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
@@ -2326,6 +2380,8 @@ static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         compile_if(ctx, compiler, vm);
     } else if (parser_match(ctx, e_tt_while, compiler->parser)) {
         compile_while(ctx, compiler, vm);
+    } else if (parser_match(ctx, e_tt_for, compiler->parser)) {
+        compile_for(ctx, compiler, vm);
     } else if (parser_match(ctx, e_tt_left_brace, compiler->parser)) {
         begin_scope(ctx, compiler);
         compile_block(ctx, compiler, vm);
