@@ -50,3 +50,27 @@ print (y = nil) && (x = 100) ? (a = nil) : (b = true);
 print a;
 print b;
 
+switch (1 + 2 * 3) {
+case "no":
+    print 1;
+case true:
+    print 2;
+case "asad" + "asdasd":
+    print 3;
+case 7:
+    print 4;
+case nil:
+    print 5;
+default:
+    print 6;
+}
+
+switch ("a") {}
+switch (false) {
+default:
+    print "Not much";
+}
+switch (nil) {
+case 0:
+    print "Unreachable";
+}

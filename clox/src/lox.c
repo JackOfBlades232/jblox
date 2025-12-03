@@ -347,6 +347,7 @@ typedef enum {
     e_op_set_loc,
     e_op_set_loc_long,
     e_op_eq,
+    e_op_eq_preserve_lhs,
     e_op_neq,
     e_op_gt,
     e_op_ge,
@@ -713,6 +714,9 @@ static uint disasm_instruction(
     case e_op_eq:
         return disasm_simple_instruction(
             ctx, "OP_EQ", at);
+    case e_op_eq_preserve_lhs:
+        return disasm_simple_instruction(
+            ctx, "OP_EQ_PRESERVE_LHS", at);
     case e_op_neq:
         return disasm_simple_instruction(
             ctx, "OP_NEQ", at);
@@ -1155,6 +1159,10 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
             value_t b = pop_stack(ctx, vm);
             STACK_TOP(vm) = BOOL_VAL(are_equal(ctx, STACK_TOP(vm), b));
         } break;
+        case e_op_eq_preserve_lhs:
+            STACK_TOP(vm) = BOOL_VAL(
+                are_equal(ctx, peek_stack(ctx, vm, 1), peek_stack(ctx, vm, 0)));
+            break;
         case e_op_neq: {
             value_t b = pop_stack(ctx, vm);
             STACK_TOP(vm) = BOOL_VAL(!are_equal(ctx, STACK_TOP(vm), b));
@@ -1286,7 +1294,8 @@ typedef enum {
   e_tt_and, e_tt_class, e_tt_else, e_tt_false,
   e_tt_for, e_tt_fun, e_tt_if, e_tt_nil, e_tt_or,
   e_tt_print, e_tt_return, e_tt_super, e_tt_this,
-  e_tt_true, e_tt_var, e_tt_let, e_tt_while,
+  e_tt_true, e_tt_var, e_tt_let, e_tt_while, e_tt_switch,
+  e_tt_case, e_tt_default,
 
   e_tt_error, e_tt_eof
 } token_type_t;
@@ -1438,11 +1447,26 @@ static token_type_t scanner_id_type(ctx_t const *ctx, scanner_t const *scanner)
 {
     switch (scanner->start[0]) {
     case 'a':
-        return scanner_check_kw(ctx, 1, LITSTR("nd"), e_tt_and, scanner);
+        return scanner_check_kw(
+            ctx, 1, LITSTR("nd"), e_tt_and, scanner);
     case 'c':
-        return scanner_check_kw(ctx, 1, LITSTR("lass"), e_tt_class, scanner);
+        if (scanner->cur - scanner->start > 1) {
+            switch (scanner->start[1]) {
+            case 'a':
+                return scanner_check_kw(
+                    ctx, 2, LITSTR("se"), e_tt_case, scanner);
+            case 'l':
+                return scanner_check_kw(
+                    ctx, 2, LITSTR("ass"), e_tt_class, scanner);
+            }
+        }
+        break;
+    case 'd':
+        return scanner_check_kw(
+            ctx, 1, LITSTR("efault"), e_tt_default, scanner);
     case 'e':
-        return scanner_check_kw(ctx, 1, LITSTR("lse"), e_tt_else, scanner);
+        return scanner_check_kw(
+            ctx, 1, LITSTR("lse"), e_tt_else, scanner);
     case 'f':
         if (scanner->cur - scanner->start > 1) {
             switch (scanner->start[1]) {
@@ -1473,7 +1497,17 @@ static token_type_t scanner_id_type(ctx_t const *ctx, scanner_t const *scanner)
     case 'r':
         return scanner_check_kw(ctx, 1, LITSTR("eturn"), e_tt_return, scanner);
     case 's':
-        return scanner_check_kw(ctx, 1, LITSTR("uper"), e_tt_super, scanner);
+        if (scanner->cur - scanner->start > 1) {
+            switch (scanner->start[1]) {
+            case 'u':
+                return scanner_check_kw(
+                    ctx, 2, LITSTR("per"), e_tt_super, scanner);
+            case 'w':
+                return scanner_check_kw(
+                    ctx, 2, LITSTR("itch"), e_tt_switch, scanner);
+            }
+        }
+        break;
     case 't':
         if (scanner->cur - scanner->start > 1) {
             switch (scanner->start[1]) {
@@ -1975,7 +2009,7 @@ parse_rule_t const c_parse_rules[] = {
     [e_tt_semicolon]     = {NULL,              NULL,             e_prec_none  },
     [e_tt_slash]         = {NULL,              &compile_binary,  e_prec_factor},
     [e_tt_star]          = {NULL,              &compile_binary,  e_prec_factor},
-    [e_tt_colon]         = {NULL,              NULL,             e_prec_choice},
+    [e_tt_colon]         = {NULL,              NULL,             e_prec_none  },
     [e_tt_question]      = {NULL,              &compile_ternary, e_prec_choice},
     [e_tt_bang]          = {&compile_unary,    NULL,             e_prec_none  },
     [e_tt_bang_equal]    = {NULL,              &compile_binary,  e_prec_eql   },
@@ -2005,6 +2039,9 @@ parse_rule_t const c_parse_rules[] = {
     [e_tt_var]           = {NULL,              NULL,             e_prec_none  },
     [e_tt_let]           = {NULL,              NULL,             e_prec_none  },
     [e_tt_while]         = {NULL,              NULL,             e_prec_none  },
+    [e_tt_switch]        = {NULL,              NULL,             e_prec_none  },
+    [e_tt_case]          = {NULL,              NULL,             e_prec_none  },
+    [e_tt_default]       = {NULL,              NULL,             e_prec_none  },
     [e_tt_error]         = {NULL,              NULL,             e_prec_none  },
     [e_tt_eof]           = {NULL,              NULL,             e_prec_none  },
 };
@@ -2028,7 +2065,7 @@ static void compile_precedence(
     b32 can_assign = prec <= e_prec_assignment;
     prefix_rule(ctx, compiler, vm, can_assign);
 
-    while (prec < get_rule(ctx, compiler->parser->cur.type)->precedence) {
+    while (prec <= get_rule(ctx, compiler->parser->cur.type)->precedence) {
         parser_advance(ctx, compiler->parser);
         parse_fn_t infix_rule =
             get_rule(ctx, compiler->parser->prev.type)->infix;
@@ -2302,6 +2339,67 @@ static void compile_block(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         ctx, e_tt_right_brace, "Expected '}' after block.", compiler->parser);
 }
 
+static void compile_switch(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    parser_consume(ctx, e_tt_left_paren,
+        "Expected '(' after switch.", compiler->parser);
+    compile_expression(ctx, compiler, vm);
+    parser_consume(ctx, e_tt_right_paren,
+        "Expected ')' after switch argument.", compiler->parser);
+    parser_consume(ctx, e_tt_left_brace,
+        "Expected '{' before switch body.", compiler->parser);
+
+    uint init_jump = emit_jump(ctx, e_op_jump, compiler);
+    uint break_counter = compiler->compiling_chunk->cnt;
+    uint break_jump = emit_jump(ctx, e_op_jump, compiler);
+
+    uint case_jump = init_jump;
+
+    if (parser_match(ctx, e_tt_case, compiler->parser)) {
+        do {
+            patch_jump(ctx, case_jump, compiler);
+            if (case_jump != init_jump)
+                emit_byte(ctx, e_op_pop, compiler);
+            compile_expression(ctx, compiler, vm);
+            emit_byte(ctx, e_op_eq_preserve_lhs, compiler);
+            case_jump = emit_jump(ctx, e_op_jump_if_false, compiler);
+            emit_byte(ctx, e_op_pop, compiler);
+            parser_consume(ctx, e_tt_colon,
+                "Expected ':' after case mark.", compiler->parser);
+            while (
+                !parser_check(ctx, e_tt_case, compiler->parser) &&
+                !parser_check(ctx, e_tt_default, compiler->parser) &&
+                !parser_check(ctx, e_tt_right_brace, compiler->parser))
+            {
+                compile_stmt(ctx, compiler, vm);
+            }
+            emit_loop(ctx, break_counter, compiler);
+        } while (parser_match(ctx, e_tt_case, compiler->parser));
+    }
+
+    if (parser_match(ctx, e_tt_default, compiler->parser)) {
+        patch_jump(ctx, case_jump, compiler);
+        if (case_jump != init_jump)
+            emit_byte(ctx, e_op_pop, compiler);
+        case_jump = (uint)(-1);
+        parser_consume(ctx, e_tt_colon,
+            "Expected ':' after default mark.", compiler->parser);
+        while (!parser_check(ctx, e_tt_right_brace, compiler->parser))
+            compile_stmt(ctx, compiler, vm);
+    } else if (case_jump != init_jump) {
+        patch_jump(ctx, case_jump, compiler);
+        emit_byte(ctx, e_op_pop, compiler);
+    }
+
+    parser_consume(ctx, e_tt_right_brace,
+        "Expected '}' after switch body.", compiler->parser);
+
+    patch_jump(ctx, break_jump, compiler);
+    if (case_jump == init_jump)
+        patch_jump(ctx, init_jump, compiler);
+    emit_byte(ctx, e_op_pop, compiler);
+}
+
 static void compile_for(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     begin_scope(ctx, compiler);
@@ -2415,6 +2513,8 @@ static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         compile_while(ctx, compiler, vm);
     } else if (parser_match(ctx, e_tt_for, compiler->parser)) {
         compile_for(ctx, compiler, vm);
+    } else if (parser_match(ctx, e_tt_switch, compiler->parser)) {
+        compile_switch(ctx, compiler, vm);
     } else if (parser_match(ctx, e_tt_left_brace, compiler->parser)) {
         begin_scope(ctx, compiler);
         compile_block(ctx, compiler, vm);
