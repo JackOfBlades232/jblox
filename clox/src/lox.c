@@ -359,6 +359,8 @@ typedef enum {
     e_op_not,
     e_op_negate,
     e_op_print,
+    e_op_jump,
+    e_op_jump_if_false,
     e_op_return,
 } opcode_t;
 
@@ -613,6 +615,14 @@ static uint disasm_long_id_instruction(
     return at + 4;
 }
 
+static uint disasm_short_jump_instruction(
+    ctx_t const *ctx, char const *name, chunk_t const *chunk, uint at, int dir)
+{
+    int jump = chunk->code[at + 1] | ((int)chunk->code[at + 2] << 8);
+    LOGF("%s %d -> %d", name, at, (int)at + 3 + jump * dir);
+    return at + 3;
+}
+
 static uint disasm_instruction(
     ctx_t const *ctx, chunk_t const *chunk, uint at)
 {
@@ -737,6 +747,12 @@ static uint disasm_instruction(
     case e_op_print:
         return disasm_simple_instruction(
             ctx, "OP_PRINT", at);
+    case e_op_jump:
+        return disasm_short_jump_instruction(
+            ctx, "OP_JUMP", chunk, at, 1);
+    case e_op_jump_if_false:
+        return disasm_short_jump_instruction(
+            ctx, "OP_JUMP_IF_FALSE", chunk, at, 1);
     case e_op_return:
         return disasm_simple_instruction(
             ctx, "OP_RETURN", at);
@@ -987,6 +1003,7 @@ static void runtime_error(ctx_t const *ctx, vm_t *vm, char const *fmt, ...)
 static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
 {
 #define READ_BYTE() (*vm->ip++)
+#define READ_SHORT() ((u16)READ_BYTE() | (u16)((u16)READ_BYTE() << 8))
 #define READ_LONG() \
     ((u32)READ_BYTE() | ((u32)READ_BYTE() << 8) | ((u32)READ_BYTE() << 16))
 #define READ_CONSTANT() (vm->chunk->constants.values[READ_BYTE()])
@@ -1206,6 +1223,16 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
             print_value(ctx, pop_stack(ctx, vm));
             OUTPUT("\n");
             break;
+
+        case e_op_jump:
+            vm->ip += READ_SHORT();
+            break;
+
+        case e_op_jump_if_false: {
+            u16 offset = READ_SHORT();
+            if (is_falsey(ctx, STACK_TOP(vm)))
+                vm->ip += offset;
+        } break;
 
         case e_op_return:
             return e_interp_ok;
@@ -1679,6 +1706,24 @@ static void emit_id_ref(
         op, long_op, id, (uint)compiler->parser->prev.line);
 }
 
+static uint emit_jump(ctx_t const *ctx, u8 opc, compiler_t *compiler)
+{
+    emit_byte(ctx, opc, compiler);
+    emit_byte(ctx, 0xFF, compiler);
+    emit_byte(ctx, 0xFF, compiler);
+    return compiler->compiling_chunk->cnt - 2;
+}
+
+static void patch_jump(ctx_t const *ctx, uint at, compiler_t *compiler)
+{
+    int jump = (int)compiler->compiling_chunk->cnt - (int)at - 2;
+    if (jump > 0xFFFF)
+        parser_error(ctx, "Too much code to jump over.", compiler->parser);
+
+    compiler->compiling_chunk->code[at] = jump & 0xFF;
+    compiler->compiling_chunk->code[at + 1] = (jump >> 8) & 0xFF;
+}
+
 static void emit_return(ctx_t const *ctx, compiler_t *compiler)
 {
     emit_byte(ctx, e_op_return, compiler);
@@ -1758,7 +1803,8 @@ static resolve_res_t resolve_lvar(
                     compiler->parser);
                 return (resolve_res_t){(uint)(-1), true};
             }
-            return (resolve_res_t){id + scope->cnt_in_prev_blocks, is_const};
+            return (resolve_res_t)
+                {id + (uint)scope->cnt_in_prev_blocks, is_const};
         }
     }
     return (resolve_res_t){(uint)(-1), true};
@@ -1802,7 +1848,7 @@ static void begin_scope(ctx_t const *ctx, compiler_t *compiler)
             &compiler->scope_lvars[compiler->current_scope_depth];
 
         cur_scope->cnt_in_prev_blocks =
-            prev_scope->cnt_in_prev_blocks + prev_scope->map.cnt;
+            prev_scope->cnt_in_prev_blocks + (int)prev_scope->map.cnt;
         cur_scope->initialized_cnt = 0;
     }
     ++compiler->current_scope_depth;
@@ -1816,8 +1862,12 @@ static void end_scope(ctx_t const *ctx, compiler_t *compiler)
 
     table_t *scope_lvar_table =
         &compiler->scope_lvars[compiler->current_scope_depth].map;
-    emit_id_ref(
-        ctx, scope_lvar_table->cnt, e_op_popn, e_op_popn_long, compiler);
+    if (scope_lvar_table->cnt == 1) {
+        emit_byte(ctx, e_op_pop, compiler);
+    } else if (scope_lvar_table->cnt > 1) {
+        emit_id_ref(
+            ctx, scope_lvar_table->cnt, e_op_popn, e_op_popn_long, compiler);
+    }
 
     memset(
         scope_lvar_table->entries, 0,
@@ -2115,6 +2165,7 @@ static void compile_binary(
 }
 
 static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
+static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
 
 static uint compile_new_variable(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm,
@@ -2152,6 +2203,30 @@ static void compile_block(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         ctx, e_tt_right_brace, "Expected '}' after block.", compiler->parser);
 }
 
+static void compile_if(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    parser_consume(ctx, e_tt_left_paren,
+        "Expected '(' after if.", compiler->parser);
+    compile_expression(ctx, compiler, vm);
+    parser_consume(ctx, e_tt_right_paren,
+        "Expected ')' after condition.", compiler->parser);
+
+    uint then_jump = emit_jump(ctx, e_op_jump_if_false, compiler);
+    emit_byte(ctx, e_op_pop, compiler);
+
+    compile_stmt(ctx, compiler, vm);
+
+    uint else_jump = emit_jump(ctx, e_op_jump, compiler);
+
+    patch_jump(ctx, then_jump, compiler);
+    emit_byte(ctx, e_op_pop, compiler);
+
+    if (parser_match(ctx, e_tt_else, compiler->parser))
+        compile_stmt(ctx, compiler, vm);
+
+    patch_jump(ctx, else_jump, compiler);
+}
+
 static void compile_print(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     compile_expression(ctx, compiler, vm);
@@ -2164,6 +2239,8 @@ static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     if (parser_match(ctx, e_tt_print, compiler->parser)) {
         compile_print(ctx, compiler, vm);
+    } else if (parser_match(ctx, e_tt_if, compiler->parser)) {
+        compile_if(ctx, compiler, vm);
     } else if (parser_match(ctx, e_tt_left_brace, compiler->parser)) {
         begin_scope(ctx, compiler);
         compile_block(ctx, compiler, vm);

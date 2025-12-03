@@ -1,0 +1,17 @@
+var a = 3;
+var b = 6;
+
+if (a == b)
+    print "Unreachable";
+else {
+    print "Not it!";
+}
+
+a = b;
+if (a == b) {
+    print a;
+    print "(a) == ";
+    print b;
+    print "(b)";
+}
+
