@@ -74,3 +74,42 @@ switch (nil) {
 case 0:
     print "Unreachable";
 }
+
+var z = 0;
+while (true) {
+    z = z + 1;
+    print z;
+    if (z == 10)
+        break;
+}
+
+var v = 2;
+while (v) {
+    if (v < 0)
+        break;
+    for (var z = 33; z < 10000; z = z + 1) {
+        if (z < 35)
+            continue;
+        print z;
+        if (z == 37)
+            break;
+    }
+    v = v - 1;
+}
+
+for (var z = 0; z < 100; z = z + 1) {
+    if (z < 10)
+        continue;
+    print z;
+    if (z == 15)
+        break;
+}
+
+for (var x = 0; x < 4; x = x + 1)
+    for (var y = 0; y < 4; y = y + 1) {
+        if (y == 2)
+            continue;
+        print x;
+        print y;
+        print "---";
+    }

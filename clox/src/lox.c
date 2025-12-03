@@ -1295,7 +1295,7 @@ typedef enum {
   e_tt_for, e_tt_fun, e_tt_if, e_tt_nil, e_tt_or,
   e_tt_print, e_tt_return, e_tt_super, e_tt_this,
   e_tt_true, e_tt_var, e_tt_let, e_tt_while, e_tt_switch,
-  e_tt_case, e_tt_default,
+  e_tt_case, e_tt_default, e_tt_continue, e_tt_break,
 
   e_tt_error, e_tt_eof
 } token_type_t;
@@ -1449,6 +1449,9 @@ static token_type_t scanner_id_type(ctx_t const *ctx, scanner_t const *scanner)
     case 'a':
         return scanner_check_kw(
             ctx, 1, LITSTR("nd"), e_tt_and, scanner);
+    case 'b':
+        return scanner_check_kw(
+            ctx, 1, LITSTR("reak"), e_tt_break, scanner);
     case 'c':
         if (scanner->cur - scanner->start > 1) {
             switch (scanner->start[1]) {
@@ -1458,6 +1461,9 @@ static token_type_t scanner_id_type(ctx_t const *ctx, scanner_t const *scanner)
             case 'l':
                 return scanner_check_kw(
                     ctx, 2, LITSTR("ass"), e_tt_class, scanner);
+            case 'o':
+                return scanner_check_kw(
+                    ctx, 2, LITSTR("ntinue"), e_tt_continue, scanner);
             }
         }
         break;
@@ -1731,10 +1737,19 @@ static void parser_sync(ctx_t const *ctx, parser_t *parser)
     }
 }
 
+typedef enum {
+    e_lst_block,
+    e_lst_loop_body,
+    e_lst_for_loop,
+} lvar_scope_type_t;
+
 typedef struct {
     table_t map;
     int cnt_in_prev_blocks;
     uint initialized_cnt;
+    lvar_scope_type_t type;
+    uint loop_start_mark;
+    uint loop_break_mark;
 } lvar_scope_t;
 
 typedef struct {
@@ -1742,6 +1757,9 @@ typedef struct {
     chunk_t *compiling_chunk;
     lvar_scope_t scope_lvars[256];
     int current_scope_depth;
+    lvar_scope_t *top_loop_block;
+    uint top_loop_start_mark;
+    uint top_loop_break_mark;
 } compiler_t;
 
 static void emit_byte(ctx_t const *ctx, u8 byte, compiler_t *compiler)
@@ -1893,6 +1911,9 @@ static void begin_compiler(ctx_t const *ctx, compiler_t *compiler)
         compiler->scope_lvars[i].initialized_cnt = 0;
     }
     compiler->current_scope_depth = 0;
+    compiler->top_loop_block = NULL;
+    compiler->top_loop_start_mark = (uint)(-1);
+    compiler->top_loop_break_mark = (uint)(-1);
 }
 
 static void end_compiler(ctx_t const *ctx, compiler_t *compiler)
@@ -1906,9 +1927,21 @@ static void end_compiler(ctx_t const *ctx, compiler_t *compiler)
 #endif
 }
 
-static void begin_scope(ctx_t const *ctx, compiler_t *compiler)
+static void begin_scope(
+    ctx_t const *ctx, compiler_t *compiler, lvar_scope_type_t type)
 {
     (void)ctx;
+    if (type == e_lst_block && compiler->top_loop_start_mark != (uint)(-1)) {
+        compiler->top_loop_block =
+            &compiler->scope_lvars[compiler->current_scope_depth];
+        compiler->top_loop_block->loop_start_mark =
+            compiler->top_loop_start_mark;
+        compiler->top_loop_block->loop_break_mark =
+            compiler->top_loop_break_mark;
+        compiler->top_loop_start_mark = (uint)(-1);
+        compiler->top_loop_break_mark = (uint)(-1);
+        type = e_lst_loop_body;
+    }
     if (compiler->current_scope_depth >= 256) {
         parser_error(
             ctx,
@@ -1927,6 +1960,7 @@ static void begin_scope(ctx_t const *ctx, compiler_t *compiler)
         cur_scope->initialized_cnt = 0;
     }
     ++compiler->current_scope_depth;
+    compiler->scope_lvars[compiler->current_scope_depth - 1].type = type;
 }
 
 static void end_scope(ctx_t const *ctx, compiler_t *compiler)
@@ -1935,8 +1969,8 @@ static void end_scope(ctx_t const *ctx, compiler_t *compiler)
     ASSERT(compiler->current_scope_depth);
     --compiler->current_scope_depth;
 
-    table_t *scope_lvar_table =
-        &compiler->scope_lvars[compiler->current_scope_depth].map;
+    lvar_scope_t *scope = &compiler->scope_lvars[compiler->current_scope_depth];
+    table_t *scope_lvar_table = &scope->map;
     if (scope_lvar_table->cnt == 1) {
         emit_byte(ctx, e_op_pop, compiler);
     } else if (scope_lvar_table->cnt > 1) {
@@ -1944,10 +1978,23 @@ static void end_scope(ctx_t const *ctx, compiler_t *compiler)
             ctx, scope_lvar_table->cnt, e_op_popn, e_op_popn_long, compiler);
     }
 
+    if (compiler->top_loop_block == scope) {
+        --compiler->top_loop_block;
+        while (
+            compiler->top_loop_block >= compiler->scope_lvars &&
+            compiler->top_loop_block->type != e_lst_loop_body)
+        {
+            --compiler->top_loop_block;
+        }
+        if (compiler->top_loop_block < compiler->scope_lvars)
+            compiler->top_loop_block = NULL;
+    }
+
     memset(
         scope_lvar_table->entries, 0,
         sizeof(table_entry_t) * scope_lvar_table->cap);
     scope_lvar_table->cnt = 0;
+    scope->initialized_cnt = 0;
 }
 
 typedef enum {
@@ -2042,6 +2089,8 @@ parse_rule_t const c_parse_rules[] = {
     [e_tt_switch]        = {NULL,              NULL,             e_prec_none  },
     [e_tt_case]          = {NULL,              NULL,             e_prec_none  },
     [e_tt_default]       = {NULL,              NULL,             e_prec_none  },
+    [e_tt_continue]      = {NULL,              NULL,             e_prec_none  },
+    [e_tt_break]         = {NULL,              NULL,             e_prec_none  },
     [e_tt_error]         = {NULL,              NULL,             e_prec_none  },
     [e_tt_eof]           = {NULL,              NULL,             e_prec_none  },
 };
@@ -2339,6 +2388,61 @@ static void compile_block(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         ctx, e_tt_right_brace, "Expected '}' after block.", compiler->parser);
 }
 
+static void compile_break(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    (void)vm;
+    parser_consume(ctx, e_tt_semicolon,
+        "Expected ';' after break.", compiler->parser);
+    if (!compiler->top_loop_block) {
+        parser_error(
+            ctx, "Can't continue outside of a loop.", compiler->parser);
+        return;
+    }
+    uint scopes_to_pop = (uint)(
+        compiler->current_scope_depth -
+        (compiler->top_loop_block - compiler->scope_lvars) - 1);
+    if (compiler->top_loop_block > compiler->scope_lvars &&
+        compiler->top_loop_block[-1].type == e_lst_for_loop)
+    {
+        ++scopes_to_pop;
+    }
+    lvar_scope_t *s = compiler->top_loop_block;
+    uint lvars = 0;
+    while (scopes_to_pop--)
+        lvars += (s++)->map.cnt;
+    if (lvars == 1)
+        emit_byte(ctx, e_op_pop, compiler);
+    else if (lvars > 1)
+        emit_id_ref(ctx, lvars, e_op_popn, e_op_popn_long, compiler);
+
+    emit_loop(ctx, compiler->top_loop_block->loop_break_mark, compiler);
+}
+
+static void compile_continue(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    (void)vm;
+    parser_consume(ctx, e_tt_semicolon,
+        "Expected ';' after continue.", compiler->parser);
+    if (!compiler->top_loop_block) {
+        parser_error(
+            ctx, "Can't continue outside of a loop.", compiler->parser);
+        return;
+    }
+    uint scopes_to_pop = (uint)(
+        compiler->current_scope_depth -
+        (compiler->top_loop_block - compiler->scope_lvars) - 1);
+    lvar_scope_t *s = compiler->top_loop_block;
+    uint lvars = 0;
+    while (scopes_to_pop--)
+        lvars += (s++)->map.cnt;
+    if (lvars == 1)
+        emit_byte(ctx, e_op_pop, compiler);
+    else if (lvars > 1)
+        emit_id_ref(ctx, lvars, e_op_popn, e_op_popn_long, compiler);
+
+    emit_loop(ctx, compiler->top_loop_block->loop_start_mark, compiler);
+}
+
 static void compile_switch(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     parser_consume(ctx, e_tt_left_paren,
@@ -2402,7 +2506,7 @@ static void compile_switch(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 
 static void compile_for(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
-    begin_scope(ctx, compiler);
+    begin_scope(ctx, compiler, e_lst_for_loop);
 
     parser_consume(ctx, e_tt_left_paren,
         "Expected '(' after for.", compiler->parser);
@@ -2415,7 +2519,14 @@ static void compile_for(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     else 
         compile_expr_stmt(ctx, compiler, vm);
 
+    uint start_jump = emit_jump(ctx, e_op_jump, compiler);
+
+    uint break_counter = compiler->compiling_chunk->cnt;
+    uint break_jump = emit_jump(ctx, e_op_jump, compiler);
+
     uint loop_start = compiler->compiling_chunk->cnt;
+    patch_jump(ctx, start_jump, compiler);
+
     uint exit_jump = (uint)(-1);
 
     if (!parser_match(ctx, e_tt_semicolon, compiler->parser)) {
@@ -2439,20 +2550,32 @@ static void compile_for(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         patch_jump(ctx, body_jump, compiler);
     }
 
+    compiler->top_loop_start_mark = loop_start;
+    compiler->top_loop_break_mark = break_counter;
     compile_stmt(ctx, compiler, vm);
+    compiler->top_loop_start_mark = (uint)(-1);
+    compiler->top_loop_break_mark = (uint)(-1);
+
     emit_loop(ctx, loop_start, compiler);
 
     if (exit_jump != (uint)(-1)) {
         patch_jump(ctx, exit_jump, compiler);
         emit_byte(ctx, e_op_pop, compiler);
     }
+    patch_jump(ctx, break_jump, compiler);
 
     end_scope(ctx, compiler);
 }
 
 static void compile_while(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
+    uint start_jump = emit_jump(ctx, e_op_jump, compiler);
+
+    uint break_counter = compiler->compiling_chunk->cnt;
+    uint break_jump = emit_jump(ctx, e_op_jump, compiler);
+
     uint loop_start = compiler->compiling_chunk->cnt;
+    patch_jump(ctx, start_jump, compiler);
 
     parser_consume(ctx, e_tt_left_paren,
         "Expected '(' after while.", compiler->parser);
@@ -2463,12 +2586,17 @@ static void compile_while(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     uint exit_jump = emit_jump(ctx, e_op_jump_if_false, compiler);
     emit_byte(ctx, e_op_pop, compiler);
 
+    compiler->top_loop_start_mark = loop_start;
+    compiler->top_loop_break_mark = break_counter;
     compile_stmt(ctx, compiler, vm);
+    compiler->top_loop_start_mark = (uint)(-1);
+    compiler->top_loop_break_mark = (uint)(-1);
 
     emit_loop(ctx, loop_start, compiler);
 
     patch_jump(ctx, exit_jump, compiler);
     emit_byte(ctx, e_op_pop, compiler);
+    patch_jump(ctx, break_jump, compiler);
 }
 
 static void compile_if(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
@@ -2515,8 +2643,12 @@ static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         compile_for(ctx, compiler, vm);
     } else if (parser_match(ctx, e_tt_switch, compiler->parser)) {
         compile_switch(ctx, compiler, vm);
+    } else if (parser_match(ctx, e_tt_continue, compiler->parser)) {
+        compile_continue(ctx, compiler, vm);
+    } else if (parser_match(ctx, e_tt_break, compiler->parser)) {
+        compile_break(ctx, compiler, vm);
     } else if (parser_match(ctx, e_tt_left_brace, compiler->parser)) {
-        begin_scope(ctx, compiler);
+        begin_scope(ctx, compiler, e_lst_block);
         compile_block(ctx, compiler, vm);
         end_scope(ctx, compiler);
     } else {
