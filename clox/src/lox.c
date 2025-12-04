@@ -51,6 +51,31 @@ static inline u32 hash_string(ctx_t const *ctx, char const *p, uint len)
      return hash;
 }
 
+typedef struct value value_t;
+
+typedef struct {
+    uint cnt, cap;
+    value_t *values;
+} value_array_t;
+
+typedef struct {
+    uint line;
+    uint instr_range_end;
+} line_info_entry_t;
+
+typedef struct {
+    uint cnt, cap;
+    line_info_entry_t *entries;
+} line_info_t;
+
+typedef struct {
+    uint cnt, cap;
+    u8 *code;
+    value_array_t constants;
+    line_info_t lines;
+    uint current_line;
+} chunk_t;
+
 typedef enum {
     e_vt_nil,
     e_vt_bool,
@@ -62,8 +87,9 @@ typedef enum {
 
 typedef struct obj obj_t;
 typedef struct obj_string obj_string_t;
+typedef struct obj_function obj_function_t;
 
-typedef struct {
+typedef struct value {
     value_type_t type;
     union {
         b32 boolean;
@@ -104,6 +130,7 @@ static b32 is_falsey(ctx_t const *ctx, value_t val)
 
 typedef enum {
     e_ot_string,
+    e_ot_function,
 } obj_type_t;
 
 typedef struct obj {
@@ -124,26 +151,36 @@ typedef struct obj_string {
     char *p;
 } obj_string_t;
 
+typedef struct obj_function {
+    obj_t obj;
+    int arity;
+    chunk_t chunk;
+    obj_string_t *name;
+} obj_function_t;
+
 static inline b32 is_obj_type(ctx_t const *ctx, value_t val, obj_type_t ot)
 {
     (void)ctx;
     return IS_OBJ(val) && AS_OBJ(val)->type == ot;
 }
 
+#define OSTR_TO_STR(ostr_) ((string_t){(ostr_)->p, (u64)(ostr_)->len})
+
 static inline string_t obj_as_string(ctx_t const *ctx, value_t val)
 {
     (void)ctx;
-    obj_string_t *ostr = (obj_string_t *)AS_OBJ(val);
-    return (string_t){ostr->p, (u64)ostr->len};
+    return OSTR_TO_STR((obj_string_t *)AS_OBJ(val));
 }
 
 #define OBJ_TYPE(value_)      (AS_OBJ(value_)->type)
 
 #define IS_STRING(value_)     (is_obj_type(ctx, (value_), e_ot_string))
+#define IS_FUNCTION(value_)   (is_obj_type(ctx, (value_), e_ot_function))
 
 #define AS_STRING_OBJ(value_) ((obj_string_t *)AS_OBJ(value_))
 #define AS_STRING(value_)     (obj_as_string(ctx, (value_)))
 #define AS_CSTRING(value_)    (((obj_string_t *)AS_OBJ(value_))->p)
+#define AS_FUNCTION(value_)   ((obj_function_t *)AS_OBJ(value_))
 
 static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
 {
@@ -367,11 +404,6 @@ typedef enum {
     e_op_return,
 } opcode_t;
 
-typedef struct {
-    uint cnt, cap;
-    value_t *values;
-} value_array_t;
-
 static inline value_array_t make_value_array(ctx_t const *ctx)
 {
     (void)ctx;
@@ -400,16 +432,6 @@ static inline void free_value_array(ctx_t const *ctx, value_array_t *arr)
     *arr = make_value_array(ctx);
 }
 
-typedef struct {
-    uint line;
-    uint instr_range_end;
-} line_info_entry_t;
-
-typedef struct {
-    uint cnt, cap;
-    line_info_entry_t *entries;
-} line_info_t;
-
 static inline line_info_t make_line_info(ctx_t const *ctx)
 {
     (void)ctx;
@@ -436,14 +458,6 @@ static inline void free_line_info(ctx_t const *ctx, line_info_t *info)
     FREE_ARRAY(value_t, info->entries, info->cap);
     *info = make_line_info(ctx);
 }
-
-typedef struct {
-    uint cnt, cap;
-    u8 *code;
-    value_array_t constants;
-    line_info_t lines;
-    uint current_line;
-} chunk_t;
 
 static inline chunk_t make_chunk(ctx_t const *ctx)
 {
@@ -521,6 +535,9 @@ static void print_obj(ctx_t const *ctx, io_handle_t *hnd, value_t val)
     switch (OBJ_TYPE(val)) {
     case e_ot_string:
         fmt_print(ctx, hnd, "%S", AS_STRING(val));
+        break;
+    case e_ot_function:
+        fmt_print(ctx, hnd, "<fn %S>", OSTR_TO_STR(AS_FUNCTION(val)->name));
         break;
     }
 }
@@ -826,6 +843,9 @@ static inline obj_t *allocate_obj(
     return obj;
 }
 
+#define ALLOCATE_OBJ(type_, ot_, vm_) \
+    ((type_ *)allocate_obj(ctx, (vm_), sizeof(type_), (ot_)))
+
 static inline obj_t *allocate_string(ctx_t const *ctx, vm_t *vm, uint len)
 {
     obj_t *obj = allocate_obj(
@@ -836,11 +856,31 @@ static inline obj_t *allocate_string(ctx_t const *ctx, vm_t *vm, uint len)
     return obj;
 }
 
-#define ALLOCATE_OBJ(type_, ot_, vm_) \
-    ((type_ *)allocate_obj(ctx, (vm_), sizeof(type_), (ot_)))
-
 #define ALLOCATE_STR(len_, vm_) \
     ((obj_string_t *)allocate_string(ctx, (vm_), (len_)))
+
+static inline obj_function_t *allocate_function(ctx_t const *ctx, vm_t *vm)
+{
+    obj_function_t *func = ALLOCATE_OBJ(obj_function_t, e_ot_function, vm);
+    func->arity = 0;
+    func->name = NULL;
+    func->chunk = make_chunk(ctx);
+    return func;
+}
+
+static inline void free_object(ctx_t const *ctx, obj_t *obj)
+{
+    switch (obj->type) {
+    case e_ot_function: {
+        obj_function_t *f = (obj_function_t *)obj;
+        free_chunk(ctx, &f->chunk);
+        FREE(f);
+    } break;
+    default:
+        FREE(obj);
+        break;
+    }
+}
 
 static inline obj_t *add_string_ref(
     ctx_t const *ctx, vm_t *vm, char const *p, uint len)
@@ -891,7 +931,7 @@ static void free_vm(ctx_t const *ctx, vm_t *vm)
     obj_t *obj = vm->objects;
     while (obj) {
         obj_t *next = obj->next;
-        FREE(obj);
+        free_object(ctx, obj);
         obj = next;
     }
 }
