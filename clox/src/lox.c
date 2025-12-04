@@ -98,21 +98,21 @@ typedef struct value {
     } as;
 } value_t;
 
-#define IS_BOOL(value_)    ((value_).type == e_vt_bool)
-#define IS_NIL(value_)     ((value_).type == e_vt_nil)
-#define IS_NUMBER(value_)  ((value_).type == e_vt_number)
-#define IS_OBJ(value_)     ((value_).type == e_vt_obj)
-#define IS_VACANT(value_)  ((value_).type == e_vt_vacant)
+#define IS_BOOL(val_)    ((val_).type == e_vt_bool)
+#define IS_NIL(val_)     ((val_).type == e_vt_nil)
+#define IS_NUMBER(val_)  ((val_).type == e_vt_number)
+#define IS_OBJ(val_)     ((val_).type == e_vt_obj)
+#define IS_VACANT(val_)  ((val_).type == e_vt_vacant)
 
-#define AS_BOOL(value_)    ((value_).as.boolean)
-#define AS_NUMBER(value_)  ((value_).as.number)
-#define AS_OBJ(value_)     ((value_).as.obj)
+#define AS_BOOL(val_)    ((val_).as.boolean)
+#define AS_NUMBER(val_)  ((val_).as.number)
+#define AS_OBJ(val_)     ((val_).as.obj)
 
-#define BOOL_VAL(value_)   ((value_t){e_vt_bool,   {.boolean = (value_)}})
-#define NIL_VAL            ((value_t){e_vt_nil,    {.number  = 0.0     }})
-#define NUMBER_VAL(value_) ((value_t){e_vt_number, {.number  = (value_)}})
-#define OBJ_VAL(value_)    ((value_t){e_vt_obj,    {.obj     = (value_)}})
-#define VACANT_VAL         ((value_t){e_vt_vacant, {.obj     = NULL    }})
+#define BOOL_VAL(val_)   ((value_t){e_vt_bool,   {.boolean = (val_)        }})
+#define NIL_VAL          ((value_t){e_vt_nil,    {.number  = 0.0           }})
+#define NUMBER_VAL(val_) ((value_t){e_vt_number, {.number  = (val_)        }})
+#define OBJ_VAL(val_)    ((value_t){e_vt_obj,    {.obj     = (obj_t*)(val_)}})
+#define VACANT_VAL       ((value_t){e_vt_vacant, {.obj     = NULL          }})
 
 #define VACANT_VAL_NAMED(nm_obj_) ((value_t){e_vt_vacant, {.obj = (nm_obj_)}})
 
@@ -150,6 +150,11 @@ typedef struct obj_string {
     u32 hash;
     char *p;
 } obj_string_t;
+
+typedef enum {
+    e_ft_function,
+    e_ft_script
+} obj_function_type_t;
 
 typedef struct obj_function {
     obj_t obj;
@@ -537,7 +542,10 @@ static void print_obj(ctx_t const *ctx, io_handle_t *hnd, value_t val)
         fmt_print(ctx, hnd, "%S", AS_STRING(val));
         break;
     case e_ot_function:
-        fmt_print(ctx, hnd, "<fn %S>", OSTR_TO_STR(AS_FUNCTION(val)->name));
+        if (AS_FUNCTION(val)->name)
+            fmt_print(ctx, hnd, "<fn %S>", OSTR_TO_STR(AS_FUNCTION(val)->name));
+        else
+            fmt_print(ctx, hnd, "<script>");
         break;
     }
 }
@@ -799,6 +807,7 @@ static void disasm_chunk(
     LOGF("== %s ==", name);
     for (uint off = 0; off < chunk->cnt;)
         off = disasm_instruction(ctx, chunk, off); 
+    LOG("");
 }
 
 #define DISASSEMBLE_CHUNK(chunk_, name_) disasm_chunk(ctx, (chunk_), (name_))
@@ -819,13 +828,21 @@ typedef struct vm_stack_segment {
     struct vm_stack_segment *next;
 } vm_stack_segment_t;
 
-typedef struct vm {
-    chunk_t *chunk;
+typedef struct call_frame {
+    obj_function_t *f;
     u8 *ip;
+    uint stack_base;
+    struct call_frame *next;
+} call_frame_t;
+
+typedef struct vm {
     vm_stack_segment_t stack;
     vm_stack_segment_t *cur_stack_seg; 
     uint stack_seg_count;
     value_t *stack_head;
+    call_frame_t *frames;
+    call_frame_t *cur_frame;
+    uint frame_count;
     table_t strings;
     table_t gvar_map;
     value_array_t gvars;
@@ -906,6 +923,9 @@ static void reset_stack(ctx_t const *ctx, vm_t *vm)
     vm->cur_stack_seg = &vm->stack;
     vm->stack_head = vm->stack.values;
     vm->stack_seg_count = 1;
+    vm->frames = NULL;
+    vm->cur_frame = NULL;
+    vm->frame_count = 0;
 }
 
 static void init_vm(ctx_t const *ctx, vm_t *vm)
@@ -926,6 +946,11 @@ static void free_vm(ctx_t const *ctx, vm_t *vm)
     while (seg) {
         vm_stack_segment_t *tmp = seg;
         seg = seg->next;
+        FREE(tmp);
+    }
+    while (vm->frames) {
+        call_frame_t *tmp = vm->frames;
+        vm->frames = vm->frames->next;
         FREE(tmp);
     }
     obj_t *obj = vm->objects;
@@ -1025,6 +1050,17 @@ static value_t peek_stack(ctx_t const *ctx, vm_t const *vm, int dist)
     return p[-dist];
 }
 
+static call_frame_t *push_frame(ctx_t const *ctx, vm_t *vm)
+{
+    call_frame_t *frame = ALLOCATE(call_frame_t, 1);
+    if (!vm->frames)
+        vm->frames = vm->cur_frame = frame;
+    else
+        vm->cur_frame->next = frame;
+    frame->next = NULL;
+    return frame;
+}
+
 typedef enum {
     e_interp_ok,
     e_interp_compile_err,
@@ -1038,11 +1074,15 @@ static void runtime_error(ctx_t const *ctx, vm_t *vm, char const *fmt, ...)
     fmt_vprint(ctx, &ctx->os->hstderr, fmt, args);
     VA_END(args);
 
-    uint instr = (uint)(vm->ip - vm->chunk->code - 1);
+    // @TODO: callstack
+    chunk_t *chunk = &vm->cur_frame->f->chunk;
+    u8 *ip = vm->cur_frame->ip;
+
+    uint instr = (uint)(ip - chunk->code - 1);
     uint line = 0;
-    for (usize i = 0; i < vm->chunk->lines.cnt; ++i) {
-        if (instr < vm->chunk->lines.entries[i].instr_range_end) {
-            line = vm->chunk->lines.entries[i].line;
+    for (usize i = 0; i < chunk->lines.cnt; ++i) {
+        if (instr < chunk->lines.entries[i].instr_range_end) {
+            line = chunk->lines.entries[i].line;
             break;
         }
     }
@@ -1052,14 +1092,32 @@ static void runtime_error(ctx_t const *ctx, vm_t *vm, char const *fmt, ...)
     reset_stack(ctx, vm);
 }
 
-static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
+static inline u16 read_short_ip(ctx_t const *ctx, u8 **ip)
 {
-#define READ_BYTE() (*vm->ip++)
-#define READ_SHORT() ((u16)READ_BYTE() | (u16)((u16)READ_BYTE() << 8))
-#define READ_LONG() \
-    ((u32)READ_BYTE() | ((u32)READ_BYTE() << 8) | ((u32)READ_BYTE() << 16))
-#define READ_CONSTANT() (vm->chunk->constants.values[READ_BYTE()])
-#define READ_CONSTANT_LONG() (vm->chunk->constants.values[READ_LONG()])
+    (void)ctx;
+    *ip += 2;
+    return (u16)(*ip)[-2] | (u16)((u16)(*ip)[-1] << 8);
+}
+
+static inline u32 read_long_ip(ctx_t const *ctx, u8 **ip)
+{
+    (void)ctx;
+    *ip += 3;
+    return (u32)(*ip)[-3] | ((u32)(*ip)[-2] << 8) | ((u32)(*ip)[-1] << 16);
+}
+
+static interp_result_t run(ctx_t const *ctx, vm_t *vm)
+{
+    call_frame_t *frame = vm->cur_frame;
+    chunk_t *chunk = &frame->f->chunk;
+    u8 *ip = frame->ip;
+    uint bp = frame->stack_base;
+
+#define READ_BYTE() (*(ip++))
+#define READ_SHORT() read_short_ip(ctx, &ip)
+#define READ_LONG() read_long_ip(ctx, &ip)
+#define READ_CONSTANT() (chunk->constants.values[READ_BYTE()])
+#define READ_CONSTANT_LONG() (chunk->constants.values[READ_LONG()])
 #define READ_STRING() AS_STRING_OBJ(READ_CONSTANT())
 #define READ_STRING_LONG() AS_STRING_OBJ(READ_CONSTANT_LONG())
 #define BINARY_OP(op_, vt_)                                      \
@@ -1072,6 +1130,7 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
         f64 b_ = AS_NUMBER(pop_stack(ctx, vm));                  \
         STACK_TOP(vm) = vt_(AS_NUMBER(STACK_TOP(vm)) op_ b_);    \
     } while (0)
+
 
     for (;;) {
 #if DEBUG_TRACE_EXECUTION
@@ -1092,7 +1151,7 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
             }
         }
         LOG("");
-        disasm_instruction(ctx, vm->chunk, (uint)(vm->ip - vm->chunk->code));
+        disasm_instruction(ctx, chunk, (uint)(ip - chunk->code));
 #endif
 
         u8 instr;
@@ -1183,16 +1242,16 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
         } break;
 
         case e_op_get_loc:
-            push_stack(ctx, vm, *at_stack(ctx, vm, READ_BYTE()));
+            push_stack(ctx, vm, *at_stack(ctx, vm, bp + READ_BYTE()));
             break;
         case e_op_get_loc_long:
-            push_stack(ctx, vm, *at_stack(ctx, vm, READ_LONG()));
+            push_stack(ctx, vm, *at_stack(ctx, vm, bp + READ_LONG()));
             break;
         case e_op_set_loc:
-            *at_stack(ctx, vm, READ_BYTE()) = STACK_TOP(vm);
+            *at_stack(ctx, vm, bp + READ_BYTE()) = STACK_TOP(vm);
             break;
         case e_op_set_loc_long:
-            *at_stack(ctx, vm, READ_LONG()) = STACK_TOP(vm);
+            *at_stack(ctx, vm, bp + READ_LONG()) = STACK_TOP(vm);
             break;
 
         case e_op_eq: {
@@ -1281,22 +1340,22 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
             break;
 
         case e_op_jump:
-            vm->ip += READ_SHORT();
+            ip += READ_SHORT();
             break;
 
         case e_op_jump_if_false: {
             u16 offset = READ_SHORT();
             if (is_falsey(ctx, STACK_TOP(vm)))
-                vm->ip += offset;
+                ip += offset;
         } break;
         case e_op_jump_if_true: {
             u16 offset = READ_SHORT();
             if (is_truthy(ctx, STACK_TOP(vm)))
-                vm->ip += offset;
+                ip += offset;
         } break;
 
         case e_op_loop:
-            vm->ip -= READ_SHORT();
+            ip -= READ_SHORT();
             break;
 
         case e_op_return:
@@ -1307,6 +1366,8 @@ static interp_result_t run_chunk(ctx_t const *ctx, vm_t *vm)
             break;
         }
     }
+
+    frame->ip = ip;
 
 #undef READ_BYTE
 #undef READ_STRING
@@ -1794,7 +1855,8 @@ typedef struct {
 
 typedef struct {
     parser_t *parser;
-    chunk_t *compiling_chunk;
+    obj_function_t *compiling_func;
+    obj_function_type_t compiling_func_type;
     lvar_scope_t scope_lvars[256];
     int current_scope_depth;
     lvar_scope_t *top_loop_block;
@@ -1802,17 +1864,19 @@ typedef struct {
     uint top_loop_break_mark;
 } compiler_t;
 
+#define CUR_CHUNK(comp_) (&(comp_)->compiling_func->chunk)
+
 static void emit_byte(ctx_t const *ctx, u8 byte, compiler_t *compiler)
 {
     write_chunk(
-        ctx, compiler->compiling_chunk, byte,
+        ctx, CUR_CHUNK(compiler), byte,
         (uint)compiler->parser->prev.line);
 }
 
 static void emit_constant(ctx_t const *ctx, value_t val, compiler_t *compiler)
 {
     write_constant(
-        ctx, compiler->compiling_chunk,
+        ctx, CUR_CHUNK(compiler),
         e_op_constant, e_op_constant_long, val,
         (uint)compiler->parser->prev.line);
 }
@@ -1823,7 +1887,7 @@ static void emit_id_ref(
     compiler_t *compiler)
 {
     write_id_ref(
-        ctx, compiler->compiling_chunk,
+        ctx, CUR_CHUNK(compiler),
         op, long_op, id, (uint)compiler->parser->prev.line);
 }
 
@@ -1832,24 +1896,24 @@ static uint emit_jump(ctx_t const *ctx, u8 opc, compiler_t *compiler)
     emit_byte(ctx, opc, compiler);
     emit_byte(ctx, 0xFF, compiler);
     emit_byte(ctx, 0xFF, compiler);
-    return compiler->compiling_chunk->cnt - 2;
+    return CUR_CHUNK(compiler)->cnt - 2;
 }
 
 static void patch_jump(ctx_t const *ctx, uint at, compiler_t *compiler)
 {
-    int jump = (int)compiler->compiling_chunk->cnt - (int)at - 2;
+    int jump = (int)CUR_CHUNK(compiler)->cnt - (int)at - 2;
     if (jump > 0xFFFF)
         parser_error(ctx, "Too much code to jump over.", compiler->parser);
 
-    compiler->compiling_chunk->code[at] = jump & 0xFF;
-    compiler->compiling_chunk->code[at + 1] = (jump >> 8) & 0xFF;
+    CUR_CHUNK(compiler)->code[at] = jump & 0xFF;
+    CUR_CHUNK(compiler)->code[at + 1] = (jump >> 8) & 0xFF;
 }
 
 static void emit_loop(ctx_t const *ctx, uint at, compiler_t *compiler)
 {
     emit_byte(ctx, e_op_loop, compiler);
 
-    int off = (int)compiler->compiling_chunk->cnt - (int)at + 2;
+    int off = (int)CUR_CHUNK(compiler)->cnt - (int)at + 2;
     if (off > 0xFFFF)
         parser_error(ctx, "Too much code in loop body.", compiler->parser);
 
@@ -1890,7 +1954,7 @@ static uint register_lvar(
     obj_string_t *str =
         (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
     table_t *scope_lvar_table =
-        &compiler->scope_lvars[compiler->current_scope_depth - 1].map;
+        &compiler->scope_lvars[compiler->current_scope_depth].map;
     uint id = scope_lvar_table->cnt;
     value_t lvar_id = NUMBER_VAL((f64)(id + 1) * (is_const ? -1.0 : 1.0));
     if (!table_set(ctx, scope_lvar_table, str, lvar_id)) {
@@ -1907,8 +1971,7 @@ static uint register_lvar(
 static void mark_lvar_initialzied(
     ctx_t const *ctx, compiler_t *compiler, uint vid)
 {
-    lvar_scope_t *scope=
-        &compiler->scope_lvars[compiler->current_scope_depth - 1];
+    lvar_scope_t *scope = &compiler->scope_lvars[compiler->current_scope_depth];
     table_t *scope_lvar_table = &scope->map;
     ASSERT(scope_lvar_table->cnt = scope->initialized_cnt + 1);
     ASSERT(vid == scope->initialized_cnt);
@@ -1922,7 +1985,7 @@ static resolve_res_t resolve_lvar(
         return (resolve_res_t){(uint)(-1), true};
     obj_string_t *str =
         (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
-    for (int i = compiler->current_scope_depth - 1; i >= 0; --i) {
+    for (int i = compiler->current_scope_depth; i >= 1; --i) {
         lvar_scope_t *scope = &compiler->scope_lvars[i];
         value_t id_val;
         if (table_get(ctx, &scope->map, str, &id_val)) {
@@ -1943,7 +2006,7 @@ static resolve_res_t resolve_lvar(
     return (resolve_res_t){(uint)(-1), true};
 }
 
-static void begin_compiler(ctx_t const *ctx, compiler_t *compiler)
+static void begin_compiler(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     for (uint i = 0; i < ARRCNT(compiler->scope_lvars); ++i) {
         compiler->scope_lvars[i].map = make_table(ctx);
@@ -1954,23 +2017,41 @@ static void begin_compiler(ctx_t const *ctx, compiler_t *compiler)
     compiler->top_loop_block = NULL;
     compiler->top_loop_start_mark = (uint)(-1);
     compiler->top_loop_break_mark = (uint)(-1);
+
+    uint dummy = register_lvar(
+        ctx, compiler, vm, (token_t){(token_type_t)0, "", 0, 0}, true);
+    mark_lvar_initialzied(ctx, compiler, dummy);
 }
 
-static void end_compiler(ctx_t const *ctx, compiler_t *compiler)
+static obj_function_t *end_compiler(ctx_t const *ctx, compiler_t *compiler)
 {
     emit_return(ctx, compiler);
     for (uint i = 0; i < ARRCNT(compiler->scope_lvars); ++i)
         free_table(ctx, &compiler->scope_lvars[i].map);
+
+    obj_function_t *func = compiler->compiling_func;
 #if DEBUG_PRINT_CODE
-    if (!compiler->parser->had_error)
-        DISASSEMBLE_CHUNK(compiler->compiling_chunk, "code");
+    if (!compiler->parser->had_error) {
+        DISASSEMBLE_CHUNK(
+            &func->chunk, func->name ? func->name->p : "<script>");
+    }
 #endif
+    
+    return func;
 }
 
 static void begin_scope(
     ctx_t const *ctx, compiler_t *compiler, lvar_scope_type_t type)
 {
     (void)ctx;
+    if (compiler->current_scope_depth >= 255) {
+        parser_error(
+            ctx,
+            "Can't have more than 255 nested blocks in one chunk.",
+            compiler->parser);
+        return;
+    }
+    ++compiler->current_scope_depth;
     if (type == e_lst_block && compiler->top_loop_start_mark != (uint)(-1)) {
         compiler->top_loop_block =
             &compiler->scope_lvars[compiler->current_scope_depth];
@@ -1982,13 +2063,6 @@ static void begin_scope(
         compiler->top_loop_break_mark = (uint)(-1);
         type = e_lst_loop_body;
     }
-    if (compiler->current_scope_depth >= 256) {
-        parser_error(
-            ctx,
-            "Can't have more than 255 nested blocks in one chunk.",
-            compiler->parser);
-        return;
-    }
     if (compiler->current_scope_depth > 0) {
         lvar_scope_t *prev_scope =
             &compiler->scope_lvars[compiler->current_scope_depth - 1];
@@ -1999,16 +2073,13 @@ static void begin_scope(
             prev_scope->cnt_in_prev_blocks + (int)prev_scope->map.cnt;
         cur_scope->initialized_cnt = 0;
     }
-    ++compiler->current_scope_depth;
-    compiler->scope_lvars[compiler->current_scope_depth - 1].type = type;
+    compiler->scope_lvars[compiler->current_scope_depth].type = type;
 }
 
 static void end_scope(ctx_t const *ctx, compiler_t *compiler)
 {
     (void)ctx;
     ASSERT(compiler->current_scope_depth);
-    --compiler->current_scope_depth;
-
     lvar_scope_t *scope = &compiler->scope_lvars[compiler->current_scope_depth];
     table_t *scope_lvar_table = &scope->map;
     if (scope_lvar_table->cnt == 1) {
@@ -2035,6 +2106,8 @@ static void end_scope(ctx_t const *ctx, compiler_t *compiler)
         sizeof(table_entry_t) * scope_lvar_table->cap);
     scope_lvar_table->cnt = 0;
     scope->initialized_cnt = 0;
+
+    --compiler->current_scope_depth;
 }
 
 typedef enum {
@@ -2440,7 +2513,7 @@ static void compile_break(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     }
     uint scopes_to_pop = (uint)(
         compiler->current_scope_depth -
-        (compiler->top_loop_block - compiler->scope_lvars) - 1);
+        (compiler->top_loop_block - compiler->scope_lvars));
     if (compiler->top_loop_block > compiler->scope_lvars &&
         compiler->top_loop_block[-1].type == e_lst_for_loop)
     {
@@ -2470,7 +2543,7 @@ static void compile_continue(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     }
     uint scopes_to_pop = (uint)(
         compiler->current_scope_depth -
-        (compiler->top_loop_block - compiler->scope_lvars) - 1);
+        (compiler->top_loop_block - compiler->scope_lvars));
     lvar_scope_t *s = compiler->top_loop_block;
     uint lvars = 0;
     while (scopes_to_pop--)
@@ -2494,7 +2567,7 @@ static void compile_switch(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         "Expected '{' before switch body.", compiler->parser);
 
     uint init_jump = emit_jump(ctx, e_op_jump, compiler);
-    uint break_counter = compiler->compiling_chunk->cnt;
+    uint break_counter = CUR_CHUNK(compiler)->cnt;
     uint break_jump = emit_jump(ctx, e_op_jump, compiler);
 
     uint case_jump = init_jump;
@@ -2561,10 +2634,10 @@ static void compile_for(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 
     uint start_jump = emit_jump(ctx, e_op_jump, compiler);
 
-    uint break_counter = compiler->compiling_chunk->cnt;
+    uint break_counter = CUR_CHUNK(compiler)->cnt;
     uint break_jump = emit_jump(ctx, e_op_jump, compiler);
 
-    uint loop_start = compiler->compiling_chunk->cnt;
+    uint loop_start = CUR_CHUNK(compiler)->cnt;
     patch_jump(ctx, start_jump, compiler);
 
     uint exit_jump = (uint)(-1);
@@ -2579,7 +2652,7 @@ static void compile_for(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 
     if (!parser_match(ctx, e_tt_right_paren, compiler->parser)) {
         uint body_jump = emit_jump(ctx, e_op_jump, compiler);
-        uint increment_start = compiler->compiling_chunk->cnt;
+        uint increment_start = CUR_CHUNK(compiler)->cnt;
         compile_expression(ctx, compiler, vm);
         emit_byte(ctx, e_op_pop, compiler);
         parser_consume(ctx, e_tt_right_paren,
@@ -2611,10 +2684,10 @@ static void compile_while(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     uint start_jump = emit_jump(ctx, e_op_jump, compiler);
 
-    uint break_counter = compiler->compiling_chunk->cnt;
+    uint break_counter = CUR_CHUNK(compiler)->cnt;
     uint break_jump = emit_jump(ctx, e_op_jump, compiler);
 
-    uint loop_start = compiler->compiling_chunk->cnt;
+    uint loop_start = CUR_CHUNK(compiler)->cnt;
     patch_jump(ctx, start_jump, compiler);
 
     parser_consume(ctx, e_tt_left_paren,
@@ -2731,7 +2804,7 @@ static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         parser_sync(ctx, compiler->parser);
 }
 
-static b32 compile(ctx_t const *ctx, string_t source, chunk_t *chunk, vm_t *vm)
+static obj_function_t *compile(ctx_t const *ctx, string_t source, vm_t *vm)
 {
     scanner_t scanner = {source.p, source.p, source.p + source.len, 1}; 
     parser_t parser = {0};
@@ -2739,35 +2812,32 @@ static b32 compile(ctx_t const *ctx, string_t source, chunk_t *chunk, vm_t *vm)
 
     parser.scanner = &scanner;
     compiler.parser = &parser;
-    compiler.compiling_chunk = chunk;
+    compiler.compiling_func = allocate_function(ctx, vm);
+    compiler.compiling_func_type = e_ft_script;
 
-    begin_compiler(ctx, &compiler);
+    begin_compiler(ctx, &compiler, vm);
 
     parser_advance(ctx, &parser);
     while (!parser_match(ctx, e_tt_eof, &parser))
         compile_decl(ctx, &compiler, vm);
 
-    end_compiler(ctx, &compiler);
-
-    return !parser.had_error;
+    obj_function_t *func = end_compiler(ctx, &compiler);
+    return parser.had_error ? NULL : func;
 }
 
 static interp_result_t interpret(ctx_t const *ctx, vm_t *vm, string_t source)
 {
-    chunk_t chunk = make_chunk(ctx);
-
-    if (!compile(ctx, source, &chunk, vm)) {
-        free_chunk(ctx, &chunk);
+    obj_function_t *func = compile(ctx, source, vm);
+    if (!func)
         return e_interp_compile_err;
-    }
 
-    vm->chunk = &chunk;
-    vm->ip = chunk.code;
+    push_stack(ctx, vm, OBJ_VAL(func));
+    call_frame_t *frame = push_frame(ctx, vm);
+    frame->f = func;
+    frame->ip = func->chunk.code;
+    frame->stack_base = 0;
 
-    interp_result_t res = run_chunk(ctx, vm);
-
-    free_chunk(ctx, &chunk);
-    return res;
+    return run(ctx, vm);
 }
 
 static void repl(ctx_t const *ctx, vm_t *vm)
