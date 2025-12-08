@@ -1971,6 +1971,8 @@ static uint register_lvar(
 static void mark_lvar_initialzied(
     ctx_t const *ctx, compiler_t *compiler, uint vid)
 {
+    if (compiler->current_scope_depth == 0)
+        return;
     lvar_scope_t *scope = &compiler->scope_lvars[compiler->current_scope_depth];
     table_t *scope_lvar_table = &scope->map;
     ASSERT(scope_lvar_table->cnt = scope->initialized_cnt + 1);
@@ -2462,8 +2464,32 @@ static void compile_or(
 
 static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
 static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
+static void compile_block(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
 static void compile_var_decl(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 is_const);
+
+static void compile_func_expr(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+{
+    (void)can_assign;
+    compiler_t push_compiler = {0};
+    push_compiler.parser = compiler->parser;
+    push_compiler.compiling_func = allocate_function(ctx, vm);
+    push_compiler.compiling_func_type = e_ft_function;
+
+    begin_scope(ctx, compiler, e_lst_block);
+
+    parser_consume(ctx, e_tt_left_paren,
+        "Expected '(' before function args", push_compiler.parser);
+    parser_consume(ctx, e_tt_right_paren,
+        "Expected ')' after function args", push_compiler.parser);
+    parser_consume(ctx, e_tt_left_brace,
+        "Expected '{' before function body", push_compiler.parser);
+    compile_block(ctx, &push_compiler, vm);
+
+    obj_function_t *func = end_compiler(ctx, &push_compiler);
+    emit_constant(ctx, OBJ_VAL(func), compiler);
+}
 
 static uint compile_new_variable(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm,
@@ -2769,6 +2795,22 @@ static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     }
 }
 
+static void compile_func_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    uint vid = compile_new_variable(
+        ctx, compiler, vm, "Expected function name.", true);
+    mark_lvar_initialzied(ctx, compiler, vid);
+
+    compile_func_expr(ctx, compiler, vm);
+
+    if (compiler->current_scope_depth == 0) {
+        emit_id_ref(
+            ctx, vid, e_op_define_glob, e_op_define_glob_long, compiler);
+    } else {
+        mark_lvar_initialzied(ctx, compiler, vid);
+    }
+}
+
 static void compile_var_decl(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 is_const)
 {
@@ -2797,6 +2839,8 @@ static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         compile_var_decl(ctx, compiler, vm, false);
     else if (parser_match(ctx, e_tt_let, compiler->parser))
         compile_var_decl(ctx, compiler, vm, true);
+    else if (parser_match(ctx, e_tt_fun, compiler->parser))
+        compile_func_decl(ctx, compiler, vm);
     else
         compile_stmt(ctx, compiler, vm);
 
