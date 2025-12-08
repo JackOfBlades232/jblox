@@ -802,9 +802,9 @@ static uint disasm_instruction(
 #if DEBUG_PRINT_CODE
 
 static void disasm_chunk(
-    ctx_t const *ctx, chunk_t const *chunk, char const *name)
+    ctx_t const *ctx, chunk_t const *chunk, string_t name)
 {
-    LOGF("== %s ==", name);
+    LOGF("== %S ==", name);
     for (uint off = 0; off < chunk->cnt;)
         off = disasm_instruction(ctx, chunk, off); 
     LOG("");
@@ -2035,7 +2035,8 @@ static obj_function_t *end_compiler(ctx_t const *ctx, compiler_t *compiler)
 #if DEBUG_PRINT_CODE
     if (!compiler->parser->had_error) {
         DISASSEMBLE_CHUNK(
-            &func->chunk, func->name ? func->name->p : "<script>");
+            &func->chunk,
+            func->name ? OSTR_TO_STR(func->name) : LITSTR("<script>"));
     }
 #endif
     
@@ -2477,10 +2478,32 @@ static void compile_func_expr(
     push_compiler.compiling_func = allocate_function(ctx, vm);
     push_compiler.compiling_func_type = e_ft_function;
 
-    begin_scope(ctx, compiler, e_lst_block);
+    push_compiler.compiling_func->name =
+        (obj_string_t *)add_string_ref(
+            ctx, vm,
+            push_compiler.parser->prev.start,
+            push_compiler.parser->prev.len);
+
+    begin_compiler(ctx, &push_compiler, vm);
+    begin_scope(ctx, &push_compiler, e_lst_block);
 
     parser_consume(ctx, e_tt_left_paren,
         "Expected '(' before function args", push_compiler.parser);
+    if (!parser_check(ctx, e_tt_right_paren, push_compiler.parser)) {
+        do {
+            ++push_compiler.compiling_func->arity;
+            if (push_compiler.compiling_func->arity > 255) {
+                parser_error_at_current(
+                    ctx, "Can't have more than 255 params.",
+                    push_compiler.parser);
+            }
+            parser_consume(ctx, e_tt_identifier,
+                "Expected param name.", compiler->parser);
+            uint vid = register_lvar(
+                ctx, &push_compiler, vm, compiler->parser->prev, false);
+            mark_lvar_initialzied(ctx, compiler, vid);
+        } while (parser_match(ctx, e_tt_comma, push_compiler.parser));
+    }
     parser_consume(ctx, e_tt_right_paren,
         "Expected ')' after function args", push_compiler.parser);
     parser_consume(ctx, e_tt_left_brace,
@@ -2801,13 +2824,11 @@ static void compile_func_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         ctx, compiler, vm, "Expected function name.", true);
     mark_lvar_initialzied(ctx, compiler, vid);
 
-    compile_func_expr(ctx, compiler, vm);
+    compile_func_expr(ctx, compiler, vm, false);
 
     if (compiler->current_scope_depth == 0) {
         emit_id_ref(
             ctx, vid, e_op_define_glob, e_op_define_glob_long, compiler);
-    } else {
-        mark_lvar_initialzied(ctx, compiler, vid);
     }
 }
 

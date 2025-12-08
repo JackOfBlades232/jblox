@@ -6,6 +6,7 @@ call :RunTest hello.lox %*
 call :RunTest gvars.lox %*
 call :RunTest scopes.lox %*
 call :RunTest controlflow.lox %*
+call :RunTest functions.lox %*
 
 popd
 exit /b

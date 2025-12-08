@@ -1,0 +1,14 @@
+fun areWeThere() {
+    print "Here we are";
+}
+
+print areWeThere;
+
+{
+    fun areWeStillNotThere() {
+        print "No, we are here!";
+    }
+
+    print areWeThere;
+    print areWeStillNotThere;
+}
