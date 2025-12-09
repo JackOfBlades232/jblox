@@ -79,7 +79,8 @@ static inline void gpa_deallocate(ctx_t const *ctx, gpa_t *gpa, void const *p)
     gpa_free_header_t *free = (gpa_free_header_t *)alloc;
 
     // If next to each other, coalesce
-    while (gpa->head ==
+    uint coalesce_iters = 500;
+    while (coalesce_iters-- && gpa->head ==
         (gpa_free_header_t *)((u8 *)free + size * GPA_ALIGNMENT))
     {
         size += gpa->head->size;

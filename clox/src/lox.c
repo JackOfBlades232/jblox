@@ -406,6 +406,8 @@ typedef enum {
     e_op_jump_if_false,
     e_op_jump_if_true,
     e_op_loop,
+    e_op_call,
+    e_op_call_long,
     e_op_return,
 } opcode_t;
 
@@ -790,6 +792,12 @@ static uint disasm_instruction(
     case e_op_loop:
         return disasm_short_jump_instruction(
             ctx, "OP_LOOP", chunk, at, -1);
+    case e_op_call:
+        return disasm_id_instruction(
+            ctx, "OP_CALL", chunk, at);
+    case e_op_call_long:
+        return disasm_long_id_instruction(
+            ctx, "OP_CALL_LONG", chunk, at);
     case e_op_return:
         return disasm_simple_instruction(
             ctx, "OP_RETURN", at);
@@ -821,6 +829,7 @@ static void disasm_chunk(
 #endif
 
 #define VM_STACK_SEGMENT_SIZE 256
+#define VM_MAX_CALL_FRAMES 65536
 
 typedef struct vm_stack_segment {
     value_t values[VM_STACK_SEGMENT_SIZE];
@@ -831,7 +840,7 @@ typedef struct vm_stack_segment {
 typedef struct call_frame {
     obj_function_t *f;
     u8 *ip;
-    uint stack_base;
+    uint bp;
     struct call_frame *next;
 } call_frame_t;
 
@@ -840,8 +849,7 @@ typedef struct vm {
     vm_stack_segment_t *cur_stack_seg; 
     uint stack_seg_count;
     value_t *stack_head;
-    call_frame_t *frames;
-    call_frame_t *cur_frame;
+    call_frame_t *frame;
     uint frame_count;
     table_t strings;
     table_t gvar_map;
@@ -923,9 +931,73 @@ static void reset_stack(ctx_t const *ctx, vm_t *vm)
     vm->cur_stack_seg = &vm->stack;
     vm->stack_head = vm->stack.values;
     vm->stack_seg_count = 1;
-    vm->frames = NULL;
-    vm->cur_frame = NULL;
+    vm->frame = NULL;
     vm->frame_count = 0;
+}
+
+static uint stack_size(ctx_t const *ctx, vm_t *vm)
+{
+    (void)ctx;
+    return
+        (vm->stack_seg_count - 1) * VM_STACK_SEGMENT_SIZE +
+        (vm->stack_head - vm->cur_stack_seg->values);
+}
+
+static void runtime_error(ctx_t const *ctx, vm_t *vm, char const *fmt, ...)
+{
+    VA_LIST args;
+    VA_START(args, fmt);
+    fmt_vprint(ctx, &ctx->os->hstderr, fmt, args);
+    VA_END(args);
+
+    for (call_frame_t *frame = vm->frame; frame; frame = frame->next) {
+        obj_function_t *f = frame->f;
+        chunk_t *chunk = &f->chunk;
+        u8 *ip = frame->ip;
+
+        uint instr = (uint)(ip - chunk->code - 1);
+        uint line = 0;
+        for (usize i = 0; i < chunk->lines.cnt; ++i) {
+            if (instr < chunk->lines.entries[i].instr_range_end) {
+                line = chunk->lines.entries[i].line;
+                break;
+            }
+        }
+
+        LOGF_NONL("\n[line %d] in ", line);
+        if (f->name)
+            LOGF_NONL("%S()", OSTR_TO_STR(f->name));
+        else
+            LOG_NONL("script");
+    }
+
+    LOG("");
+    reset_stack(ctx, vm);
+}
+
+static call_frame_t *push_frame(ctx_t const *ctx, vm_t *vm)
+{
+    if (vm->frame_count >= VM_MAX_CALL_FRAMES) {
+        runtime_error(ctx, vm, "Stack overflow.");
+        return NULL;
+    }
+    call_frame_t *frame = ALLOCATE(call_frame_t, 1);
+    if (vm->frame)
+        frame->next = vm->frame;
+    else
+        frame->next = NULL;
+    vm->frame = frame;
+    ++vm->frame_count;
+    return frame;
+}
+
+static void pop_frame(ctx_t const *ctx, vm_t *vm)
+{
+    ASSERT(vm->frame);
+    call_frame_t *frame = vm->frame;
+    vm->frame = frame->next;
+    --vm->frame_count;
+    FREE(frame);
 }
 
 static void init_vm(ctx_t const *ctx, vm_t *vm)
@@ -948,17 +1020,20 @@ static void free_vm(ctx_t const *ctx, vm_t *vm)
         seg = seg->next;
         FREE(tmp);
     }
-    while (vm->frames) {
-        call_frame_t *tmp = vm->frames;
-        vm->frames = vm->frames->next;
-        FREE(tmp);
-    }
+    while (vm->frame)
+        pop_frame(ctx, vm);
+
+    // @FIXME
+    // botched refs in obj list, maybe mem corruption (=> inf loop here).
+    // Should be fixed by the point of GC.
+#if 0
     obj_t *obj = vm->objects;
     while (obj) {
         obj_t *next = obj->next;
         free_object(ctx, obj);
         obj = next;
     }
+#endif
 }
 
 #define PUSH_STACK_SEG(vm_)                                             \
@@ -1050,47 +1125,11 @@ static value_t peek_stack(ctx_t const *ctx, vm_t const *vm, int dist)
     return p[-dist];
 }
 
-static call_frame_t *push_frame(ctx_t const *ctx, vm_t *vm)
-{
-    call_frame_t *frame = ALLOCATE(call_frame_t, 1);
-    if (!vm->frames)
-        vm->frames = vm->cur_frame = frame;
-    else
-        vm->cur_frame->next = frame;
-    frame->next = NULL;
-    return frame;
-}
-
 typedef enum {
     e_interp_ok,
     e_interp_compile_err,
     e_interp_runtime_err
 } interp_result_t;
-
-static void runtime_error(ctx_t const *ctx, vm_t *vm, char const *fmt, ...)
-{
-    VA_LIST args;
-    VA_START(args, fmt);
-    fmt_vprint(ctx, &ctx->os->hstderr, fmt, args);
-    VA_END(args);
-
-    // @TODO: callstack
-    chunk_t *chunk = &vm->cur_frame->f->chunk;
-    u8 *ip = vm->cur_frame->ip;
-
-    uint instr = (uint)(ip - chunk->code - 1);
-    uint line = 0;
-    for (usize i = 0; i < chunk->lines.cnt; ++i) {
-        if (instr < chunk->lines.entries[i].instr_range_end) {
-            line = chunk->lines.entries[i].line;
-            break;
-        }
-    }
-
-    LOGF("\n[line %d] in script", line);
-
-    reset_stack(ctx, vm);
-}
 
 static inline u16 read_short_ip(ctx_t const *ctx, u8 **ip)
 {
@@ -1106,12 +1145,56 @@ static inline u32 read_long_ip(ctx_t const *ctx, u8 **ip)
     return (u32)(*ip)[-3] | ((u32)(*ip)[-2] << 8) | ((u32)(*ip)[-1] << 16);
 }
 
+static b32 call(
+    ctx_t const *ctx, obj_function_t *f, int arg_count, vm_t *vm)
+{
+    if (arg_count != f->arity) {
+        runtime_error(
+            ctx, vm, "Expected %d arguments, got %d.", f->arity, arg_count);
+        return false;
+    }
+
+    call_frame_t *frame = push_frame(ctx, vm);
+    if (!frame)
+        return false;
+    frame->f = f;
+    frame->ip = f->chunk.code;
+    frame->bp = stack_size(ctx, vm) - arg_count - 1;
+    return true;
+}
+
+static b32 call_value(
+    ctx_t const *ctx, value_t callee, uint arg_count, vm_t *vm)
+{
+    if (IS_OBJ(callee)) {
+        switch (OBJ_TYPE(callee)) {
+        case e_ot_function:
+            return call(ctx, AS_FUNCTION(callee), arg_count, vm);
+        default:
+            break;
+        }
+    }
+
+    runtime_error(ctx, vm, "Can only call functions and classes.");
+    return false;
+}
+
 static interp_result_t run(ctx_t const *ctx, vm_t *vm)
 {
-    call_frame_t *frame = vm->cur_frame;
-    chunk_t *chunk = &frame->f->chunk;
-    u8 *ip = frame->ip;
-    uint bp = frame->stack_base;
+    call_frame_t *frame;
+    chunk_t *chunk;
+    u8 *ip;
+    uint bp;
+
+#define REINIT_CACHED_VARS()      \
+    do {                          \
+        frame = vm->frame;        \
+        chunk = &frame->f->chunk; \
+        ip = frame->ip;           \
+        bp = frame->bp;           \
+    } while (0)
+
+    REINIT_CACHED_VARS();
 
 #define READ_BYTE() (*(ip++))
 #define READ_SHORT() read_short_ip(ctx, &ip)
@@ -1358,8 +1441,33 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
             ip -= READ_SHORT();
             break;
 
-        case e_op_return:
-            return e_interp_ok;
+        case e_op_call: {
+            u8 arg_count = READ_BYTE();
+            frame->ip = ip;
+            if (!call_value(ctx, peek_stack(ctx, vm, arg_count), arg_count, vm))
+                return e_interp_runtime_err;
+            REINIT_CACHED_VARS();
+        } break;
+        case e_op_call_long: {
+            u32 arg_count = READ_LONG();
+            frame->ip = ip;
+            if (!call_value(ctx, peek_stack(ctx, vm, arg_count), arg_count, vm))
+                return e_interp_runtime_err;
+            REINIT_CACHED_VARS();
+        } break;
+
+        case e_op_return: {
+            value_t result = pop_stack(ctx, vm);
+            pop_frame(ctx, vm);
+            if (!vm->frame) {
+                pop_stack(ctx, vm);
+                return e_interp_ok;
+            }
+            uint values_to_pop = stack_size(ctx, vm) - frame->bp;
+            popn_stack(ctx, vm, values_to_pop);
+            push_stack(ctx, vm, result);
+            REINIT_CACHED_VARS();
+        } break;
 
         default:
             ASSERT(0);
@@ -1923,6 +2031,7 @@ static void emit_loop(ctx_t const *ctx, uint at, compiler_t *compiler)
 
 static void emit_return(ctx_t const *ctx, compiler_t *compiler)
 {
+    emit_byte(ctx, e_op_nil, compiler);
     emit_byte(ctx, e_op_return, compiler);
 }
 
@@ -2149,6 +2258,8 @@ static void compile_variable(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_grouping(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+static void compile_call(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_unary(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_binary(
@@ -2161,7 +2272,7 @@ static void compile_or(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 
 parse_rule_t const c_parse_rules[] = {
-    [e_tt_left_paren]    = {&compile_grouping, NULL,             e_prec_none  },
+    [e_tt_left_paren]    = {&compile_grouping, &compile_call,    e_prec_call  },
     [e_tt_right_paren]   = {NULL,              NULL,             e_prec_none  },
     [e_tt_left_brace]    = {NULL,              NULL,             e_prec_none  }, 
     [e_tt_right_brace]   = {NULL,              NULL,             e_prec_none  },
@@ -2348,6 +2459,29 @@ static void compile_grouping(
         compiler->parser);
 }
 
+static uint compile_arg_list(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    uint arg_count = 0;
+    if (!parser_check(ctx, e_tt_right_paren, compiler->parser)) {
+        do {
+            compile_expression(ctx, compiler, vm);
+            ++arg_count;
+        } while (parser_match(ctx, e_tt_comma, compiler->parser));
+    }
+    parser_consume(ctx, e_tt_right_paren,
+        "Expected ')' after arg list", compiler->parser);
+    return arg_count;
+}
+
+static void compile_call(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+{
+    (void)can_assign;
+    uint arg_count = compile_arg_list(ctx, compiler, vm);
+    emit_id_ref(ctx, arg_count, e_op_call, e_op_call_long, compiler);
+}
+
 static void compile_unary(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
 {
@@ -2492,16 +2626,11 @@ static void compile_func_expr(
     if (!parser_check(ctx, e_tt_right_paren, push_compiler.parser)) {
         do {
             ++push_compiler.compiling_func->arity;
-            if (push_compiler.compiling_func->arity > 255) {
-                parser_error_at_current(
-                    ctx, "Can't have more than 255 params.",
-                    push_compiler.parser);
-            }
             parser_consume(ctx, e_tt_identifier,
                 "Expected param name.", compiler->parser);
             uint vid = register_lvar(
                 ctx, &push_compiler, vm, compiler->parser->prev, false);
-            mark_lvar_initialzied(ctx, compiler, vid);
+            mark_lvar_initialzied(ctx, &push_compiler, vid);
         } while (parser_match(ctx, e_tt_comma, push_compiler.parser));
     }
     parser_consume(ctx, e_tt_right_paren,
@@ -2603,6 +2732,24 @@ static void compile_continue(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         emit_id_ref(ctx, lvars, e_op_popn, e_op_popn_long, compiler);
 
     emit_loop(ctx, compiler->top_loop_block->loop_start_mark, compiler);
+}
+
+static void compile_return(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    if (compiler->compiling_func_type == e_ft_script) {
+        parser_error(
+            ctx, "Can't return from top level code.", compiler->parser);
+        return;
+    }
+
+    if (parser_match(ctx, e_tt_semicolon, compiler->parser)) {
+        emit_return(ctx, compiler);
+    } else {
+        compile_expression(ctx, compiler, vm);
+        parser_consume(ctx, e_tt_semicolon,
+            "Expected ';' after return value.", compiler->parser);
+        emit_byte(ctx, e_op_return, compiler);
+    }
 }
 
 static void compile_switch(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
@@ -2805,6 +2952,8 @@ static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         compile_for(ctx, compiler, vm);
     } else if (parser_match(ctx, e_tt_switch, compiler->parser)) {
         compile_switch(ctx, compiler, vm);
+    } else if (parser_match(ctx, e_tt_return, compiler->parser)) {
+        compile_return(ctx, compiler, vm);
     } else if (parser_match(ctx, e_tt_continue, compiler->parser)) {
         compile_continue(ctx, compiler, vm);
     } else if (parser_match(ctx, e_tt_break, compiler->parser)) {
@@ -2897,10 +3046,7 @@ static interp_result_t interpret(ctx_t const *ctx, vm_t *vm, string_t source)
         return e_interp_compile_err;
 
     push_stack(ctx, vm, OBJ_VAL(func));
-    call_frame_t *frame = push_frame(ctx, vm);
-    frame->f = func;
-    frame->ip = func->chunk.code;
-    frame->stack_base = 0;
+    call(ctx, func, 0, vm);
 
     return run(ctx, vm);
 }

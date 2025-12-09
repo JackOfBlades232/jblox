@@ -12,3 +12,61 @@ print areWeThere;
     print areWeThere;
     print areWeStillNotThere;
 }
+
+fun sum(a, b, c) {
+  return a + b + c;
+}
+
+print 4 + sum(5, 6, 7);
+
+var a = 3;
+
+print a;
+
+fun tryIncByRef(a) {
+    a = a + 1;
+}
+
+tryIncByRef(a);
+print a;
+
+fun getIncremented(a) {
+    return a + 1;
+}
+
+a = getIncremented(a);
+print a;
+
+var s = "Me am string";
+print s;
+
+fun tryChangeByRef(s) {
+    s = s + "?";
+}
+
+tryChangeByRef(s);
+print s;
+
+fun getChanged(s) {
+    return s + "?";
+}
+s = getChanged(s);
+print s;
+
+fun justIncrement() {
+    a = a + 1;
+}
+justIncrement();
+print a;
+
+var a = "global";
+{
+    fun showA() {
+        print a;
+    }
+    showA();
+    var a = "block";
+    showA();
+
+    print "Sink " + a;
+}
