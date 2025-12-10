@@ -296,7 +296,6 @@ static inline void win32_try_enable_large_pages(
         os->sys.close_handle(token_hnd);
     }
 
-
     os->sys.free_library(advapi32);
 }
 
@@ -375,6 +374,15 @@ static void win32_main(void)
         (win32_get_file_size_t)os.sys.get_proc_addr(kernel32, "GetFileSize"),
         "Failed to load \"GetFileSize\" from \"kernel32.dll\"");
 
+    VERIFY(os.sys.query_performance_counter =
+        (win32_query_performance_counter_t)os.sys.get_proc_addr(
+            kernel32, "QueryPerformanceCounter"),
+        "Failed to load \"QueryPerformanceCounter\" from \"kernel32.dll\"");
+    VERIFY(os.sys.query_performance_frequency =
+        (win32_query_performance_frequency_t)os.sys.get_proc_addr(
+            kernel32, "QueryPerformanceFrequency"),
+        "Failed to load \"QueryPerformanceFrequency\" from \"kernel32.dll\"");
+
     win32_get_current_process_t get_current_process = 
         (win32_get_current_process_t)os.sys.get_proc_addr(
                 kernel32, "GetCurrentProcess");
@@ -421,6 +429,9 @@ static void win32_main(void)
     os.regular_page_size = 4096;
     win32_try_enable_large_pages(&os, kernel32);
 
+    os.sys.query_performance_frequency(&os.hr_freq);
+    os.sys.query_performance_counter(&os.hr_start);
+
     os.sys.exit_process((uint)common_main(&os_ctx));
 }
 
@@ -444,6 +455,7 @@ static __attribute__((used)) int sys_main(int argc, char **argv)
     fmt_sprint(&os_ctx,
         os.stat_file_name_buf, sizeof(os.stat_file_name_buf),
         "/proc/%d/stat", os.pid);
+    sys_clock_gettime(SYS_CLOCK_MONOTONIC, &os.hr_start);
     os.hstdin = (io_handle_t){SYS_STDIN_FILENO + 1};
     os.hstdout = (io_handle_t){SYS_STDOUT_FILENO + 1};
     os.hstderr = (io_handle_t){SYS_STDERR_FILENO + 1};

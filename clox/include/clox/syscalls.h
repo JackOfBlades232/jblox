@@ -33,6 +33,18 @@ typedef struct {
     } privileges[1];
 } win32_token_privileges_t;
 
+typedef union {
+    struct {
+        ulong lo;
+        long hi;
+    };
+    struct {
+        ulong lo;
+        long hi;
+    } u;
+    llong q;
+} win32_large_integer_t;
+
 typedef void *(__stdcall *win32_get_proc_addr_t)(win32_handle_t, char const *);
 typedef b32 (__stdcall *win32_close_handle_t)(win32_handle_t);
 typedef win32_handle_t (__stdcall *win32_load_library_a_t)(char const *);
@@ -59,6 +71,10 @@ typedef b32 (__stdcall *win32_lookup_privilege_value_a_t)(
 typedef b32 (__stdcall *win32_adjust_token_privileges_t)(
     win32_handle_t, b32, win32_token_privileges_t const *,
     u32, win32_token_privileges_t *, u32 *);
+typedef b32 (__stdcall *win32_query_performance_counter_t)(
+    win32_large_integer_t *);
+typedef b32 (__stdcall *win32_query_performance_frequency_t)(
+    win32_large_integer_t *);
 
 typedef struct {
     win32_get_proc_addr_t get_proc_addr;
@@ -73,6 +89,8 @@ typedef struct {
     win32_write_file_t write_file;
     win32_read_file_t read_file;
     win32_get_file_size_t get_file_size;
+    win32_query_performance_counter_t query_performance_counter;
+    win32_query_performance_frequency_t query_performance_frequency;
 } win32_syscalls_t;
 
 u64 __readgsqword(ulong offset);
@@ -88,6 +106,7 @@ u64 __readgsqword(ulong offset);
 #define SYS_GETPID 39
 #define SYS_MMAP 9
 #define SYS_MUNMAP 11
+#define SYS_CLOCK_GETTIME 228
 
 #define SYS_PROT_READ 0x1
 #define SYS_PROT_WRITE 0x2
@@ -102,8 +121,14 @@ u64 __readgsqword(ulong offset);
 #define SYS_STDIN_FILENO 0
 #define SYS_STDOUT_FILENO 1
 #define SYS_STDERR_FILENO 2
+#define SYS_CLOCK_MONOTONIC 1
 
 typedef int sys_pid_t;
+
+typedef struct {
+    long tv_sec;
+    long tv_nsec;
+} sys_timespec_t;
 
 // @TODO: sort out if I need more clobbers
 
@@ -203,6 +228,11 @@ static inline usize sys_lseek(int fd, usize off, uint whence)
 static inline sys_pid_t sys_getpid(void)
 {
     return (sys_pid_t)sys_call0(SYS_GETPID);
+}
+
+static inline isize sys_clock_gettime(int cid, sys_timespec_t *ts)
+{
+    return sys_call2(SYS_CLOCK_GETTIME, (void *)cid, (void *)ts);
 }
 
 static inline void *sys_mmap(

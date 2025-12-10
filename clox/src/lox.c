@@ -88,6 +88,7 @@ typedef enum {
 typedef struct obj obj_t;
 typedef struct obj_string obj_string_t;
 typedef struct obj_function obj_function_t;
+typedef struct obj_native obj_native_t;
 
 typedef struct value {
     value_type_t type;
@@ -128,9 +129,18 @@ static b32 is_falsey(ctx_t const *ctx, value_t val)
     return !is_truthy(ctx, val);
 }
 
+// Ugly AF forwards for native functions
+typedef struct vm vm_t;
+typedef struct native_ctx native_ctx_t;
+typedef value_t (*native_fn_t)(int, value_t *, native_ctx_t *);
+static void define_native(
+    ctx_t const *ctx, vm_t *vm, string_t name, native_fn_t fn, int arity);
+static void native_runtime_error(native_ctx_t *nctx, char const *fmt, ...);
+
 typedef enum {
     e_ot_string,
     e_ot_function,
+    e_ot_native,
 } obj_type_t;
 
 typedef struct obj {
@@ -163,6 +173,12 @@ typedef struct obj_function {
     obj_string_t *name;
 } obj_function_t;
 
+typedef struct obj_native {
+    obj_t obj;
+    int arity;
+    native_fn_t fn;
+} obj_native_t;
+
 static inline b32 is_obj_type(ctx_t const *ctx, value_t val, obj_type_t ot)
 {
     (void)ctx;
@@ -181,11 +197,14 @@ static inline string_t obj_as_string(ctx_t const *ctx, value_t val)
 
 #define IS_STRING(value_)     (is_obj_type(ctx, (value_), e_ot_string))
 #define IS_FUNCTION(value_)   (is_obj_type(ctx, (value_), e_ot_function))
+#define IS_NATIVE(value_)     (is_obj_type(ctx, (value_), e_ot_native))
 
 #define AS_STRING_OBJ(value_) ((obj_string_t *)AS_OBJ(value_))
 #define AS_STRING(value_)     (obj_as_string(ctx, (value_)))
 #define AS_CSTRING(value_)    (((obj_string_t *)AS_OBJ(value_))->p)
 #define AS_FUNCTION(value_)   ((obj_function_t *)AS_OBJ(value_))
+#define AS_NATIVE_DT(value_)  ((obj_native_t *)AS_OBJ(value_))
+#define AS_NATIVE(value_)     (((obj_native_t *)AS_OBJ(value_))->fn)
 
 static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
 {
@@ -549,6 +568,9 @@ static void print_obj(ctx_t const *ctx, io_handle_t *hnd, value_t val)
         else
             fmt_print(ctx, hnd, "<script>");
         break;
+    case e_ot_native:
+        fmt_print(ctx, hnd, "<native fn>");
+        break;
     }
 }
 
@@ -844,6 +866,35 @@ typedef struct call_frame {
     struct call_frame *next;
 } call_frame_t;
 
+typedef struct native_ctx {
+    ctx_t const *ctx;
+    vm_t *vm;
+} native_ctx_t;
+
+static value_t clock_native(int arg_count, value_t *args, native_ctx_t *nctx)
+{
+    (void)args;
+    ctx_t const *ctx = nctx->ctx;
+    ASSERT(arg_count == 0);
+    return NUMBER_VAL(os_time(ctx) / 1000.0);
+}
+
+static value_t readch_native(int arg_count, value_t *args, native_ctx_t *nctx)
+{
+    (void)args;
+    ctx_t const *ctx = nctx->ctx;
+    ASSERT(arg_count == 0);
+    char res = '\0';
+    isize br = io_read(ctx, &ctx->os->hstdin, (u8 *)&res, 1);
+    if (br == 0) {
+        return NIL_VAL; // eof
+    } else if (br != 1) {
+        native_runtime_error(nctx, "readch failed.");
+        return VACANT_VAL;
+    }
+    return NUMBER_VAL((f64)res);
+}
+
 typedef struct vm {
     vm_stack_segment_t stack;
     vm_stack_segment_t *cur_stack_seg; 
@@ -855,6 +906,7 @@ typedef struct vm {
     table_t gvar_map;
     value_array_t gvars;
     obj_t *objects;
+    native_ctx_t nctx;
 } vm_t;
 
 static inline obj_t *allocate_obj(
@@ -940,15 +992,13 @@ static uint stack_size(ctx_t const *ctx, vm_t *vm)
     (void)ctx;
     return
         (vm->stack_seg_count - 1) * VM_STACK_SEGMENT_SIZE +
-        (vm->stack_head - vm->cur_stack_seg->values);
+        (uint)(vm->stack_head - vm->cur_stack_seg->values);
 }
 
-static void runtime_error(ctx_t const *ctx, vm_t *vm, char const *fmt, ...)
+static void vruntime_error(
+    ctx_t const *ctx, vm_t *vm, char const *fmt, VA_LIST args)
 {
-    VA_LIST args;
-    VA_START(args, fmt);
     fmt_vprint(ctx, &ctx->os->hstderr, fmt, args);
-    VA_END(args);
 
     for (call_frame_t *frame = vm->frame; frame; frame = frame->next) {
         obj_function_t *f = frame->f;
@@ -973,6 +1023,22 @@ static void runtime_error(ctx_t const *ctx, vm_t *vm, char const *fmt, ...)
 
     LOG("");
     reset_stack(ctx, vm);
+}
+
+static void runtime_error(ctx_t const *ctx, vm_t *vm, char const *fmt, ...)
+{
+    VA_LIST args;
+    VA_START(args, fmt);
+    vruntime_error(ctx, vm, fmt, args);
+    VA_END(args);
+}
+
+static void native_runtime_error(native_ctx_t *nctx, char const *fmt, ...)
+{
+    VA_LIST args;
+    VA_START(args, fmt);
+    vruntime_error(nctx->ctx, nctx->vm, fmt, args);
+    VA_END(args);
 }
 
 static call_frame_t *push_frame(ctx_t const *ctx, vm_t *vm)
@@ -1007,6 +1073,10 @@ static void init_vm(ctx_t const *ctx, vm_t *vm)
     vm->gvar_map = make_table(ctx);
     vm->gvars = make_value_array(ctx);
     vm->objects = NULL;
+    vm->nctx.ctx = ctx;
+    vm->nctx.vm = vm;
+    define_native(ctx, vm, LITSTR("clock"), &clock_native, 0);
+    define_native(ctx, vm, LITSTR("readch"), &readch_native, 0);
 }
 
 static void free_vm(ctx_t const *ctx, vm_t *vm)
@@ -1159,7 +1229,7 @@ static b32 call(
         return false;
     frame->f = f;
     frame->ip = f->chunk.code;
-    frame->bp = stack_size(ctx, vm) - arg_count - 1;
+    frame->bp = stack_size(ctx, vm) - (uint)arg_count - 1;
     return true;
 }
 
@@ -1169,7 +1239,28 @@ static b32 call_value(
     if (IS_OBJ(callee)) {
         switch (OBJ_TYPE(callee)) {
         case e_ot_function:
-            return call(ctx, AS_FUNCTION(callee), arg_count, vm);
+            return call(ctx, AS_FUNCTION(callee), (int)arg_count, vm);
+        case e_ot_native: {
+            native_fn_t native = AS_NATIVE(callee);
+            uint expected_arity = (uint)AS_NATIVE_DT(callee)->arity;
+            if (arg_count != expected_arity) {
+                runtime_error(
+                    ctx, vm, "Expected %d arguments, got %d.",
+                    expected_arity, arg_count);
+                return false;
+            }
+            value_t *args = arg_count ? ALLOCATE(value_t, arg_count) : NULL;
+            for (uint d = arg_count - 1, s = 0; s < arg_count; --d, ++s)
+                args[d] = peek_stack(ctx, vm, (int)s);
+            value_t res = native((int)arg_count, args, &vm->nctx);
+            if (res.type == e_vt_vacant)
+                return false;
+            popn_stack(ctx, vm, arg_count + 1);
+            push_stack(ctx, vm, res);
+            if (args)
+                FREE(args);
+            return true;
+        } break;
         default:
             break;
         }
@@ -1451,8 +1542,11 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
         case e_op_call_long: {
             u32 arg_count = READ_LONG();
             frame->ip = ip;
-            if (!call_value(ctx, peek_stack(ctx, vm, arg_count), arg_count, vm))
+            if (!call_value(
+                ctx, peek_stack(ctx, vm, (int)arg_count), arg_count, vm))
+            {
                 return e_interp_runtime_err;
+            }
             REINIT_CACHED_VARS();
         } break;
 
@@ -2117,6 +2211,21 @@ static resolve_res_t resolve_lvar(
     return (resolve_res_t){(uint)(-1), true};
 }
 
+static void define_native(
+    ctx_t const *ctx, vm_t *vm, string_t name, native_fn_t fn, int arity)
+{
+    obj_t *oname = add_string_ref(ctx, vm, name.p, (uint)name.len);
+    push_stack(ctx, vm, OBJ_VAL(oname));
+    obj_native_t *on = ALLOCATE_OBJ(obj_native_t, e_ot_native, vm);
+    on->fn = fn;
+    on->arity = arity;
+    push_stack(ctx, vm, OBJ_VAL(on));
+    resolve_res_t rr = register_gvar(
+        ctx, vm, (token_t){e_tt_identifier, name.p, (int)name.len, -1}, true);
+    vm->gvars.values[rr.vid] = OBJ_VAL(on);
+    popn_stack(ctx, vm, 2);
+}
+
 static void begin_compiler(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     for (uint i = 0; i < ARRCNT(compiler->scope_lvars); ++i) {
@@ -2616,7 +2725,7 @@ static void compile_func_expr(
         (obj_string_t *)add_string_ref(
             ctx, vm,
             push_compiler.parser->prev.start,
-            push_compiler.parser->prev.len);
+            (uint)push_compiler.parser->prev.len);
 
     begin_compiler(ctx, &push_compiler, vm);
     begin_scope(ctx, &push_compiler, e_lst_block);

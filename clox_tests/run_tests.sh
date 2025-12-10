@@ -15,6 +15,7 @@ function run_all_tests {
     run_test scopes.lox
     run_test controlflow.lox
     run_test functions.lox
+    run_test fib.lox
 }
 
 INTERP=../reference/craftinginterpreters/clox

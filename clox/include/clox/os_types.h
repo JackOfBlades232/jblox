@@ -17,6 +17,9 @@ typedef struct os_process_state {
     io_handle_t hstdout;
     io_handle_t hstderr;
 
+    win32_large_integer_t hr_start;
+    win32_large_integer_t hr_freq;
+
     char **argv;
     int argc;
 } os_process_state_t;
@@ -27,6 +30,8 @@ typedef struct os_process_state {
     sys_pid_t pid;
     usize regular_page_size;
     char stat_file_name_buf[128];
+
+    sys_timespec_t hr_start;
 
     io_handle_t hstdin;
     io_handle_t hstdout;
