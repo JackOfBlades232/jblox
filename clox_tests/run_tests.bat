@@ -1,6 +1,6 @@
 @echo off
 pushd clox_tests
-echo jb-cpplox:
+echo jb-clox:
 
 call :RunTest hello.lox %*
 call :RunTest gvars.lox %*

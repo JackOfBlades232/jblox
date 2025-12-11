@@ -89,6 +89,7 @@ typedef struct obj obj_t;
 typedef struct obj_string obj_string_t;
 typedef struct obj_function obj_function_t;
 typedef struct obj_native obj_native_t;
+typedef struct obj_closure obj_closure_t;
 
 typedef struct value {
     value_type_t type;
@@ -141,6 +142,7 @@ typedef enum {
     e_ot_string,
     e_ot_function,
     e_ot_native,
+    e_ot_closure,
 } obj_type_t;
 
 typedef struct obj {
@@ -179,6 +181,11 @@ typedef struct obj_native {
     native_fn_t fn;
 } obj_native_t;
 
+typedef struct obj_closure {
+    obj_t obj;
+    obj_function_t *fn;
+} obj_closure_t;
+
 static inline b32 is_obj_type(ctx_t const *ctx, value_t val, obj_type_t ot)
 {
     (void)ctx;
@@ -198,6 +205,7 @@ static inline string_t obj_as_string(ctx_t const *ctx, value_t val)
 #define IS_STRING(value_)     (is_obj_type(ctx, (value_), e_ot_string))
 #define IS_FUNCTION(value_)   (is_obj_type(ctx, (value_), e_ot_function))
 #define IS_NATIVE(value_)     (is_obj_type(ctx, (value_), e_ot_native))
+#define IS_CLOSURE(value_)    (is_obj_type(ctx, (value_), e_ot_closure))
 
 #define AS_STRING_OBJ(value_) ((obj_string_t *)AS_OBJ(value_))
 #define AS_STRING(value_)     (obj_as_string(ctx, (value_)))
@@ -205,6 +213,7 @@ static inline string_t obj_as_string(ctx_t const *ctx, value_t val)
 #define AS_FUNCTION(value_)   ((obj_function_t *)AS_OBJ(value_))
 #define AS_NATIVE_DT(value_)  ((obj_native_t *)AS_OBJ(value_))
 #define AS_NATIVE(value_)     (((obj_native_t *)AS_OBJ(value_))->fn)
+#define AS_CLOSURE(value_)    ((obj_closure_t *)AS_OBJ(value_))
 
 static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
 {
@@ -407,6 +416,8 @@ typedef enum {
     e_op_get_loc_long,
     e_op_set_loc,
     e_op_set_loc_long,
+    e_op_closure,
+    e_op_closure_long,
     e_op_eq,
     e_op_eq_preserve_lhs,
     e_op_neq,
@@ -567,6 +578,11 @@ static void print_obj(ctx_t const *ctx, io_handle_t *hnd, value_t val)
             fmt_print(ctx, hnd, "<fn %S>", OSTR_TO_STR(AS_FUNCTION(val)->name));
         else
             fmt_print(ctx, hnd, "<script>");
+        break;
+    case e_ot_closure:
+        fmt_print(ctx, hnd, "<closure ");
+        print_obj(ctx, hnd, OBJ_VAL(AS_CLOSURE(val)->fn));
+        fmt_print(ctx, hnd, ">");
         break;
     case e_ot_native:
         fmt_print(ctx, hnd, "<native fn>");
@@ -760,6 +776,12 @@ static uint disasm_instruction(
     case e_op_set_loc_long:
         return disasm_long_id_instruction(
             ctx, "OP_SET_LOC_LONG", chunk, at);
+    case e_op_closure:
+        return disasm_constant_instruction(
+            ctx, "OP_CLOSURE", chunk, at);
+    case e_op_closure_long:
+        return disasm_long_constant_instruction(
+            ctx, "OP_CLOSURE_LONG", chunk, at);
     case e_op_eq:
         return disasm_simple_instruction(
             ctx, "OP_EQ", at);
@@ -860,6 +882,7 @@ typedef struct vm_stack_segment {
 } vm_stack_segment_t;
 
 typedef struct call_frame {
+    obj_closure_t *c;
     obj_function_t *f;
     u8 *ip;
     uint bp;
@@ -943,6 +966,13 @@ static inline obj_function_t *allocate_function(ctx_t const *ctx, vm_t *vm)
     func->name = NULL;
     func->chunk = make_chunk(ctx);
     return func;
+}
+
+static inline obj_closure_t *allocate_closure(ctx_t const *ctx, vm_t *vm)
+{
+    obj_closure_t *cl = ALLOCATE_OBJ(obj_closure_t, e_ot_closure, vm);
+    cl->fn = NULL;
+    return cl;
 }
 
 static inline void free_object(ctx_t const *ctx, obj_t *obj)
@@ -1215,7 +1245,7 @@ static inline u32 read_long_ip(ctx_t const *ctx, u8 **ip)
     return (u32)(*ip)[-3] | ((u32)(*ip)[-2] << 8) | ((u32)(*ip)[-1] << 16);
 }
 
-static b32 call(
+static b32 callf(
     ctx_t const *ctx, obj_function_t *f, int arg_count, vm_t *vm)
 {
     if (arg_count != f->arity) {
@@ -1227,6 +1257,27 @@ static b32 call(
     call_frame_t *frame = push_frame(ctx, vm);
     if (!frame)
         return false;
+    frame->c = NULL;
+    frame->f = f;
+    frame->ip = f->chunk.code;
+    frame->bp = stack_size(ctx, vm) - (uint)arg_count - 1;
+    return true;
+}
+
+static b32 callc(
+    ctx_t const *ctx, obj_closure_t *c, int arg_count, vm_t *vm)
+{
+    obj_function_t *f = c->fn;
+    if (arg_count != f->arity) {
+        runtime_error(
+            ctx, vm, "Expected %d arguments, got %d.", f->arity, arg_count);
+        return false;
+    }
+
+    call_frame_t *frame = push_frame(ctx, vm);
+    if (!frame)
+        return false;
+    frame->c = c;
     frame->f = f;
     frame->ip = f->chunk.code;
     frame->bp = stack_size(ctx, vm) - (uint)arg_count - 1;
@@ -1238,8 +1289,10 @@ static b32 call_value(
 {
     if (IS_OBJ(callee)) {
         switch (OBJ_TYPE(callee)) {
+        case e_ot_closure:
+            return callc(ctx, AS_CLOSURE(callee), (int)arg_count, vm);
         case e_ot_function:
-            return call(ctx, AS_FUNCTION(callee), (int)arg_count, vm);
+            return callf(ctx, AS_FUNCTION(callee), (int)arg_count, vm);
         case e_ot_native: {
             native_fn_t native = AS_NATIVE(callee);
             uint expected_arity = (uint)AS_NATIVE_DT(callee)->arity;
@@ -1427,6 +1480,19 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
         case e_op_set_loc_long:
             *at_stack(ctx, vm, bp + READ_LONG()) = STACK_TOP(vm);
             break;
+
+        case e_op_closure: {
+            obj_function_t *fn = AS_FUNCTION(READ_CONSTANT());
+            obj_closure_t *closure = allocate_closure(ctx, vm);
+            closure->fn = fn;
+            push_stack(ctx, vm, OBJ_VAL(closure));
+        } break;
+        case e_op_closure_long: {
+            obj_function_t *fn = AS_FUNCTION(READ_CONSTANT_LONG());
+            obj_closure_t *closure = allocate_closure(ctx, vm);
+            closure->fn = fn;
+            push_stack(ctx, vm, OBJ_VAL(closure));
+        } break;
 
         case e_op_eq: {
             value_t b = pop_stack(ctx, vm);
@@ -2080,6 +2146,14 @@ static void emit_constant(ctx_t const *ctx, value_t val, compiler_t *compiler)
     write_constant(
         ctx, CUR_CHUNK(compiler),
         e_op_constant, e_op_constant_long, val,
+        (uint)compiler->parser->prev.line);
+}
+
+static void emit_closure(ctx_t const *ctx, value_t val, compiler_t *compiler)
+{
+    write_constant(
+        ctx, CUR_CHUNK(compiler),
+        e_op_closure, e_op_closure_long, val,
         (uint)compiler->parser->prev.line);
 }
 
@@ -2749,7 +2823,7 @@ static void compile_func_expr(
     compile_block(ctx, &push_compiler, vm);
 
     obj_function_t *func = end_compiler(ctx, &push_compiler);
-    emit_constant(ctx, OBJ_VAL(func), compiler);
+    emit_closure(ctx, OBJ_VAL(func), compiler);
 }
 
 static uint compile_new_variable(
@@ -3155,7 +3229,7 @@ static interp_result_t interpret(ctx_t const *ctx, vm_t *vm, string_t source)
         return e_interp_compile_err;
 
     push_stack(ctx, vm, OBJ_VAL(func));
-    call(ctx, func, 0, vm);
+    callf(ctx, func, 0, vm);
 
     return run(ctx, vm);
 }
