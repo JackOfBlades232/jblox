@@ -8,6 +8,7 @@ call :RunTest scopes.lox %*
 call :RunTest controlflow.lox %*
 call :RunTest functions.lox %*
 call :RunTest fib.lox %*
+call :RunTest closures.lox %*
 
 popd
 exit /b

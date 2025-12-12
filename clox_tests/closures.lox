@@ -1,0 +1,50 @@
+var x = "global";
+fun outer() {
+    var x = "outer";
+    fun inner() {
+        print x;
+    }
+    inner();
+}
+outer();
+
+fun outer() {
+    var x = "before";
+    fun inner() {
+        x = "assigned";
+    }
+    inner();
+    print x;
+}
+outer();
+
+//fun outer() {
+//    var x = "value";
+//    fun middle() {
+//        fun inner() {
+//            print x;
+//        }
+
+//        print "create inner closure";
+//        return inner;
+//    }
+
+//    print "return from outer";
+//    return middle;
+//}
+
+//var mid = outer();
+//var in = mid();
+//in();
+
+//fun outer() {
+//    var a = 1;
+//    var b = 2;
+//    fun middle() {
+//        var c = 3;
+//        var d = 4;
+//        fun inner() {
+//            print a + c + b + d;
+//        }
+//    }
+//}
