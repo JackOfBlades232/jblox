@@ -9,6 +9,7 @@ call :RunTest controlflow.lox %*
 call :RunTest functions.lox %*
 call :RunTest fib.lox %*
 call :RunTest closures.lox %*
+call :RunTest church.lox %*
 
 popd
 exit /b

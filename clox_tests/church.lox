@@ -1,0 +1,33 @@
+let X = 0;
+let Y = 1;
+let ADD = 2;
+
+fun vector(ax, ay) {
+    var x = ax;
+    var y = ay;
+
+    return fun (method, arg0) {
+        switch (method) {
+        case X:
+            return x;
+        case Y:
+            return y;
+        case ADD:
+            return vector(x + arg0(X, nil), y + arg0(Y, nil));
+        }
+    };
+}
+
+var v = vector(2, 3);
+var u = vector(0, 1);
+print v(X, nil);
+print v(Y, nil);
+print u(X, nil);
+print u(Y, nil);
+var vv = v(ADD, u);
+var vvv = v(ADD, v);
+print vv(X, nil);
+print vv(Y, nil);
+print vvv(X, nil);
+print vvv(Y, nil);
+

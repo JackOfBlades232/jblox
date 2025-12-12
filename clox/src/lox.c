@@ -2827,6 +2827,8 @@ static void compile_literal(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_variable(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+static void compile_fun(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_grouping(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_call(
@@ -2872,7 +2874,7 @@ parse_rule_t const c_parse_rules[] = {
     [e_tt_else]          = {NULL,              NULL,             e_prec_none  },
     [e_tt_false]         = {&compile_literal,  NULL,             e_prec_none  },
     [e_tt_for]           = {NULL,              NULL,             e_prec_none  },
-    [e_tt_fun]           = {NULL,              NULL,             e_prec_none  },
+    [e_tt_fun]           = {&compile_fun,      NULL,             e_prec_none  },
     [e_tt_if]            = {NULL,              NULL,             e_prec_none  },
     [e_tt_nil]           = {&compile_literal,  NULL,             e_prec_none  },
     [e_tt_or]            = {NULL,              &compile_or,      e_prec_or    },
@@ -3182,7 +3184,7 @@ static void compile_block(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
 static void compile_var_decl(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 is_const);
 
-static void compile_func_expr(
+static void compile_fun(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
 {
     (void)can_assign;
@@ -3613,7 +3615,7 @@ static void compile_func_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         ctx, compiler, vm, "Expected function name.", true);
     mark_lvar_initialzied(ctx, compiler, vid);
 
-    compile_func_expr(ctx, compiler, vm, false);
+    compile_fun(ctx, compiler, vm, false);
 
     if (compiler->current_scope_depth == 0) {
         emit_id_ref(
