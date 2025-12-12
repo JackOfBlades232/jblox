@@ -154,6 +154,7 @@ typedef long isize;
 #endif
 
 // Implementations for debug-mode compound literals and stuff to pick up
+
 void *memset(void *to, int val, usize size)
 {
     u8 *uto = (u8 *)to;

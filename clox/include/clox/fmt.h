@@ -183,7 +183,6 @@ static inline isize fmt_vsprint(
                 while (dst < end && s.len--)
                     *dst++ = *s.p++;
             } break;
-            // @TODO: length-ed string
             default:
                 *dst++ = *fmt;
                 break;

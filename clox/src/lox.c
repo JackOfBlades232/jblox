@@ -194,6 +194,9 @@ typedef struct obj_closure {
 typedef struct obj_upvalue {
     obj_t obj;
     value_t *location;
+    uint stack_location;
+    value_t closed;
+    struct obj_upvalue *next;
 } obj_upvalue_t;
 
 static inline b32 is_obj_type(ctx_t const *ctx, value_t val, obj_type_t ot)
@@ -432,6 +435,7 @@ typedef enum {
     e_op_set_upvalue_long,
     e_op_closure,
     e_op_closure_long,
+    e_op_close_upvalue,
     e_op_eq,
     e_op_eq_preserve_lhs,
     e_op_neq,
@@ -859,6 +863,9 @@ static uint disasm_instruction(
         return disasm_upvalue_list(ctx, chunk, 
             disasm_long_constant_instruction(ctx, "OP_CLOSURE_LONG", chunk, at),
             disasm_peek_long_function(ctx, chunk, at)->upvalue_cnt);
+    case e_op_close_upvalue:
+        return disasm_simple_instruction(
+            ctx, "OP_CLOSE_UPVALUE", at);
     case e_op_eq:
         return disasm_simple_instruction(
             ctx, "OP_EQ", at);
@@ -1005,6 +1012,7 @@ typedef struct vm {
     table_t strings;
     table_t gvar_map;
     value_array_t gvars;
+    obj_upvalue_t *open_upvalues;
     obj_t *objects;
     native_ctx_t nctx;
 } vm_t;
@@ -1060,9 +1068,12 @@ static inline obj_closure_t *allocate_closure(
 
 static inline obj_upvalue_t *allocate_upvalue(ctx_t const *ctx, vm_t *vm)
 {
-    obj_upvalue_t *cl = ALLOCATE_OBJ(obj_upvalue_t, e_ot_upvalue, vm);
-    cl->location = NULL;
-    return cl;
+    obj_upvalue_t *uv = ALLOCATE_OBJ(obj_upvalue_t, e_ot_upvalue, vm);
+    uv->location = NULL;
+    uv->stack_location = (uint)(-1);
+    uv->closed = NIL_VAL;
+    uv->next = NULL;
+    return uv;
 }
 
 static inline void free_object(ctx_t const *ctx, obj_t *obj)
@@ -1198,6 +1209,7 @@ static void init_vm(ctx_t const *ctx, vm_t *vm)
     vm->gvar_map = make_table(ctx);
     vm->gvars = make_value_array(ctx);
     vm->objects = NULL;
+    vm->open_upvalues = NULL;
     vm->nctx.ctx = ctx;
     vm->nctx.vm = vm;
     define_native(ctx, vm, LITSTR("clock"), &clock_native, 0);
@@ -1420,10 +1432,39 @@ static b32 call_value(
 
 static obj_upvalue_t *capture_upvalue(ctx_t const *ctx, vm_t *vm, uint at)
 {
+    obj_upvalue_t *prev = NULL;
+    obj_upvalue_t *upvalue = vm->open_upvalues;
+    while (upvalue && upvalue->stack_location > at) {
+        prev = upvalue;
+        upvalue = upvalue->next;
+    }
+
+    if (upvalue && upvalue->stack_location == at)
+        return upvalue;
+
     value_t *var = at_stack(ctx, vm, at);
-    obj_upvalue_t *upvalue = allocate_upvalue(ctx, vm);
-    upvalue->location = var;
-    return upvalue;
+    obj_upvalue_t *new_upvalue = allocate_upvalue(ctx, vm);
+    new_upvalue->location = var;
+    new_upvalue->stack_location = at;
+
+    new_upvalue->next = upvalue;
+    if (!prev)
+        vm->open_upvalues = new_upvalue;
+    else
+        prev->next = new_upvalue;
+
+    return new_upvalue;
+}
+
+static void close_upvalues(ctx_t const *ctx, vm_t *vm, uint last)
+{
+    (void)ctx;
+    while (vm->open_upvalues && vm->open_upvalues->stack_location >= last) {
+         obj_upvalue_t *upvalue = vm->open_upvalues;
+         upvalue->closed = *upvalue->location;
+         upvalue->location = &upvalue->closed;
+         vm->open_upvalues = upvalue->next;
+    }
 }
 
 static interp_result_t run(ctx_t const *ctx, vm_t *vm)
@@ -1623,6 +1664,11 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
             CAPTURE_UPVALUES(closure);
         } break;
 
+        case e_op_close_upvalue:
+            close_upvalues(ctx, vm, stack_size(ctx, vm) - 1);
+            pop_stack(ctx, vm);
+            break;
+
         case e_op_eq: {
             value_t b = pop_stack(ctx, vm);
             STACK_TOP(vm) = BOOL_VAL(are_equal(ctx, STACK_TOP(vm), b));
@@ -1747,6 +1793,7 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
 
         case e_op_return: {
             value_t result = pop_stack(ctx, vm);
+            close_upvalues(ctx, vm, bp);
             pop_frame(ctx, vm);
             if (!vm->frame) {
                 pop_stack(ctx, vm);
@@ -2240,9 +2287,43 @@ typedef enum {
 } lvar_scope_type_t;
 
 typedef struct {
+    uint cnt, cap;
+    uint *items;
+} uint_array_t;
+
+static inline uint_array_t make_uint_array(ctx_t const *ctx)
+{
+    (void)ctx;
+    return (uint_array_t){0};
+}
+
+static inline void write_uint_array(
+    ctx_t const *ctx, uint_array_t *arr, uint val)
+{
+    if (arr->cap < arr->cnt + 1) {
+        uint old_cap = arr->cap;
+        arr->cap = GROW_CAP(old_cap);
+        arr->items = GROW_ARRAY(uint, arr->items, old_cap, arr->cap);
+    }
+
+    arr->items[arr->cnt++] = val;
+}
+
+#if 0
+static inline void free_uint_array(ctx_t const *ctx, uint_array_t *arr)
+{
+    if (!arr || !arr->items)
+        return;
+    FREE_ARRAY(int, arr->items, arr->cap);
+    *arr = make_uint_array(ctx);
+}
+#endif
+
+typedef struct {
     table_t map;
     int cnt_in_prev_blocks;
     uint initialized_cnt;
+    uint_array_t captured_ids;
     lvar_scope_type_t type;
     uint loop_start_mark;
     uint loop_break_mark;
@@ -2372,9 +2453,42 @@ static void emit_return(ctx_t const *ctx, compiler_t *compiler)
 typedef struct {
     uint vid;
     b32 is_const;
-} resolve_res_t;
+    b32 is_captured;
+} var_info_t;
 
-static resolve_res_t register_gvar(
+typedef enum {
+    f_vi_const = 1,
+    f_vi_captured = 1 << 1
+} var_info_packed_flags_t;
+
+static f64 pack_var_info(ctx_t const *ctx, var_info_t info)
+{
+    u8 flags = 0;
+    if (info.is_const)
+        flags |= f_vi_const;
+    if (info.is_captured)
+        flags |= f_vi_captured;
+    f64 packed = (f64)info.vid;
+    u64 bits = *(u64 *)&packed;
+    ASSERT((bits & 0xFF) == 0);
+    bits |= (u64)flags;
+    return *(f64 *)&bits;
+}
+
+static var_info_t unpack_var_info(ctx_t const *ctx, f64 packed)
+{
+    (void)ctx;
+    var_info_t vi = {0};
+    u64 bits = *(u64 *)&packed;
+    u8 flags = (u8)(bits & 0xFF);
+    u64 vid_bits = bits & ~0xFFull;
+    vi.vid = (uint)(*(f64 *)&vid_bits);
+    vi.is_const = flags & f_vi_const;
+    vi.is_captured = flags & f_vi_captured;
+    return vi;
+}
+
+static var_info_t register_gvar(
     ctx_t const *ctx, vm_t *vm, token_t name, b32 is_const)
 {
     obj_string_t *str =
@@ -2382,12 +2496,13 @@ static resolve_res_t register_gvar(
     value_t id;
     if (!table_get(ctx, &vm->gvar_map, str, &id)) {
         write_value_array(ctx, &vm->gvars, VACANT_VAL_NAMED((obj_t *)str));
-        id = NUMBER_VAL((f64)vm->gvars.cnt * (is_const ? -1.0 : 1.0));
+        var_info_t vi = {vm->gvars.cnt - 1, is_const, false};
+        id = NUMBER_VAL(pack_var_info(ctx, vi));
         table_set(ctx, &vm->gvar_map, str, id);
     }
 
-    f64 fvid = AS_NUMBER(id);
-    return (resolve_res_t){(uint)ABS(fvid) - 1, fvid < 0.0};
+    f64 packed = AS_NUMBER(id);
+    return unpack_var_info(ctx, packed);
 }
 
 static uint register_lvar(
@@ -2395,11 +2510,12 @@ static uint register_lvar(
     token_t name, b32 is_const)
 {
     obj_string_t *str =
-        (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
+        (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)name.len);
     table_t *scope_lvar_table =
         &compiler->scope_lvars[compiler->current_scope_depth].map;
     uint id = scope_lvar_table->cnt;
-    value_t lvar_id = NUMBER_VAL((f64)(id + 1) * (is_const ? -1.0 : 1.0));
+    var_info_t vi = {id + 1, is_const, false};
+    value_t lvar_id = NUMBER_VAL(pack_var_info(ctx, vi));
     if (!table_set(ctx, scope_lvar_table, str, lvar_id)) {
         parser_error(
             ctx,
@@ -2423,35 +2539,41 @@ static void mark_lvar_initialzied(
     ++scope->initialized_cnt;
 }
 
-static resolve_res_t resolve_lvar(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, token_t name)
+static var_info_t resolve_lvar(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm,
+    token_t name, b32 capture_on_found)
 {
     if (compiler->current_scope_depth == 0)
-        return (resolve_res_t){(uint)(-1), true};
+        return (var_info_t){(uint)(-1), true, false};
     obj_string_t *str =
         (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
     for (int i = compiler->current_scope_depth; i >= 1; --i) {
         lvar_scope_t *scope = &compiler->scope_lvars[i];
         value_t id_val;
         if (table_get(ctx, &scope->map, str, &id_val)) {
-            f64 fvid = AS_NUMBER(id_val);
-            uint id = (uint)ABS(fvid) - 1;
-            b32 is_const = fvid < 0.0;
-            if (id >= scope->initialized_cnt) {
+            f64 packed = AS_NUMBER(id_val);
+            var_info_t vi = unpack_var_info(ctx, packed);
+            if (vi.vid >= scope->initialized_cnt + 1) {
                 parser_error(
                     ctx,
                     "Can't read local variable in it's own initializer.",
                     compiler->parser);
-                return (resolve_res_t){(uint)(-1), true};
+                vi.vid = (uint)(-1);
+                vi.is_const = true;
+                vi.is_captured = false;
+            } else if (capture_on_found && !vi.is_captured) {
+                vi.is_captured = true;
+                value_t new_val = NUMBER_VAL(pack_var_info(ctx, vi));
+                table_set(ctx, &scope->map, str, new_val);
+                write_uint_array(ctx, &scope->captured_ids, vi.vid);
             }
-            return (resolve_res_t)
-                {id + (uint)scope->cnt_in_prev_blocks, is_const};
+            return vi;
         }
     }
-    return (resolve_res_t){(uint)(-1), true};
+    return (var_info_t){(uint)(-1), true, false};
 }
 
-static resolve_res_t add_upvalue(
+static var_info_t add_upvalue(
     ctx_t const *ctx, compiler_t *compiler,
     uint vid, b32 is_local, b32 is_const)
 {
@@ -2461,31 +2583,31 @@ static resolve_res_t add_upvalue(
     for (uint i = 0; i < uid; ++i) {
         upvalue_t const *uv = &compiler->upvalues.uvs[i];
         if (uv->vid == vid && uv->is_local == is_local)
-            return (resolve_res_t){i, is_const};
+            return (var_info_t){i, is_const, true};
     }
 
     write_upvalue_array(ctx,
         &compiler->upvalues, (upvalue_t){vid, is_local, is_const});
 
-    return (resolve_res_t){
-        (uint)compiler->compiling_func->upvalue_cnt++, is_const};
+    return (var_info_t){
+        (uint)compiler->compiling_func->upvalue_cnt++, is_const, true};
 }
 
-static resolve_res_t resolve_upvalue(
+static var_info_t resolve_upvalue(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, token_t name)
 {
     if (!compiler->enclosing)
-        return (resolve_res_t){(uint)(-1), true};
+        return (var_info_t){(uint)(-1), true, false};
 
-    resolve_res_t lres = resolve_lvar(ctx, compiler->enclosing, vm, name);
+    var_info_t lres = resolve_lvar(ctx, compiler->enclosing, vm, name, true);
     if (lres.vid != (uint)(-1))
         return add_upvalue(ctx, compiler, lres.vid, true, lres.is_const);
 
-    resolve_res_t ures = resolve_upvalue(ctx, compiler->enclosing, vm, name);
+    var_info_t ures = resolve_upvalue(ctx, compiler->enclosing, vm, name);
     if (ures.vid != (uint)(-1))
         return add_upvalue(ctx, compiler, ures.vid, false, ures.is_const);
 
-    return (resolve_res_t){(uint)(-1), true};
+    return (var_info_t){(uint)(-1), true, false};
 }
 
 static void define_native(
@@ -2497,7 +2619,7 @@ static void define_native(
     on->fn = fn;
     on->arity = arity;
     push_stack(ctx, vm, OBJ_VAL(on));
-    resolve_res_t rr = register_gvar(
+    var_info_t rr = register_gvar(
         ctx, vm, (token_t){e_tt_identifier, name.p, (int)name.len, -1}, true);
     vm->gvars.values[rr.vid] = OBJ_VAL(on);
     popn_stack(ctx, vm, 2);
@@ -2584,7 +2706,58 @@ static void end_scope(ctx_t const *ctx, compiler_t *compiler)
     ASSERT(compiler->current_scope_depth);
     lvar_scope_t *scope = &compiler->scope_lvars[compiler->current_scope_depth];
     table_t *scope_lvar_table = &scope->map;
-    if (scope_lvar_table->cnt == 1) {
+    if (scope->captured_ids.cnt) {
+        // Sort in decreasing order
+        for (
+            uint *r = scope->captured_ids.items + 1;
+            r < scope->captured_ids.items + scope->captured_ids.cnt;
+            ++r)
+        {
+            uint *p;
+            for (p = r - 1; p >= scope->captured_ids.items; --p) {
+                if (*p > *r)
+                    break;
+            }
+            if (p < r - 1) {
+                uint rr = *r;
+                uint *dst = r, *src = r - 1;
+                for (isize i = 0; i < (r - p - 1); ++i)
+                    *dst-- = *src--;
+                *(p + 1) = rr;
+            }
+        }
+
+        int next_cap_id = 0;
+        int next_id = (int)(scope_lvar_table->cnt - 1);
+        int pop_run = 0;
+        while (next_id >= 0) {
+            if (
+                (uint)next_cap_id < scope->captured_ids.cnt &&
+                scope->captured_ids.items[next_cap_id] == (uint)next_id)
+            {
+                if (pop_run == 1) {
+                    emit_byte(ctx, e_op_pop, compiler);
+                } else if (pop_run > 1) {
+                    emit_id_ref(
+                        ctx, (uint)pop_run,
+                        e_op_popn, e_op_popn_long, compiler);
+                }
+                pop_run = 0;
+                emit_byte(ctx, e_op_close_upvalue, compiler);
+                ++next_cap_id;
+            } else {
+                ++pop_run;
+            }
+            --next_id;
+        }
+        if (pop_run == 1) {
+            emit_byte(ctx, e_op_pop, compiler);
+        } else if (pop_run > 1) {
+            emit_id_ref(
+                ctx, (uint)pop_run,
+                e_op_popn, e_op_popn_long, compiler);
+        }
+    } else if (scope_lvar_table->cnt == 1) {
         emit_byte(ctx, e_op_pop, compiler);
     } else if (scope_lvar_table->cnt > 1) {
         emit_id_ref(
@@ -2608,6 +2781,11 @@ static void end_scope(ctx_t const *ctx, compiler_t *compiler)
         sizeof(table_entry_t) * scope_lvar_table->cap);
     scope_lvar_table->cnt = 0;
     scope->initialized_cnt = 0;
+
+    memset(
+        scope->captured_ids.items, 0,
+        sizeof(int) * scope->captured_ids.cap);
+    scope->captured_ids.cnt = 0;
 
     --compiler->current_scope_depth;
 }
@@ -2798,7 +2976,7 @@ static void compile_named_variable(
     token_t name, b32 can_assign)
 {
     u8 get_op, set_op, get_lop, set_lop;
-    resolve_res_t resolved = resolve_lvar(ctx, compiler, vm, name);
+    var_info_t resolved = resolve_lvar(ctx, compiler, vm, name, false);
     if (resolved.vid != (uint)(-1)) {
         get_op = e_op_get_loc;
         get_lop = e_op_get_loc_long;
@@ -3005,47 +3183,47 @@ static void compile_func_expr(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
 {
     (void)can_assign;
-    compiler_t push_compiler = {0};
-    push_compiler.parser = compiler->parser;
-    push_compiler.compiling_func = allocate_function(ctx, vm);
-    push_compiler.compiling_func_type = e_ft_function;
+    compiler_t *push_compiler = ALLOCATE(compiler_t, 1);
+    push_compiler->parser = compiler->parser;
+    push_compiler->compiling_func = allocate_function(ctx, vm);
+    push_compiler->compiling_func_type = e_ft_function;
 
-    push_compiler.compiling_func->name =
+    push_compiler->compiling_func->name =
         (obj_string_t *)add_string_ref(
             ctx, vm,
-            push_compiler.parser->prev.start,
-            (uint)push_compiler.parser->prev.len);
+            push_compiler->parser->prev.start,
+            (uint)push_compiler->parser->prev.len);
 
-    begin_compiler(ctx, &push_compiler, vm, compiler);
-    begin_scope(ctx, &push_compiler, e_lst_block);
+    begin_compiler(ctx, push_compiler, vm, compiler);
+    begin_scope(ctx, push_compiler, e_lst_block);
 
     parser_consume(ctx, e_tt_left_paren,
-        "Expected '(' before function args", push_compiler.parser);
-    if (!parser_check(ctx, e_tt_right_paren, push_compiler.parser)) {
+        "Expected '(' before function args", push_compiler->parser);
+    if (!parser_check(ctx, e_tt_right_paren, push_compiler->parser)) {
         do {
-            ++push_compiler.compiling_func->arity;
+            ++push_compiler->compiling_func->arity;
             parser_consume(ctx, e_tt_identifier,
                 "Expected param name.", compiler->parser);
             uint vid = register_lvar(
-                ctx, &push_compiler, vm, compiler->parser->prev, false);
-            mark_lvar_initialzied(ctx, &push_compiler, vid);
-        } while (parser_match(ctx, e_tt_comma, push_compiler.parser));
+                ctx, push_compiler, vm, compiler->parser->prev, false);
+            mark_lvar_initialzied(ctx, push_compiler, vid);
+        } while (parser_match(ctx, e_tt_comma, push_compiler->parser));
     }
     parser_consume(ctx, e_tt_right_paren,
-        "Expected ')' after function args", push_compiler.parser);
+        "Expected ')' after function args", push_compiler->parser);
     parser_consume(ctx, e_tt_left_brace,
-        "Expected '{' before function body", push_compiler.parser);
-    compile_block(ctx, &push_compiler, vm);
+        "Expected '{' before function body", push_compiler->parser);
+    compile_block(ctx, push_compiler, vm);
 
-    obj_function_t *func = end_compiler(ctx, &push_compiler);
+    obj_function_t *func = end_compiler(ctx, push_compiler);
 
     if (func->upvalue_cnt) {
         emit_closure(ctx, OBJ_VAL(func), compiler);
 
         for (uint i = 0; i < func->upvalue_cnt; ++i) {
-            uint vid = push_compiler.upvalues.uvs[i].vid;
+            uint vid = push_compiler->upvalues.uvs[i].vid;
             u8 flags = 0;
-            flags |= push_compiler.upvalues.uvs[i].is_local ? f_uv_local : 0;
+            flags |= push_compiler->upvalues.uvs[i].is_local ? f_uv_local : 0;
             flags |= vid > 255 ? f_uv_long : 0;
             emit_byte(ctx, flags, compiler);
             emit_byte(ctx, (u8)(vid & 0xFF), compiler);
@@ -3061,10 +3239,12 @@ static void compile_func_expr(
             }
         }
 
-        free_upvalue_array(ctx, &push_compiler.upvalues);
+        free_upvalue_array(ctx, &push_compiler->upvalues);
     } else {
         emit_constant(ctx, OBJ_VAL(func), compiler);
     }
+
+    FREE(push_compiler);
 }
 
 static uint compile_new_variable(
