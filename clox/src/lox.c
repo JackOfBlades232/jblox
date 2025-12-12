@@ -2511,10 +2511,10 @@ static uint register_lvar(
 {
     obj_string_t *str =
         (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)name.len);
-    table_t *scope_lvar_table =
-        &compiler->scope_lvars[compiler->current_scope_depth].map;
+    lvar_scope_t *scope = &compiler->scope_lvars[compiler->current_scope_depth];
+    table_t *scope_lvar_table = &scope->map;
     uint id = scope_lvar_table->cnt;
-    var_info_t vi = {id + 1, is_const, false};
+    var_info_t vi = {id + (uint)scope->cnt_in_prev_blocks, is_const, false};
     value_t lvar_id = NUMBER_VAL(pack_var_info(ctx, vi));
     if (!table_set(ctx, scope_lvar_table, str, lvar_id)) {
         parser_error(
@@ -2534,7 +2534,7 @@ static void mark_lvar_initialzied(
         return;
     lvar_scope_t *scope = &compiler->scope_lvars[compiler->current_scope_depth];
     table_t *scope_lvar_table = &scope->map;
-    ASSERT(scope_lvar_table->cnt = scope->initialized_cnt + 1);
+    ASSERT(scope_lvar_table->cnt == scope->initialized_cnt + 1);
     ASSERT(vid == scope->initialized_cnt);
     ++scope->initialized_cnt;
 }
@@ -2553,7 +2553,9 @@ static var_info_t resolve_lvar(
         if (table_get(ctx, &scope->map, str, &id_val)) {
             f64 packed = AS_NUMBER(id_val);
             var_info_t vi = unpack_var_info(ctx, packed);
-            if (vi.vid >= scope->initialized_cnt + 1) {
+            if (vi.vid >=
+                scope->initialized_cnt + (uint)scope->cnt_in_prev_blocks)
+            {
                 parser_error(
                     ctx,
                     "Can't read local variable in it's own initializer.",
@@ -2733,7 +2735,8 @@ static void end_scope(ctx_t const *ctx, compiler_t *compiler)
         while (next_id >= 0) {
             if (
                 (uint)next_cap_id < scope->captured_ids.cnt &&
-                scope->captured_ids.items[next_cap_id] == (uint)next_id)
+                scope->captured_ids.items[next_cap_id] ==
+                    (uint)(next_id + scope->cnt_in_prev_blocks))
             {
                 if (pop_run == 1) {
                     emit_byte(ctx, e_op_pop, compiler);
@@ -3420,17 +3423,33 @@ static void compile_switch(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 static void compile_for(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     begin_scope(ctx, compiler, e_lst_for_loop);
+    
+    token_t loop_var = {0};
+    b32 loop_var_is_const = false;
+    uint loop_var_vid = (uint)(-1);
 
     parser_consume(ctx, e_tt_left_paren,
         "Expected '(' after for.", compiler->parser);
-    if (parser_match(ctx, e_tt_semicolon, compiler->parser))
-        ;
-    else if (parser_match(ctx, e_tt_var, compiler->parser))
+    if (parser_match(ctx, e_tt_semicolon, compiler->parser)) {
+
+    } else if (parser_match(ctx, e_tt_var, compiler->parser)) {
+        loop_var = compiler->parser->cur;
+        loop_var_is_const = false;
         compile_var_decl(ctx, compiler, vm, false);
-    else if (parser_match(ctx, e_tt_let, compiler->parser))
+    } else if (parser_match(ctx, e_tt_let, compiler->parser)) {
+        loop_var = compiler->parser->cur;
+        loop_var_is_const = true;
         compile_var_decl(ctx, compiler, vm, true);
-    else 
+    } else {
         compile_expr_stmt(ctx, compiler, vm);
+    }
+
+    if (loop_var.type == e_tt_identifier) {
+        loop_var_vid =
+            (uint)compiler
+                ->scope_lvars[compiler->current_scope_depth]
+                .cnt_in_prev_blocks;
+    }
 
     uint start_jump = emit_jump(ctx, e_op_jump, compiler);
 
@@ -3465,7 +3484,24 @@ static void compile_for(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 
     compiler->top_loop_start_mark = loop_start;
     compiler->top_loop_break_mark = break_counter;
-    compile_stmt(ctx, compiler, vm);
+    {
+        if (loop_var.type == e_tt_identifier) {
+            begin_scope(ctx, compiler, e_lst_block);
+            uint vid =
+                register_lvar(ctx, compiler, vm, loop_var, loop_var_is_const);
+            mark_lvar_initialzied(ctx, compiler, vid);
+            emit_id_ref(ctx,
+                loop_var_vid, e_op_get_loc, e_op_get_loc_long, compiler);
+            emit_id_ref(ctx,
+                vid + (uint)compiler
+                    ->scope_lvars[compiler->current_scope_depth]
+                    .cnt_in_prev_blocks,
+                e_op_set_loc, e_op_set_loc_long, compiler);
+        }
+        compile_stmt(ctx, compiler, vm);
+        if (loop_var.type == e_tt_identifier)
+            end_scope(ctx, compiler);
+    }
     compiler->top_loop_start_mark = (uint)(-1);
     compiler->top_loop_break_mark = (uint)(-1);
 

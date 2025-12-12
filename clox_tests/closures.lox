@@ -46,5 +46,28 @@ fun outer() {
         fun inner() {
             print a + c + b + d;
         }
+        inner();
+    }
+    middle();
+}
+outer();
+
+var globalOne;
+var globalTwo;
+
+fun main() {
+    for (var a = 1; a <= 2; a = a + 1) {
+        fun closure() {
+            print a;
+        }
+        if (globalOne == nil) {
+            globalOne = closure;
+        } else {
+            globalTwo = closure;
+        }
     }
 }
+
+main();
+globalOne();
+globalTwo();
