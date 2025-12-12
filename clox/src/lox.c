@@ -10,35 +10,37 @@
 #include <debug.h>
 #include <string.h>
 
+typedef struct vm vm_t;
+
+static void collect_garbage(ctx_t const *ctx, vm_t *vm);
+
+#if DEBUG_LOG_GC
+#define GC_LOG LOG
+#define GC_LOGF LOGF
+#define GC_LOG_NONL LOG_NONL
+#define GC_LOGF_NONL LOGF_NONL
+#else
+#define GC_LOG(...)
+#define GC_LOGF(...)
+#define GC_LOG_NONL(...)
+#define GC_LOGF_NONL(...)
+#endif
+
+#define GC_HEAP_GROWTH_FACTOR 2
+
 static inline void *reallocate(
-    ctx_t const *ctx, void const *ptr, usize old_size, usize new_size)
-{
-    if (new_size == 0) {
-        gpa_deallocate(ctx, ctx->gpa, ptr);
-        return NULL;
-    }
-
-    void *res = gpa_allocate(ctx, ctx->gpa, new_size);
-    VERIFY(res, "Out of memory.");
-
-    if (old_size) {
-        memcpy(res, ptr, MIN(old_size, new_size));
-        gpa_deallocate(ctx, ctx->gpa, ptr);
-    }
-
-    return res;
-}
+    ctx_t const *ctx, vm_t *vm, void const *ptr,
+    usize old_size, usize new_size);
 
 #define ALLOCATE(type_, count_) \
-    (type_ *)reallocate(ctx, NULL, 0, sizeof(type_) * (count_))
-#define FREE(ptr_) reallocate(ctx, ptr_, 0, 0)
+    (type_ *)reallocate(ctx, vm, NULL, 0, sizeof(type_) * (count_))
+#define FREE(type_, ptr_, count_) \
+    reallocate(ctx, vm, ptr_, sizeof(type_) * (count_), 0)
 
 #define GROW_CAP(cap_) ((cap_) < 8 ? 8 : 2 * (cap_))
 #define GROW_ARRAY(type_, ptr_, oldcap_, newcap_) \
     (type_ *)reallocate(                          \
-        ctx, (ptr_), (oldcap_) * sizeof(type_), (newcap_) * sizeof(type_))
-#define FREE_ARRAY(type_, ptr_, cap_) \
-    reallocate(ctx, (ptr_), sizeof(type_) * (cap_), 0)
+        ctx, vm, (ptr_), (oldcap_) * sizeof(type_), (newcap_) * sizeof(type_))
 
 static inline u32 hash_string(ctx_t const *ctx, char const *p, uint len)
 {
@@ -132,7 +134,6 @@ static b32 is_falsey(ctx_t const *ctx, value_t val)
 }
 
 // Ugly AF forwards for native functions
-typedef struct vm vm_t;
 typedef struct native_ctx native_ctx_t;
 typedef value_t (*native_fn_t)(int, value_t *, native_ctx_t *);
 static void define_native(
@@ -147,8 +148,18 @@ typedef enum {
     e_ot_upvalue,
 } obj_type_t;
 
+static char const *const c_obj_type_names[] =
+{
+    "string",
+    "function",
+    "native",
+    "closure",
+    "upvalue"
+};
+
 typedef struct obj {
     obj_type_t type;
+    b32 is_marked;
     struct obj *next;
 } obj_t;
 
@@ -227,6 +238,7 @@ static inline string_t obj_as_string(ctx_t const *ctx, value_t val)
 #define AS_NATIVE_DT(value_)  ((obj_native_t *)AS_OBJ(value_))
 #define AS_NATIVE(value_)     (((obj_native_t *)AS_OBJ(value_))->fn)
 #define AS_CLOSURE(value_)    ((obj_closure_t *)AS_OBJ(value_))
+#define AS_UPVALUE(value_)    ((obj_upvalue_t *)AS_OBJ(value_))
 
 static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
 {
@@ -268,11 +280,11 @@ static table_t make_table(ctx_t const *ctx)
     return (table_t){0, 0, NULL};
 }
 
-static void free_table(ctx_t const *ctx, table_t *table)
+static void free_table(ctx_t const *ctx, vm_t *vm, table_t *table)
 {
     if (!table || !table->entries)
         return;
-    FREE_ARRAY(table_entry_t, table->entries, table->cap);
+    FREE(table_entry_t, table->entries, table->cap);
     *table = make_table(ctx);
 }
 
@@ -299,7 +311,7 @@ static table_entry_t *table_find_entry(
 }
 
 static void table_adjust_cap(
-    ctx_t const *ctx, table_t *table, uint new_cap)
+    ctx_t const *ctx, vm_t *vm, table_t *table, uint new_cap)
 {
     table_entry_t *entries = ALLOCATE(table_entry_t, new_cap);
     memset(entries, 0, new_cap * sizeof(table_entry_t));
@@ -318,17 +330,18 @@ static void table_adjust_cap(
     }
 
     if (table->entries)
-        FREE_ARRAY(table_entry_t, table->entries, table->cap);
+        FREE(table_entry_t, table->entries, table->cap);
     table->entries = entries;
     table->cap = new_cap;
 }
 
 static b32 table_set(
-    ctx_t const *ctx, table_t *table, obj_string_t const *key, value_t val)
+    ctx_t const *ctx, vm_t *vm, table_t *table,
+    obj_string_t const *key, value_t val)
 {
     if ((f64)(table->cnt + 1) > (f64)table->cap * TABLE_MAX_LOAD_FACTOR) {
         uint cap = GROW_CAP(table->cap);
-        table_adjust_cap(ctx, table, cap);
+        table_adjust_cap(ctx, vm, table, cap);
     }
 
     table_entry_t *entry =
@@ -343,12 +356,12 @@ static b32 table_set(
 }
 
 static void table_add_all(
-    ctx_t const *ctx, table_t *to, table_t *from)
+    ctx_t const *ctx, vm_t *vm, table_t *to, table_t *from)
 {
     for (uint i = 0; i < from->cap; ++i) {
         table_entry_t *e = &from->entries[i];
         if (e->key)
-            table_set(ctx, to, e->key, e->value);
+            table_set(ctx, vm, to, e->key, e->value);
     }
 }
 
@@ -410,6 +423,15 @@ static obj_string_t *table_find_string(
     }
 }
 
+static void table_remove_white(ctx_t const *ctx, table_t *table)
+{
+    for (uint i = 0; i < table->cap; ++i) {
+        table_entry_t const *e = &table->entries[i];
+        if (e->key && !e->key->obj.is_marked)
+            table_delete(ctx, table, e->key);
+    }
+}
+
 typedef enum {
     e_op_constant,
     e_op_constant_long,
@@ -464,6 +486,9 @@ typedef enum {
     f_uv_long = 1 << 1
 } upvalue_flags_t;
 
+static void push_stack(ctx_t const *ctx, vm_t *vm, value_t val);
+static value_t pop_stack(ctx_t const *ctx, vm_t *vm);
+
 static inline value_array_t make_value_array(ctx_t const *ctx)
 {
     (void)ctx;
@@ -471,7 +496,7 @@ static inline value_array_t make_value_array(ctx_t const *ctx)
 }
 
 static inline void write_value_array(
-    ctx_t const *ctx, value_array_t *arr, value_t val)
+    ctx_t const *ctx, vm_t *vm, value_array_t *arr, value_t val)
 {
     if (arr->cap < arr->cnt + 1) {
         uint old_cap = arr->cap;
@@ -484,11 +509,12 @@ static inline void write_value_array(
     arr->values[arr->cnt++] = val;
 }
 
-static inline void free_value_array(ctx_t const *ctx, value_array_t *arr)
+static inline void free_value_array(
+    ctx_t const *ctx, vm_t *vm, value_array_t *arr)
 {
     if (!arr || !arr->values)
         return;
-    FREE_ARRAY(value_t, arr->values, arr->cap);
+    FREE(value_t, arr->values, arr->cap);
     *arr = make_value_array(ctx);
 }
 
@@ -499,7 +525,7 @@ static inline line_info_t make_line_info(ctx_t const *ctx)
 }
 
 static inline void write_line_info(
-    ctx_t const *ctx, line_info_t *info, uint line, uint instr_end)
+    ctx_t const *ctx, vm_t *vm, line_info_t *info, uint line, uint instr_end)
 {
     if (info->cap < info->cnt + 1) {
         uint old_cap = info->cap;
@@ -511,11 +537,11 @@ static inline void write_line_info(
     info->entries[info->cnt++] = (line_info_entry_t){line, instr_end};
 }
 
-static inline void free_line_info(ctx_t const *ctx, line_info_t *info)
+static inline void free_line_info(ctx_t const *ctx, vm_t *vm, line_info_t *info)
 {
     if (!info || !info->entries)
         return;
-    FREE_ARRAY(value_t, info->entries, info->cap);
+    FREE(line_info_entry_t, info->entries, info->cap);
     *info = make_line_info(ctx);
 }
 
@@ -527,7 +553,8 @@ static inline chunk_t make_chunk(ctx_t const *ctx)
     return c;
 }
 
-static inline void write_chunk(ctx_t const *ctx, chunk_t *chunk, u8 byte, uint line)
+static inline void write_chunk(
+    ctx_t const *ctx, vm_t *vm, chunk_t *chunk, u8 byte, uint line)
 {
     if (chunk->cap < chunk->cnt + 1) {
         uint old_cap = chunk->cap;
@@ -538,33 +565,36 @@ static inline void write_chunk(ctx_t const *ctx, chunk_t *chunk, u8 byte, uint l
     chunk->code[chunk->cnt++] = byte;
 
     if (line != chunk->current_line) {
-        write_line_info(ctx, &chunk->lines, line, chunk->cnt);
+        write_line_info(ctx, vm, &chunk->lines, line, chunk->cnt);
         chunk->current_line = line;
     } else {
         chunk->lines.entries[chunk->lines.cnt - 1].instr_range_end = chunk->cnt;
     }
 }
 
-static inline uint add_constant(ctx_t const *ctx, chunk_t *chunk, value_t val)
+static inline uint add_constant(
+    ctx_t const *ctx, vm_t *vm, chunk_t *chunk, value_t val)
 {
-    write_value_array(ctx, &chunk->constants, val);
+    push_stack(ctx, vm, val);
+    write_value_array(ctx, vm, &chunk->constants, val);
+    pop_stack(ctx, vm);
     return chunk->constants.cnt - 1;
 }
 
 static inline void write_id_ref(
-    ctx_t const *ctx, chunk_t *chunk,
+    ctx_t const *ctx, vm_t *vm, chunk_t *chunk,
     opcode_t op, opcode_t long_op, uint id, uint line)
 {
     if (id <= 255) {
-        write_chunk(ctx, chunk, (u8)op, line);
-        write_chunk(ctx, chunk, (u8)id, line);
+        write_chunk(ctx, vm, chunk, (u8)op, line);
+        write_chunk(ctx, vm, chunk, (u8)id, line);
     } else if (id <= 16777215) {
-        write_chunk(ctx, chunk, (u8)long_op, line);
-        write_chunk(ctx, chunk, (u8)(id & 0xFF), line);
-        write_chunk(ctx, chunk, (u8)((id >> 8) & 0xFF), line);
-        write_chunk(ctx, chunk, (u8)((id >> 16) & 0xFF), line);
+        write_chunk(ctx, vm, chunk, (u8)long_op, line);
+        write_chunk(ctx, vm, chunk, (u8)(id & 0xFF), line);
+        write_chunk(ctx, vm, chunk, (u8)((id >> 8) & 0xFF), line);
+        write_chunk(ctx, vm, chunk, (u8)((id >> 16) & 0xFF), line);
     } else {
-        // @TODO: a more gracious error?
+        // @TODO: a more gracious error should be here
         PANIC(
             "Constants overflow: "
             "one chunk can't contain more than 16777215 consts/entities.");
@@ -572,21 +602,21 @@ static inline void write_id_ref(
 }
 
 static inline void write_constant(
-    ctx_t const *ctx, chunk_t *chunk,
+    ctx_t const *ctx, vm_t *vm, chunk_t *chunk,
     opcode_t op, opcode_t long_op, value_t val, uint line)
 {
-    uint constant = add_constant(ctx, chunk, val);
-    write_id_ref(ctx, chunk, op, long_op, constant, line);
+    uint constant = add_constant(ctx, vm, chunk, val);
+    write_id_ref(ctx, vm, chunk, op, long_op, constant, line);
 }
 
-static inline void free_chunk(ctx_t const *ctx, chunk_t *chunk)
+static inline void free_chunk(ctx_t const *ctx, vm_t *vm, chunk_t *chunk)
 {
     if (!chunk)
         return;
     if (chunk->code)
-        FREE_ARRAY(u8, chunk->code, chunk->cap);
-    free_value_array(ctx, &chunk->constants);
-    free_line_info(ctx, &chunk->lines);
+        FREE(u8, chunk->code, chunk->cap);
+    free_value_array(ctx, vm, &chunk->constants);
+    free_line_info(ctx, vm, &chunk->lines);
     *chunk = make_chunk(ctx);
 }
 
@@ -637,7 +667,7 @@ static void print_value(ctx_t const *ctx, value_t val)
     }
 }
 
-#if DEBUG_TRACE_EXECUTION || DEBUG_PRINT_CODE
+#if DEBUG_TRACE_EXECUTION || DEBUG_PRINT_CODE || DEBUG_LOG_GC
 
 static void disasm_value(ctx_t const *ctx, value_t val)
 {
@@ -652,7 +682,10 @@ static void disasm_value(ctx_t const *ctx, value_t val)
         LOGF_NONL("%f", AS_NUMBER(val));
         break;
     case e_vt_obj:
-        print_obj(ctx, &ctx->os->hstderr, val);
+        if (OBJ_TYPE(val) == e_ot_string)
+            LOGF_NONL("\"%S\"", AS_STRING(val));
+        else
+            print_obj(ctx, &ctx->os->hstderr, val);
         break;
     case e_vt_vacant:
         LOG_NONL("<vacant>");
@@ -1002,6 +1035,8 @@ static value_t readch_native(int arg_count, value_t *args, native_ctx_t *nctx)
     return NUMBER_VAL((f64)res);
 }
 
+typedef struct compiler compiler_t;
+
 typedef struct vm {
     vm_stack_segment_t stack;
     vm_stack_segment_t *cur_stack_seg; 
@@ -1014,17 +1049,58 @@ typedef struct vm {
     value_array_t gvars;
     obj_upvalue_t *open_upvalues;
     obj_t *objects;
+    uint gray_cnt, gray_cap;
+    obj_t **gray_stack;
+    usize bytes_allocated;
+    usize next_gc;
+    usize heap_cap;
     native_ctx_t nctx;
+    compiler_t *compiler;    
 } vm_t;
+
+static inline void *reallocate(
+    ctx_t const *ctx, vm_t *vm, void const *ptr,
+    usize old_size, usize new_size)
+{
+    vm->bytes_allocated += new_size - old_size;
+
+    if (new_size) {
+#if !DEBUG_STRESS_GC
+        if (vm->bytes_allocated > vm->next_gc)
+#endif
+        collect_garbage(ctx, vm);
+    }
+
+
+    if (new_size == 0) {
+        gpa_deallocate(ctx, ctx->gpa, ptr);
+        return NULL;
+    }
+
+    void *res = gpa_allocate(ctx, ctx->gpa, new_size);
+    VERIFY(res, "Out of memory.");
+
+    if (old_size) {
+        memcpy(res, ptr, MIN(old_size, new_size));
+        gpa_deallocate(ctx, ctx->gpa, ptr);
+    }
+
+    return res;
+}
+
 
 static inline obj_t *allocate_obj(
     ctx_t const *ctx, vm_t *vm, usize sz, obj_type_t ot)
 {
     ASSERT(sz > sizeof(obj_t));
-    obj_t *obj = (obj_t *)reallocate(ctx, NULL, 0, sz);
+    obj_t *obj = (obj_t *)reallocate(ctx, vm, NULL, 0, sz);
     obj->type = ot;
+    obj->is_marked = false;
     obj->next = vm->objects;
     vm->objects = obj;
+
+    GC_LOGF("%p allocate %U for %s", obj, sz, c_obj_type_names[ot]);
+
     return obj;
 }
 
@@ -1076,23 +1152,202 @@ static inline obj_upvalue_t *allocate_upvalue(ctx_t const *ctx, vm_t *vm)
     return uv;
 }
 
-static inline void free_object(ctx_t const *ctx, obj_t *obj)
+static inline void free_object(ctx_t const *ctx, vm_t *vm, obj_t *obj)
 {
+    GC_LOGF_NONL("%p free type %s ", obj, c_obj_type_names[obj->type]);
+#if DEBUG_LOG_GC
+    disasm_value(ctx, OBJ_VAL(obj));
+#endif
+    GC_LOG("");
+
     switch (obj->type) {
+    case e_ot_string: {
+        obj_string_t *s = (obj_string_t *)obj;
+        if (s->type == e_st_allocated)
+            FREE(u8, s, sizeof(obj_string_t) + s->len + 1);
+        else
+            FREE(obj_string_t, s, 1);
+    } break;
     case e_ot_function: {
         obj_function_t *f = (obj_function_t *)obj;
-        free_chunk(ctx, &f->chunk);
-        FREE(f);
+        free_chunk(ctx, vm, &f->chunk);
+        FREE(obj_function_t, f, 1);
     } break;
+    case e_ot_native:
+        FREE(obj_native_t, (obj_native_t *)obj, 1);
+        break;
     case e_ot_closure: {
         obj_closure_t *c = (obj_closure_t *)obj;
-        FREE_ARRAY(obj_upvalue_t *, c->upvalues, c->upvalue_cnt);
-        FREE(c);
+        FREE(obj_upvalue_t *, c->upvalues, c->upvalue_cnt);
+        FREE(obj_closure_t, c, 1);
     } break;
-    default:
-        FREE(obj);
+    case e_ot_upvalue:
+        FREE(obj_upvalue_t, (obj_upvalue_t *)obj, 1);
         break;
     }
+}
+
+static void mark_obj(ctx_t const *ctx, vm_t *vm, obj_t *obj)
+{
+    if (!obj)
+        return;
+    if (obj->is_marked)
+        return;
+    GC_LOGF_NONL("%p mark ", obj);
+#if DEBUG_LOG_GC
+    disasm_value(ctx, OBJ_VAL(obj));
+#endif
+    GC_LOG("");
+    obj->is_marked = true;
+
+    // @TODO: don't add objs without outgoing refs (native, string)
+
+    if (vm->gray_cap <= vm->gray_cnt) {
+        vm->gray_cap = GROW_CAP(vm->gray_cap);
+        obj_t **prev = vm->gray_stack;
+        vm->gray_stack = (obj_t **)gpa_allocate(
+            ctx, ctx->gpa, vm->gray_cap * sizeof(*vm->gray_stack));
+        VERIFY(vm->gray_stack, "Out of memory.");
+        memcpy(vm->gray_stack, prev, vm->gray_cnt * sizeof(*vm->gray_stack));
+        if (prev)
+            gpa_deallocate(ctx, ctx->gpa, prev);
+    }
+
+    vm->gray_stack[vm->gray_cnt++] = obj;
+}
+
+static void mark_value(ctx_t const *ctx, vm_t *vm, value_t val)
+{
+    if (IS_OBJ(val))
+        mark_obj(ctx, vm, AS_OBJ(val));
+}
+
+static void mark_value_array(ctx_t const *ctx, vm_t *vm, value_array_t *va)
+{
+    for (uint i = 0; i < va->cnt; ++i)
+        mark_value(ctx, vm, va->values[i]);
+}
+
+static void mark_table(ctx_t const *ctx, vm_t *vm, table_t *table)
+{
+    for (uint i = 0; i < table->cap; ++i) {
+        table_entry_t const *e = &table->entries[i];
+        mark_obj(ctx, vm, (obj_t *)e->key);
+        mark_value(ctx, vm, e->value);
+    }
+}
+
+static void mark_roots(ctx_t const *ctx, vm_t *vm)
+{
+    for (vm_stack_segment_t *seg = &vm->stack; seg; seg = seg->next) {
+        for (
+            value_t *v = seg->values;
+            seg == vm->cur_stack_seg
+                ? v < vm->stack_head
+                : v < seg->values + VM_STACK_SEGMENT_SIZE;
+            ++v)
+        {
+            mark_value(ctx, vm, *v);
+        }
+    }
+
+    for (call_frame_t *frame = vm->frame; frame; frame = frame->next)
+        mark_obj(ctx, vm, (obj_t *)frame->c);
+    for (obj_upvalue_t *uv = vm->open_upvalues; uv; uv = uv->next)
+        mark_obj(ctx, vm, (obj_t *)uv);
+
+    mark_value_array(ctx, vm, &vm->gvars);
+    mark_table(ctx, vm, &vm->gvar_map);
+}
+
+static void blacken_obj(ctx_t const *ctx, vm_t *vm, obj_t *obj)
+{
+    GC_LOGF_NONL("%p blacken ", obj);
+#if DEBUG_LOG_GC
+    disasm_value(ctx, OBJ_VAL(obj));
+#endif
+    GC_LOG("");
+    switch (obj->type) {
+    case e_ot_string:
+    case e_ot_native:
+        break;
+    case e_ot_upvalue:
+        mark_value(ctx, vm, ((obj_upvalue_t *)obj)->closed);
+        break;
+    case e_ot_function: {
+        obj_function_t *fn = (obj_function_t *)obj;
+        mark_obj(ctx, vm, (obj_t *)fn->name);
+        mark_value_array(ctx, vm, &fn->chunk.constants);
+    } break;
+    case e_ot_closure: {
+        obj_closure_t *cl = (obj_closure_t *)obj;
+        mark_obj(ctx, vm, (obj_t *)cl->fn);
+        for (uint i = 0; i < cl->upvalue_cnt; ++i)
+            mark_obj(ctx, vm, (obj_t *)cl->upvalues[i]);
+    } break;
+    }
+}
+
+static void trace_refs(ctx_t const *ctx, vm_t *vm)
+{
+    while (vm->gray_cnt) {
+        obj_t *obj = vm->gray_stack[--vm->gray_cnt];
+        blacken_obj(ctx, vm, obj);
+    }
+}
+
+static void sweep(ctx_t const *ctx, vm_t *vm)
+{
+    obj_t *prev = NULL;
+    obj_t *obj = vm->objects;
+    while (obj) {
+        if (obj->is_marked) {
+            obj->is_marked = false;
+            prev = obj;
+            obj = obj->next;
+        } else {
+            obj_t *unreachable = obj;
+            obj = obj->next;
+            if (prev)
+                prev->next = obj;
+            else
+                vm->objects = obj;
+            free_object(ctx, vm, unreachable);
+        }
+    }
+}
+
+
+static void collect_garbage(ctx_t const *ctx, vm_t *vm)
+{
+    if (vm->compiler)
+        return;
+
+    static int gc_stack = 0;
+
+    ASSERT(gc_stack == 0);
+    ++gc_stack;
+
+    GC_LOG("-- gc begin --");
+    usize before = vm->bytes_allocated;
+    (void)before;
+
+    mark_roots(ctx, vm);
+    trace_refs(ctx, vm);
+    table_remove_white(ctx, &vm->strings);
+    sweep(ctx, vm);
+
+    vm->next_gc = MIN(
+        GC_HEAP_GROWTH_FACTOR * vm->bytes_allocated,
+        vm->heap_cap * 9 / 10);
+
+    GC_LOG("-- gc end --");
+    GC_LOGF(
+        "    collected %U bytes (from %U to %U) next at %U",
+        before - vm->bytes_allocated, before, vm->bytes_allocated,
+        vm->next_gc);
+
+    --gc_stack;
 }
 
 static inline obj_t *add_string_ref(
@@ -1106,7 +1361,9 @@ static inline obj_t *add_string_ref(
         str->p = (char *)p;
         str->len = len;
         str->hash = hash;
-        table_set(ctx, &vm->strings, str, NIL_VAL);
+        push_stack(ctx, vm, OBJ_VAL(str));
+        table_set(ctx, vm, &vm->strings, str, NIL_VAL);
+        pop_stack(ctx, vm);
     }
 
     return (obj_t *)str;
@@ -1199,7 +1456,7 @@ static void pop_frame(ctx_t const *ctx, vm_t *vm)
     call_frame_t *frame = vm->frame;
     vm->frame = frame->next;
     --vm->frame_count;
-    FREE(frame);
+    FREE(call_frame_t, frame, 1);
 }
 
 static void init_vm(ctx_t const *ctx, vm_t *vm)
@@ -1209,38 +1466,47 @@ static void init_vm(ctx_t const *ctx, vm_t *vm)
     vm->gvar_map = make_table(ctx);
     vm->gvars = make_value_array(ctx);
     vm->objects = NULL;
+    vm->gray_cnt = vm->gray_cap = 0;
+    vm->gray_stack = NULL;
+    vm->bytes_allocated = 0;
+    vm->next_gc = 1 << 10;
+    vm->heap_cap = ctx->gpa->memory.len;
     vm->open_upvalues = NULL;
     vm->nctx.ctx = ctx;
     vm->nctx.vm = vm;
+    vm->compiler = NULL;
     define_native(ctx, vm, LITSTR("clock"), &clock_native, 0);
     define_native(ctx, vm, LITSTR("readch"), &readch_native, 0);
 }
 
 static void free_vm(ctx_t const *ctx, vm_t *vm)
 {
-    free_table(ctx, &vm->strings);
-    free_table(ctx, &vm->gvar_map);
-    free_value_array(ctx, &vm->gvars);
+    free_table(ctx, vm, &vm->strings);
+    free_table(ctx, vm, &vm->gvar_map);
+    free_value_array(ctx, vm, &vm->gvars);
     vm_stack_segment_t *seg = vm->stack.next;
     while (seg) {
         vm_stack_segment_t *tmp = seg;
         seg = seg->next;
-        FREE(tmp);
+        FREE(vm_stack_segment_t, tmp, 1);
     }
     while (vm->frame)
         pop_frame(ctx, vm);
 
-    // @FIXME
-    // botched refs in obj list, maybe mem corruption (=> inf loop here).
-    // Should be fixed by the point of GC.
-#if 0
+    usize before = vm->bytes_allocated;
+
     obj_t *obj = vm->objects;
     while (obj) {
         obj_t *next = obj->next;
-        free_object(ctx, obj);
+        free_object(ctx, vm, obj);
         obj = next;
     }
-#endif
+
+    GC_LOGF(
+        "    collected %U bytes (from %U to %U) at shutdown",
+        before - vm->bytes_allocated, before, vm->bytes_allocated);
+
+    gpa_deallocate(ctx, ctx->gpa, vm->gray_stack);
 }
 
 #define PUSH_STACK_SEG(vm_)                                             \
@@ -1259,7 +1525,7 @@ static void free_vm(ctx_t const *ctx, vm_t *vm)
         vm_stack_segment_t *old_seg_ = (vm_)->cur_stack_seg;      \
         (vm_)->cur_stack_seg = old_seg_->prev;                    \
         (vm_)->cur_stack_seg->next = NULL;                        \
-        FREE(old_seg_);                                           \
+        FREE(vm_stack_segment_t, old_seg_, 1);                    \
         (vm_)->stack_head =                                       \
             (vm_)->cur_stack_seg->values + VM_STACK_SEGMENT_SIZE; \
         --vm->stack_seg_count;                                    \
@@ -1418,7 +1684,7 @@ static b32 call_value(
             popn_stack(ctx, vm, arg_count + 1);
             push_stack(ctx, vm, res);
             if (args)
-                FREE(args);
+                FREE(value_t, args, arg_count);
             return true;
         }
         default:
@@ -1698,8 +1964,8 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
             if (IS_STRING(peek_stack(ctx, vm, 0)) &&
                 IS_STRING(peek_stack(ctx, vm, 1)))
             {
-                string_t b = AS_STRING(pop_stack(ctx, vm));
-                string_t a = AS_STRING(STACK_TOP(vm));
+                string_t a = AS_STRING(peek_stack(ctx, vm, 0));
+                string_t b = AS_STRING(peek_stack(ctx, vm, 1));
                 obj_string_t *c = ALLOCATE_STR((uint)(a.len + b.len), vm);
                 memcpy(c->p, a.p, a.len);
                 memcpy(c->p + a.len, b.p, b.len);
@@ -1708,11 +1974,12 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
                 obj_string_t *str =
                     table_find_string(ctx, &vm->strings, c->p, c->len, c->hash);
                 if (str) {
-                    FREE(c);
+                    free_object(ctx, vm, (obj_t *)c);
                 } else {
                     str = c;
-                    table_set(ctx, &vm->strings, str, NIL_VAL);
+                    table_set(ctx, vm, &vm->strings, str, NIL_VAL);
                 }
+                pop_stack(ctx, vm);
                 STACK_TOP(vm) = OBJ_VAL((obj_t *)str);
             } else if (
                 IS_NUMBER(peek_stack(ctx, vm, 0)) &&
@@ -2298,7 +2565,7 @@ static inline uint_array_t make_uint_array(ctx_t const *ctx)
 }
 
 static inline void write_uint_array(
-    ctx_t const *ctx, uint_array_t *arr, uint val)
+    ctx_t const *ctx, vm_t *vm, uint_array_t *arr, uint val)
 {
     if (arr->cap < arr->cnt + 1) {
         uint old_cap = arr->cap;
@@ -2309,15 +2576,14 @@ static inline void write_uint_array(
     arr->items[arr->cnt++] = val;
 }
 
-#if 0
-static inline void free_uint_array(ctx_t const *ctx, uint_array_t *arr)
+static inline void free_uint_array(
+    ctx_t const *ctx, vm_t *vm, uint_array_t *arr)
 {
     if (!arr || !arr->items)
         return;
-    FREE_ARRAY(int, arr->items, arr->cap);
+    FREE(int, arr->items, arr->cap);
     *arr = make_uint_array(ctx);
 }
-#endif
 
 typedef struct {
     table_t map;
@@ -2347,7 +2613,7 @@ static inline upvalue_array_t make_upvalue_array(ctx_t const *ctx)
 }
 
 static inline void write_upvalue_array(
-    ctx_t const *ctx, upvalue_array_t *arr, upvalue_t val)
+    ctx_t const *ctx, vm_t *vm, upvalue_array_t *arr, upvalue_t val)
 {
     if (arr->cap < arr->cnt + 1) {
         uint old_cap = arr->cap;
@@ -2358,11 +2624,12 @@ static inline void write_upvalue_array(
     arr->uvs[arr->cnt++] = val;
 }
 
-static inline void free_upvalue_array(ctx_t const *ctx, upvalue_array_t *arr)
+static inline void free_upvalue_array(
+    ctx_t const *ctx, vm_t *vm, upvalue_array_t *arr)
 {
     if (!arr || !arr->uvs)
         return;
-    FREE_ARRAY(upvalue_t, arr->uvs, arr->cap);
+    FREE(upvalue_t, arr->uvs, arr->cap);
     *arr = make_upvalue_array(ctx);
 }
 
@@ -2381,44 +2648,45 @@ typedef struct compiler {
 
 #define CUR_CHUNK(comp_) (&(comp_)->compiling_func->chunk)
 
-static void emit_byte(ctx_t const *ctx, u8 byte, compiler_t *compiler)
+static void emit_byte(ctx_t const *ctx, vm_t *vm, u8 byte, compiler_t *compiler)
 {
     write_chunk(
-        ctx, CUR_CHUNK(compiler), byte,
+        ctx, vm, CUR_CHUNK(compiler), byte,
         (uint)compiler->parser->prev.line);
 }
 
-static void emit_constant(ctx_t const *ctx, value_t val, compiler_t *compiler)
+static void emit_constant(ctx_t const *ctx, vm_t *vm, value_t val, compiler_t *compiler)
 {
     write_constant(
-        ctx, CUR_CHUNK(compiler),
+        ctx, vm, CUR_CHUNK(compiler),
         e_op_constant, e_op_constant_long, val,
         (uint)compiler->parser->prev.line);
 }
 
-static void emit_closure(ctx_t const *ctx, value_t val, compiler_t *compiler)
+static void emit_closure(
+    ctx_t const *ctx, vm_t *vm, value_t val, compiler_t *compiler)
 {
     write_constant(
-        ctx, CUR_CHUNK(compiler),
+        ctx, vm, CUR_CHUNK(compiler),
         e_op_closure, e_op_closure_long, val,
         (uint)compiler->parser->prev.line);
 }
 
 static void emit_id_ref(
-    ctx_t const *ctx,
+    ctx_t const *ctx, vm_t *vm,
     uint id, opcode_t op, opcode_t long_op,
     compiler_t *compiler)
 {
     write_id_ref(
-        ctx, CUR_CHUNK(compiler),
+        ctx, vm, CUR_CHUNK(compiler),
         op, long_op, id, (uint)compiler->parser->prev.line);
 }
 
-static uint emit_jump(ctx_t const *ctx, u8 opc, compiler_t *compiler)
+static uint emit_jump(ctx_t const *ctx, vm_t *vm, u8 opc, compiler_t *compiler)
 {
-    emit_byte(ctx, opc, compiler);
-    emit_byte(ctx, 0xFF, compiler);
-    emit_byte(ctx, 0xFF, compiler);
+    emit_byte(ctx, vm, opc, compiler);
+    emit_byte(ctx, vm, 0xFF, compiler);
+    emit_byte(ctx, vm, 0xFF, compiler);
     return CUR_CHUNK(compiler)->cnt - 2;
 }
 
@@ -2432,22 +2700,22 @@ static void patch_jump(ctx_t const *ctx, uint at, compiler_t *compiler)
     CUR_CHUNK(compiler)->code[at + 1] = (jump >> 8) & 0xFF;
 }
 
-static void emit_loop(ctx_t const *ctx, uint at, compiler_t *compiler)
+static void emit_loop(ctx_t const *ctx, vm_t *vm, uint at, compiler_t *compiler)
 {
-    emit_byte(ctx, e_op_loop, compiler);
+    emit_byte(ctx, vm, e_op_loop, compiler);
 
     int off = (int)CUR_CHUNK(compiler)->cnt - (int)at + 2;
     if (off > 0xFFFF)
         parser_error(ctx, "Too much code in loop body.", compiler->parser);
 
-    emit_byte(ctx, off & 0xFF, compiler);
-    emit_byte(ctx, (off >> 8) & 0xFF, compiler);
+    emit_byte(ctx, vm, off & 0xFF, compiler);
+    emit_byte(ctx, vm, (off >> 8) & 0xFF, compiler);
 }
 
-static void emit_return(ctx_t const *ctx, compiler_t *compiler)
+static void emit_return(ctx_t const *ctx, vm_t *vm, compiler_t *compiler)
 {
-    emit_byte(ctx, e_op_nil, compiler);
-    emit_byte(ctx, e_op_return, compiler);
+    emit_byte(ctx, vm, e_op_nil, compiler);
+    emit_byte(ctx, vm, e_op_return, compiler);
 }
 
 typedef struct {
@@ -2495,10 +2763,12 @@ static var_info_t register_gvar(
         (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
     value_t id;
     if (!table_get(ctx, &vm->gvar_map, str, &id)) {
-        write_value_array(ctx, &vm->gvars, VACANT_VAL_NAMED((obj_t *)str));
+        push_stack(ctx, vm, OBJ_VAL(str));
+        write_value_array(ctx, vm, &vm->gvars, VACANT_VAL_NAMED((obj_t *)str));
         var_info_t vi = {vm->gvars.cnt - 1, is_const, false};
         id = NUMBER_VAL(pack_var_info(ctx, vi));
-        table_set(ctx, &vm->gvar_map, str, id);
+        table_set(ctx, vm, &vm->gvar_map, str, id);
+        pop_stack(ctx, vm);
     }
 
     f64 packed = AS_NUMBER(id);
@@ -2516,7 +2786,7 @@ static uint register_lvar(
     uint id = scope_lvar_table->cnt;
     var_info_t vi = {id + (uint)scope->cnt_in_prev_blocks, is_const, false};
     value_t lvar_id = NUMBER_VAL(pack_var_info(ctx, vi));
-    if (!table_set(ctx, scope_lvar_table, str, lvar_id)) {
+    if (!table_set(ctx, vm, scope_lvar_table, str, lvar_id)) {
         parser_error(
             ctx,
             "Local variable redeclaration in same scope.",
@@ -2566,8 +2836,8 @@ static var_info_t resolve_lvar(
             } else if (capture_on_found && !vi.is_captured) {
                 vi.is_captured = true;
                 value_t new_val = NUMBER_VAL(pack_var_info(ctx, vi));
-                table_set(ctx, &scope->map, str, new_val);
-                write_uint_array(ctx, &scope->captured_ids, vi.vid);
+                table_set(ctx, vm, &scope->map, str, new_val);
+                write_uint_array(ctx, vm, &scope->captured_ids, vi.vid);
             }
             return vi;
         }
@@ -2576,7 +2846,7 @@ static var_info_t resolve_lvar(
 }
 
 static var_info_t add_upvalue(
-    ctx_t const *ctx, compiler_t *compiler,
+    ctx_t const *ctx, vm_t *vm, compiler_t *compiler,
     uint vid, b32 is_local, b32 is_const)
 {
     (void)ctx;
@@ -2588,7 +2858,7 @@ static var_info_t add_upvalue(
             return (var_info_t){i, is_const, true};
     }
 
-    write_upvalue_array(ctx,
+    write_upvalue_array(ctx, vm,
         &compiler->upvalues, (upvalue_t){vid, is_local, is_const});
 
     return (var_info_t){
@@ -2603,11 +2873,11 @@ static var_info_t resolve_upvalue(
 
     var_info_t lres = resolve_lvar(ctx, compiler->enclosing, vm, name, true);
     if (lres.vid != (uint)(-1))
-        return add_upvalue(ctx, compiler, lres.vid, true, lres.is_const);
+        return add_upvalue(ctx, vm, compiler, lres.vid, true, lres.is_const);
 
     var_info_t ures = resolve_upvalue(ctx, compiler->enclosing, vm, name);
     if (ures.vid != (uint)(-1))
-        return add_upvalue(ctx, compiler, ures.vid, false, ures.is_const);
+        return add_upvalue(ctx, vm, compiler, ures.vid, false, ures.is_const);
 
     return (var_info_t){(uint)(-1), true, false};
 }
@@ -2615,7 +2885,8 @@ static var_info_t resolve_upvalue(
 static void define_native(
     ctx_t const *ctx, vm_t *vm, string_t name, native_fn_t fn, int arity)
 {
-    obj_t *oname = add_string_ref(ctx, vm, name.p, (uint)name.len);
+    obj_string_t *oname =
+        (obj_string_t *)add_string_ref(ctx, vm, name.p, (uint)name.len);
     push_stack(ctx, vm, OBJ_VAL(oname));
     obj_native_t *on = ALLOCATE_OBJ(obj_native_t, e_ot_native, vm);
     on->fn = fn;
@@ -2634,6 +2905,7 @@ static void begin_compiler(
 
     for (uint i = 0; i < ARRCNT(compiler->scope_lvars); ++i) {
         compiler->scope_lvars[i].map = make_table(ctx);
+        compiler->scope_lvars[i].captured_ids = make_uint_array(ctx);
         compiler->scope_lvars[i].cnt_in_prev_blocks = 0;
         compiler->scope_lvars[i].initialized_cnt = 0;
     }
@@ -2643,16 +2915,21 @@ static void begin_compiler(
     compiler->top_loop_start_mark = (uint)(-1);
     compiler->top_loop_break_mark = (uint)(-1);
 
+    vm->compiler = compiler;
+
     uint dummy = register_lvar(
         ctx, compiler, vm, (token_t){(token_type_t)0, "", 0, 0}, true);
     mark_lvar_initialzied(ctx, compiler, dummy);
 }
 
-static obj_function_t *end_compiler(ctx_t const *ctx, compiler_t *compiler)
+static obj_function_t *end_compiler(
+    ctx_t const *ctx, vm_t *vm, compiler_t *compiler)
 {
-    emit_return(ctx, compiler);
-    for (uint i = 0; i < ARRCNT(compiler->scope_lvars); ++i)
-        free_table(ctx, &compiler->scope_lvars[i].map);
+    emit_return(ctx, vm, compiler);
+    for (uint i = 0; i < ARRCNT(compiler->scope_lvars); ++i) {
+        free_table(ctx, vm, &compiler->scope_lvars[i].map);
+        free_uint_array(ctx, vm, &compiler->scope_lvars[i].captured_ids);
+    }
 
     obj_function_t *func = compiler->compiling_func;
 #if DEBUG_PRINT_CODE
@@ -2662,6 +2939,8 @@ static obj_function_t *end_compiler(ctx_t const *ctx, compiler_t *compiler)
             func->name ? OSTR_TO_STR(func->name) : LITSTR("<script>"));
     }
 #endif
+
+    vm->compiler = compiler->enclosing;
     
     return func;
 }
@@ -2702,7 +2981,7 @@ static void begin_scope(
     compiler->scope_lvars[compiler->current_scope_depth].type = type;
 }
 
-static void end_scope(ctx_t const *ctx, compiler_t *compiler)
+static void end_scope(ctx_t const *ctx, vm_t *vm, compiler_t *compiler)
 {
     (void)ctx;
     ASSERT(compiler->current_scope_depth);
@@ -2739,14 +3018,14 @@ static void end_scope(ctx_t const *ctx, compiler_t *compiler)
                     (uint)(next_id + scope->cnt_in_prev_blocks))
             {
                 if (pop_run == 1) {
-                    emit_byte(ctx, e_op_pop, compiler);
+                    emit_byte(ctx, vm, e_op_pop, compiler);
                 } else if (pop_run > 1) {
                     emit_id_ref(
-                        ctx, (uint)pop_run,
+                        ctx, vm, (uint)pop_run,
                         e_op_popn, e_op_popn_long, compiler);
                 }
                 pop_run = 0;
-                emit_byte(ctx, e_op_close_upvalue, compiler);
+                emit_byte(ctx, vm, e_op_close_upvalue, compiler);
                 ++next_cap_id;
             } else {
                 ++pop_run;
@@ -2754,17 +3033,17 @@ static void end_scope(ctx_t const *ctx, compiler_t *compiler)
             --next_id;
         }
         if (pop_run == 1) {
-            emit_byte(ctx, e_op_pop, compiler);
+            emit_byte(ctx, vm, e_op_pop, compiler);
         } else if (pop_run > 1) {
             emit_id_ref(
-                ctx, (uint)pop_run,
+                ctx, vm, (uint)pop_run,
                 e_op_popn, e_op_popn_long, compiler);
         }
     } else if (scope_lvar_table->cnt == 1) {
-        emit_byte(ctx, e_op_pop, compiler);
+        emit_byte(ctx, vm, e_op_pop, compiler);
     } else if (scope_lvar_table->cnt > 1) {
         emit_id_ref(
-            ctx, scope_lvar_table->cnt, e_op_popn, e_op_popn_long, compiler);
+            ctx, vm, scope_lvar_table->cnt, e_op_popn, e_op_popn_long, compiler);
     }
 
     if (compiler->top_loop_block == scope) {
@@ -2943,7 +3222,7 @@ static void compile_number(
         num += frac;
     }
 
-    emit_constant(ctx, NUMBER_VAL(num), compiler);
+    emit_constant(ctx, vm, NUMBER_VAL(num), compiler);
 }
 
 static void compile_string(
@@ -2953,7 +3232,7 @@ static void compile_string(
     obj_t *str = add_string_ref(
         ctx, vm, compiler->parser->prev.start + 1,
         (uint)(compiler->parser->prev.len - 2));
-    emit_constant(ctx, OBJ_VAL(str), compiler);
+    emit_constant(ctx, vm, OBJ_VAL(str), compiler);
 }
 
 static void compile_literal(
@@ -2963,13 +3242,13 @@ static void compile_literal(
     (void)can_assign;
     switch (compiler->parser->prev.type) {
     case e_tt_false:
-        emit_byte(ctx, e_op_false, compiler);
+        emit_byte(ctx, vm, e_op_false, compiler);
         break;
     case e_tt_nil:
-        emit_byte(ctx, e_op_nil, compiler);
+        emit_byte(ctx, vm, e_op_nil, compiler);
         break;
     case e_tt_true:
-        emit_byte(ctx, e_op_true, compiler);
+        emit_byte(ctx, vm, e_op_true, compiler);
         break;
     default:
         return;
@@ -3011,9 +3290,9 @@ static void compile_named_variable(
             return;
         }
         compile_expression(ctx, compiler, vm);
-        emit_id_ref(ctx, resolved.vid, set_op, set_lop, compiler);
+        emit_id_ref(ctx, vm, resolved.vid, set_op, set_lop, compiler);
     } else {
-        emit_id_ref(ctx, resolved.vid, get_op, get_lop, compiler);
+        emit_id_ref(ctx, vm, resolved.vid, get_op, get_lop, compiler);
     }
 }
 
@@ -3060,7 +3339,7 @@ static void compile_call(
 {
     (void)can_assign;
     uint arg_count = compile_arg_list(ctx, compiler, vm);
-    emit_id_ref(ctx, arg_count, e_op_call, e_op_call_long, compiler);
+    emit_id_ref(ctx, vm, arg_count, e_op_call, e_op_call_long, compiler);
 }
 
 static void compile_unary(
@@ -3073,10 +3352,10 @@ static void compile_unary(
 
     switch (tt) {
     case e_tt_bang:
-        emit_byte(ctx, e_op_not, compiler);
+        emit_byte(ctx, vm, e_op_not, compiler);
         break;
     case e_tt_minus:
-        emit_byte(ctx, e_op_negate, compiler);
+        emit_byte(ctx, vm, e_op_negate, compiler);
         break;
     default:
         ASSERT(0);
@@ -3094,34 +3373,34 @@ static void compile_binary(
 
     switch (tt) {
     case e_tt_bang_equal:
-        emit_byte(ctx, e_op_neq, compiler);
+        emit_byte(ctx, vm, e_op_neq, compiler);
         break;
     case e_tt_equal_equal:
-        emit_byte(ctx, e_op_eq, compiler);
+        emit_byte(ctx, vm, e_op_eq, compiler);
         break;
     case e_tt_greater:
-        emit_byte(ctx, e_op_gt, compiler);
+        emit_byte(ctx, vm, e_op_gt, compiler);
         break;
     case e_tt_greater_equal:
-        emit_byte(ctx, e_op_ge, compiler);
+        emit_byte(ctx, vm, e_op_ge, compiler);
         break;
     case e_tt_less:
-        emit_byte(ctx, e_op_lt, compiler);
+        emit_byte(ctx, vm, e_op_lt, compiler);
         break;
     case e_tt_less_equal:
-        emit_byte(ctx, e_op_le, compiler);
+        emit_byte(ctx, vm, e_op_le, compiler);
         break;
     case e_tt_plus:
-        emit_byte(ctx, e_op_add, compiler);
+        emit_byte(ctx, vm, e_op_add, compiler);
         break;
     case e_tt_minus:
-        emit_byte(ctx, e_op_subtract, compiler);
+        emit_byte(ctx, vm, e_op_subtract, compiler);
         break;
     case e_tt_star:
-        emit_byte(ctx, e_op_multiply, compiler);
+        emit_byte(ctx, vm, e_op_multiply, compiler);
         break;
     case e_tt_slash:
-        emit_byte(ctx, e_op_divide, compiler);
+        emit_byte(ctx, vm, e_op_divide, compiler);
         break;
     default:
         ASSERT(0);
@@ -3137,17 +3416,17 @@ static void compile_ternary(
     ASSERT(tt == e_tt_question);
     parse_rule_t const *rule = get_rule(ctx, tt);
 
-    uint lhs_jump = emit_jump(ctx, e_op_jump_if_false, compiler);
-    emit_byte(ctx, e_op_pop, compiler);
+    uint lhs_jump = emit_jump(ctx, vm, e_op_jump_if_false, compiler);
+    emit_byte(ctx, vm, e_op_pop, compiler);
 
     compile_precedence(ctx, (precedence_t)(rule->precedence + 1), compiler, vm);
-    uint end_jump = emit_jump(ctx, e_op_jump, compiler);
+    uint end_jump = emit_jump(ctx, vm, e_op_jump, compiler);
 
     parser_consume(
         ctx, e_tt_colon, "Expected ':' after choice lhs.", compiler->parser);
 
     patch_jump(ctx, lhs_jump, compiler);
-    emit_byte(ctx, e_op_pop, compiler);
+    emit_byte(ctx, vm, e_op_pop, compiler);
 
     compile_precedence(ctx, (precedence_t)(rule->precedence + 1), compiler, vm);
 
@@ -3158,8 +3437,8 @@ static void compile_and(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
 {
     (void)can_assign;
-    uint end_jump = emit_jump(ctx, e_op_jump_if_false, compiler);
-    emit_byte(ctx, e_op_pop, compiler);
+    uint end_jump = emit_jump(ctx, vm, e_op_jump_if_false, compiler);
+    emit_byte(ctx, vm, e_op_pop, compiler);
 
     compile_precedence(ctx, e_prec_and, compiler, vm);
 
@@ -3170,8 +3449,8 @@ static void compile_or(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
 {
     (void)can_assign;
-    uint end_jump = emit_jump(ctx, e_op_jump_if_true, compiler);
-    emit_byte(ctx, e_op_pop, compiler);
+    uint end_jump = emit_jump(ctx, vm, e_op_jump_if_true, compiler);
+    emit_byte(ctx, vm, e_op_pop, compiler);
 
     compile_precedence(ctx, e_prec_or, compiler, vm);
 
@@ -3220,18 +3499,18 @@ static void compile_fun(
         "Expected '{' before function body", push_compiler->parser);
     compile_block(ctx, push_compiler, vm);
 
-    obj_function_t *func = end_compiler(ctx, push_compiler);
+    obj_function_t *func = end_compiler(ctx, vm, push_compiler);
 
     if (func->upvalue_cnt) {
-        emit_closure(ctx, OBJ_VAL(func), compiler);
+        emit_closure(ctx, vm, OBJ_VAL(func), compiler);
 
         for (uint i = 0; i < func->upvalue_cnt; ++i) {
             uint vid = push_compiler->upvalues.uvs[i].vid;
             u8 flags = 0;
             flags |= push_compiler->upvalues.uvs[i].is_local ? f_uv_local : 0;
             flags |= vid > 255 ? f_uv_long : 0;
-            emit_byte(ctx, flags, compiler);
-            emit_byte(ctx, (u8)(vid & 0xFF), compiler);
+            emit_byte(ctx, vm, flags, compiler);
+            emit_byte(ctx, vm, (u8)(vid & 0xFF), compiler);
             if (flags & f_uv_long) {
                 if (vid > 16777215) {
                     parser_error(
@@ -3239,17 +3518,17 @@ static void compile_fun(
                             compiler->parser);
                     return;
                 }
-                emit_byte(ctx, (u8)((vid >> 8) & 0xFF), compiler);
-                emit_byte(ctx, (u8)((vid >> 16) & 0xFF), compiler);
+                emit_byte(ctx, vm, (u8)((vid >> 8) & 0xFF), compiler);
+                emit_byte(ctx, vm, (u8)((vid >> 16) & 0xFF), compiler);
             }
         }
 
-        free_upvalue_array(ctx, &push_compiler->upvalues);
+        free_upvalue_array(ctx, vm, &push_compiler->upvalues);
     } else {
-        emit_constant(ctx, OBJ_VAL(func), compiler);
+        emit_constant(ctx, vm, OBJ_VAL(func), compiler);
     }
 
-    FREE(push_compiler);
+    FREE(compiler_t, push_compiler, 1);
 }
 
 static uint compile_new_variable(
@@ -3272,7 +3551,7 @@ static void compile_expr_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     parser_consume(
         ctx, e_tt_semicolon, "Expected ';' after expression.",
         compiler->parser);
-    emit_byte(ctx, e_op_pop, compiler);
+    emit_byte(ctx, vm, e_op_pop, compiler);
 }
 
 static void compile_block(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
@@ -3311,11 +3590,11 @@ static void compile_break(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     while (scopes_to_pop--)
         lvars += (s++)->map.cnt;
     if (lvars == 1)
-        emit_byte(ctx, e_op_pop, compiler);
+        emit_byte(ctx, vm, e_op_pop, compiler);
     else if (lvars > 1)
-        emit_id_ref(ctx, lvars, e_op_popn, e_op_popn_long, compiler);
+        emit_id_ref(ctx, vm, lvars, e_op_popn, e_op_popn_long, compiler);
 
-    emit_loop(ctx, compiler->top_loop_block->loop_break_mark, compiler);
+    emit_loop(ctx, vm, compiler->top_loop_block->loop_break_mark, compiler);
 }
 
 static void compile_continue(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
@@ -3336,11 +3615,11 @@ static void compile_continue(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     while (scopes_to_pop--)
         lvars += (s++)->map.cnt;
     if (lvars == 1)
-        emit_byte(ctx, e_op_pop, compiler);
+        emit_byte(ctx, vm, e_op_pop, compiler);
     else if (lvars > 1)
-        emit_id_ref(ctx, lvars, e_op_popn, e_op_popn_long, compiler);
+        emit_id_ref(ctx, vm, lvars, e_op_popn, e_op_popn_long, compiler);
 
-    emit_loop(ctx, compiler->top_loop_block->loop_start_mark, compiler);
+    emit_loop(ctx, vm, compiler->top_loop_block->loop_start_mark, compiler);
 }
 
 static void compile_return(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
@@ -3352,12 +3631,12 @@ static void compile_return(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     }
 
     if (parser_match(ctx, e_tt_semicolon, compiler->parser)) {
-        emit_return(ctx, compiler);
+        emit_return(ctx, vm, compiler);
     } else {
         compile_expression(ctx, compiler, vm);
         parser_consume(ctx, e_tt_semicolon,
             "Expected ';' after return value.", compiler->parser);
-        emit_byte(ctx, e_op_return, compiler);
+        emit_byte(ctx, vm, e_op_return, compiler);
     }
 }
 
@@ -3371,9 +3650,9 @@ static void compile_switch(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     parser_consume(ctx, e_tt_left_brace,
         "Expected '{' before switch body.", compiler->parser);
 
-    uint init_jump = emit_jump(ctx, e_op_jump, compiler);
+    uint init_jump = emit_jump(ctx, vm, e_op_jump, compiler);
     uint break_counter = CUR_CHUNK(compiler)->cnt;
-    uint break_jump = emit_jump(ctx, e_op_jump, compiler);
+    uint break_jump = emit_jump(ctx, vm, e_op_jump, compiler);
 
     uint case_jump = init_jump;
 
@@ -3381,11 +3660,11 @@ static void compile_switch(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         do {
             patch_jump(ctx, case_jump, compiler);
             if (case_jump != init_jump)
-                emit_byte(ctx, e_op_pop, compiler);
+                emit_byte(ctx, vm, e_op_pop, compiler);
             compile_expression(ctx, compiler, vm);
-            emit_byte(ctx, e_op_eq_preserve_lhs, compiler);
-            case_jump = emit_jump(ctx, e_op_jump_if_false, compiler);
-            emit_byte(ctx, e_op_pop, compiler);
+            emit_byte(ctx, vm, e_op_eq_preserve_lhs, compiler);
+            case_jump = emit_jump(ctx, vm, e_op_jump_if_false, compiler);
+            emit_byte(ctx, vm, e_op_pop, compiler);
             parser_consume(ctx, e_tt_colon,
                 "Expected ':' after case mark.", compiler->parser);
             while (
@@ -3395,14 +3674,14 @@ static void compile_switch(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
             {
                 compile_stmt(ctx, compiler, vm);
             }
-            emit_loop(ctx, break_counter, compiler);
+            emit_loop(ctx, vm, break_counter, compiler);
         } while (parser_match(ctx, e_tt_case, compiler->parser));
     }
 
     if (parser_match(ctx, e_tt_default, compiler->parser)) {
         patch_jump(ctx, case_jump, compiler);
         if (case_jump != init_jump)
-            emit_byte(ctx, e_op_pop, compiler);
+            emit_byte(ctx, vm, e_op_pop, compiler);
         case_jump = (uint)(-1);
         parser_consume(ctx, e_tt_colon,
             "Expected ':' after default mark.", compiler->parser);
@@ -3410,7 +3689,7 @@ static void compile_switch(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
             compile_stmt(ctx, compiler, vm);
     } else if (case_jump != init_jump) {
         patch_jump(ctx, case_jump, compiler);
-        emit_byte(ctx, e_op_pop, compiler);
+        emit_byte(ctx, vm, e_op_pop, compiler);
     }
 
     parser_consume(ctx, e_tt_right_brace,
@@ -3419,7 +3698,7 @@ static void compile_switch(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     patch_jump(ctx, break_jump, compiler);
     if (case_jump == init_jump)
         patch_jump(ctx, init_jump, compiler);
-    emit_byte(ctx, e_op_pop, compiler);
+    emit_byte(ctx, vm, e_op_pop, compiler);
 }
 
 static void compile_for(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
@@ -3453,10 +3732,10 @@ static void compile_for(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
                 .cnt_in_prev_blocks;
     }
 
-    uint start_jump = emit_jump(ctx, e_op_jump, compiler);
+    uint start_jump = emit_jump(ctx, vm, e_op_jump, compiler);
 
     uint break_counter = CUR_CHUNK(compiler)->cnt;
-    uint break_jump = emit_jump(ctx, e_op_jump, compiler);
+    uint break_jump = emit_jump(ctx, vm, e_op_jump, compiler);
 
     uint loop_start = CUR_CHUNK(compiler)->cnt;
     patch_jump(ctx, start_jump, compiler);
@@ -3467,19 +3746,19 @@ static void compile_for(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         compile_expression(ctx, compiler, vm);
         parser_consume(ctx, e_tt_semicolon,
             "Expected ';' after for condition.", compiler->parser);
-        exit_jump = emit_jump(ctx, e_op_jump_if_false, compiler);
-        emit_byte(ctx, e_op_pop, compiler);
+        exit_jump = emit_jump(ctx, vm, e_op_jump_if_false, compiler);
+        emit_byte(ctx, vm, e_op_pop, compiler);
     }
 
     if (!parser_match(ctx, e_tt_right_paren, compiler->parser)) {
-        uint body_jump = emit_jump(ctx, e_op_jump, compiler);
+        uint body_jump = emit_jump(ctx, vm, e_op_jump, compiler);
         uint increment_start = CUR_CHUNK(compiler)->cnt;
         compile_expression(ctx, compiler, vm);
-        emit_byte(ctx, e_op_pop, compiler);
+        emit_byte(ctx, vm, e_op_pop, compiler);
         parser_consume(ctx, e_tt_right_paren,
             "Expected ')' after for clause.", compiler->parser);
 
-        emit_loop(ctx, loop_start, compiler);
+        emit_loop(ctx, vm, loop_start, compiler);
         loop_start = increment_start;
         patch_jump(ctx, body_jump, compiler);
     }
@@ -3492,9 +3771,9 @@ static void compile_for(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
             uint vid =
                 register_lvar(ctx, compiler, vm, loop_var, loop_var_is_const);
             mark_lvar_initialzied(ctx, compiler, vid);
-            emit_id_ref(ctx,
+            emit_id_ref(ctx, vm,
                 loop_var_vid, e_op_get_loc, e_op_get_loc_long, compiler);
-            emit_id_ref(ctx,
+            emit_id_ref(ctx, vm,
                 vid + (uint)compiler
                     ->scope_lvars[compiler->current_scope_depth]
                     .cnt_in_prev_blocks,
@@ -3502,28 +3781,28 @@ static void compile_for(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         }
         compile_stmt(ctx, compiler, vm);
         if (loop_var.type == e_tt_identifier)
-            end_scope(ctx, compiler);
+            end_scope(ctx, vm, compiler);
     }
     compiler->top_loop_start_mark = (uint)(-1);
     compiler->top_loop_break_mark = (uint)(-1);
 
-    emit_loop(ctx, loop_start, compiler);
+    emit_loop(ctx, vm, loop_start, compiler);
 
     if (exit_jump != (uint)(-1)) {
         patch_jump(ctx, exit_jump, compiler);
-        emit_byte(ctx, e_op_pop, compiler);
+        emit_byte(ctx, vm, e_op_pop, compiler);
     }
     patch_jump(ctx, break_jump, compiler);
 
-    end_scope(ctx, compiler);
+    end_scope(ctx, vm, compiler);
 }
 
 static void compile_while(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
-    uint start_jump = emit_jump(ctx, e_op_jump, compiler);
+    uint start_jump = emit_jump(ctx, vm, e_op_jump, compiler);
 
     uint break_counter = CUR_CHUNK(compiler)->cnt;
-    uint break_jump = emit_jump(ctx, e_op_jump, compiler);
+    uint break_jump = emit_jump(ctx, vm, e_op_jump, compiler);
 
     uint loop_start = CUR_CHUNK(compiler)->cnt;
     patch_jump(ctx, start_jump, compiler);
@@ -3534,8 +3813,8 @@ static void compile_while(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     parser_consume(ctx, e_tt_right_paren,
         "Expected ')' after condition.", compiler->parser);
 
-    uint exit_jump = emit_jump(ctx, e_op_jump_if_false, compiler);
-    emit_byte(ctx, e_op_pop, compiler);
+    uint exit_jump = emit_jump(ctx, vm, e_op_jump_if_false, compiler);
+    emit_byte(ctx, vm, e_op_pop, compiler);
 
     compiler->top_loop_start_mark = loop_start;
     compiler->top_loop_break_mark = break_counter;
@@ -3543,10 +3822,10 @@ static void compile_while(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     compiler->top_loop_start_mark = (uint)(-1);
     compiler->top_loop_break_mark = (uint)(-1);
 
-    emit_loop(ctx, loop_start, compiler);
+    emit_loop(ctx, vm, loop_start, compiler);
 
     patch_jump(ctx, exit_jump, compiler);
-    emit_byte(ctx, e_op_pop, compiler);
+    emit_byte(ctx, vm, e_op_pop, compiler);
     patch_jump(ctx, break_jump, compiler);
 }
 
@@ -3558,15 +3837,15 @@ static void compile_if(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     parser_consume(ctx, e_tt_right_paren,
         "Expected ')' after condition.", compiler->parser);
 
-    uint then_jump = emit_jump(ctx, e_op_jump_if_false, compiler);
-    emit_byte(ctx, e_op_pop, compiler);
+    uint then_jump = emit_jump(ctx, vm, e_op_jump_if_false, compiler);
+    emit_byte(ctx, vm, e_op_pop, compiler);
 
     compile_stmt(ctx, compiler, vm);
 
-    uint else_jump = emit_jump(ctx, e_op_jump, compiler);
+    uint else_jump = emit_jump(ctx, vm, e_op_jump, compiler);
 
     patch_jump(ctx, then_jump, compiler);
-    emit_byte(ctx, e_op_pop, compiler);
+    emit_byte(ctx, vm, e_op_pop, compiler);
 
     if (parser_match(ctx, e_tt_else, compiler->parser))
         compile_stmt(ctx, compiler, vm);
@@ -3579,7 +3858,7 @@ static void compile_print(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     compile_expression(ctx, compiler, vm);
     parser_consume(
         ctx, e_tt_semicolon, "Expected ';' after value.", compiler->parser);
-    emit_byte(ctx, e_op_print, compiler);
+    emit_byte(ctx, vm, e_op_print, compiler);
 }
 
 static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
@@ -3603,7 +3882,7 @@ static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     } else if (parser_match(ctx, e_tt_left_brace, compiler->parser)) {
         begin_scope(ctx, compiler, e_lst_block);
         compile_block(ctx, compiler, vm);
-        end_scope(ctx, compiler);
+        end_scope(ctx, vm, compiler);
     } else {
         compile_expr_stmt(ctx, compiler, vm);
     }
@@ -3619,7 +3898,7 @@ static void compile_func_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 
     if (compiler->current_scope_depth == 0) {
         emit_id_ref(
-            ctx, vid, e_op_define_glob, e_op_define_glob_long, compiler);
+            ctx, vm, vid, e_op_define_glob, e_op_define_glob_long, compiler);
     }
 }
 
@@ -3632,14 +3911,14 @@ static void compile_var_decl(
     if (parser_match(ctx, e_tt_equal, compiler->parser))
         compile_expression(ctx, compiler, vm);
     else
-        emit_byte(ctx, e_op_nil, compiler);
+        emit_byte(ctx, vm, e_op_nil, compiler);
 
     parser_consume(
         ctx, e_tt_semicolon, "Expected ';' after var decl.", compiler->parser);
 
     if (compiler->current_scope_depth == 0) {
         emit_id_ref(
-            ctx, vid, e_op_define_glob, e_op_define_glob_long, compiler);
+            ctx, vm, vid, e_op_define_glob, e_op_define_glob_long, compiler);
     } else {
         mark_lvar_initialzied(ctx, compiler, vid);
     }
@@ -3666,6 +3945,8 @@ static obj_function_t *compile(ctx_t const *ctx, string_t source, vm_t *vm)
     parser_t parser = {0};
     compiler_t compiler = {0};
 
+    vm->compiler = &compiler;
+
     parser.scanner = &scanner;
     compiler.parser = &parser;
     compiler.compiling_func = allocate_function(ctx, vm);
@@ -3677,7 +3958,7 @@ static obj_function_t *compile(ctx_t const *ctx, string_t source, vm_t *vm)
     while (!parser_match(ctx, e_tt_eof, &parser))
         compile_decl(ctx, &compiler, vm);
 
-    obj_function_t *func = end_compiler(ctx, &compiler);
+    obj_function_t *func = end_compiler(ctx, vm, &compiler);
     return parser.had_error ? NULL : func;
 }
 
@@ -3752,8 +4033,8 @@ static void repl(ctx_t const *ctx, vm_t *vm)
     while (lines_storage) {
         struct source_lines *tmp = lines_storage;
         lines_storage = lines_storage->next;
-        FREE(tmp->line.p);
-        FREE(tmp);
+        FREE(char, tmp->line.p, tmp->line.len + 1);
+        FREE(struct source_lines, tmp, 1);
     }
 }
 
@@ -3773,7 +4054,7 @@ static void run_file(ctx_t const *ctx, vm_t *vm, char const *fname)
     string_t source = {script, f.len};
     interp_result_t res = interpret(ctx, vm, source);
 
-    FREE(script);
+    FREE(char, script, f.len + 1);
 
     if (res == e_interp_compile_err)
         os_exit(ctx, 70);
@@ -3784,7 +4065,6 @@ static void run_file(ctx_t const *ctx, vm_t *vm, char const *fname)
 static int lox_main(ctx_t const *ctx)
 {
     (void)table_add_all;
-    (void)table_delete;
 
     vm_t vm = {0};
     init_vm(ctx, &vm);
