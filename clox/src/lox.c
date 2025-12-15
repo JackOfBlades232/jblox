@@ -158,10 +158,65 @@ static char const *const c_obj_type_names[] =
 };
 
 typedef struct obj {
-    obj_type_t type;
-    b32 is_marked;
-    struct obj *next;
+    u64 packed;
 } obj_t;
+
+static obj_t pack_obj_header(
+    ctx_t const *ctx, obj_type_t type, b32 is_marked, void const *next)
+{
+    (void)ctx;
+    u64 packed =
+        ((u64)((is_marked != 0) ? 1 : 0) << 63) |
+        ((u64)(type & 0x7FFF) << 48) |
+        ((u64)next & 0xFFFFFFFFFFFFlu);
+    return (obj_t){packed};
+}
+
+static b32 get_obj_is_marked(ctx_t const *ctx, obj_t header)
+{
+    (void)ctx;
+    return (b32)(header.packed >> 63);
+}
+
+static obj_type_t get_obj_type(ctx_t const *ctx, obj_t header)
+{
+    (void)ctx;
+    return (obj_type_t)((header.packed >> 48) & 0x7FFF);
+}
+
+static obj_t *get_next_obj(ctx_t const *ctx, obj_t header)
+{
+    (void)ctx;
+    return (obj_t *)(header.packed & 0xFFFFFFFFFFFFlu);
+}
+
+static void set_obj_is_marked(ctx_t const *ctx, obj_t *header, b32 val)
+{
+    (void)ctx;
+    header->packed &= (1lu << 63) - 1;
+    header->packed |= (u64)(val ? 1 : 0) << 63;
+}
+
+static void set_obj_type(ctx_t const *ctx, obj_t *header, obj_type_t type)
+{
+    (void)ctx;
+    header->packed &= (1lu << 63) | 0xFFFFFFFFFFFFlu;
+    header->packed |= ((u64)(type & 0x7FFF) << 48);
+}
+
+static void set_next_obj(ctx_t const *ctx, obj_t *header, obj_t *next)
+{
+    (void)ctx;
+    header->packed &= ~0xFFFFFFFFFFFFlu;
+    header->packed |= ((u64)next & 0xFFFFFFFFFFFFlu);
+}
+
+#define GET_OBJ_IS_MARKED(o_) get_obj_is_marked(ctx, *(o_))
+#define GET_OBJ_TYPE(o_) get_obj_type(ctx, *(o_))
+#define GET_NEXT_OBJ(o_) get_next_obj(ctx, *(o_))
+#define SET_OBJ_IS_MARKED(o_, v_) set_obj_is_marked(ctx, (o_), (v_))
+#define SET_OBJ_TYPE(o_, v_) set_obj_type(ctx, (o_), (v_))
+#define SET_NEXT_OBJ(o_, v_) set_next_obj(ctx, (o_), (v_))
 
 typedef enum {
     e_st_allocated,
@@ -213,7 +268,7 @@ typedef struct obj_upvalue {
 static inline b32 is_obj_type(ctx_t const *ctx, value_t val, obj_type_t ot)
 {
     (void)ctx;
-    return IS_OBJ(val) && AS_OBJ(val)->type == ot;
+    return IS_OBJ(val) && GET_OBJ_TYPE(AS_OBJ(val)) == ot;
 }
 
 #define OSTR_TO_STR(ostr_) ((string_t){(ostr_)->p, (u64)(ostr_)->len})
@@ -224,7 +279,7 @@ static inline string_t obj_as_string(ctx_t const *ctx, value_t val)
     return OSTR_TO_STR((obj_string_t *)AS_OBJ(val));
 }
 
-#define OBJ_TYPE(value_)      (AS_OBJ(value_)->type)
+#define OBJ_TYPE(value_)      (GET_OBJ_TYPE(AS_OBJ(value_)))
 
 #define IS_STRING(value_)     (is_obj_type(ctx, (value_), e_ot_string))
 #define IS_FUNCTION(value_)   (is_obj_type(ctx, (value_), e_ot_function))
@@ -427,7 +482,7 @@ static void table_remove_white(ctx_t const *ctx, table_t *table)
 {
     for (uint i = 0; i < table->cap; ++i) {
         table_entry_t const *e = &table->entries[i];
-        if (e->key && !e->key->obj.is_marked)
+        if (e->key && !GET_OBJ_IS_MARKED(&e->key->obj))
             table_delete(ctx, table, e->key);
     }
 }
@@ -1094,9 +1149,7 @@ static inline obj_t *allocate_obj(
 {
     ASSERT(sz > sizeof(obj_t));
     obj_t *obj = (obj_t *)reallocate(ctx, vm, NULL, 0, sz);
-    obj->type = ot;
-    obj->is_marked = false;
-    obj->next = vm->objects;
+    *obj = pack_obj_header(ctx, ot, false, vm->objects);
     vm->objects = obj;
 
     GC_LOGF("%p allocate %U for %s", obj, sz, c_obj_type_names[ot]);
@@ -1154,13 +1207,13 @@ static inline obj_upvalue_t *allocate_upvalue(ctx_t const *ctx, vm_t *vm)
 
 static inline void free_object(ctx_t const *ctx, vm_t *vm, obj_t *obj)
 {
-    GC_LOGF_NONL("%p free type %s ", obj, c_obj_type_names[obj->type]);
+    GC_LOGF_NONL("%p free type %s ", obj, c_obj_type_names[GET_OBJ_TYPE(obj)]);
 #if DEBUG_LOG_GC
     disasm_value(ctx, OBJ_VAL(obj));
 #endif
     GC_LOG("");
 
-    switch (obj->type) {
+    switch (GET_OBJ_TYPE(obj)) {
     case e_ot_string: {
         obj_string_t *s = (obj_string_t *)obj;
         if (s->type == e_st_allocated)
@@ -1191,14 +1244,14 @@ static void mark_obj(ctx_t const *ctx, vm_t *vm, obj_t *obj)
 {
     if (!obj)
         return;
-    if (obj->is_marked)
+    if (GET_OBJ_IS_MARKED(obj))
         return;
     GC_LOGF_NONL("%p mark ", obj);
 #if DEBUG_LOG_GC
     disasm_value(ctx, OBJ_VAL(obj));
 #endif
     GC_LOG("");
-    obj->is_marked = true;
+    SET_OBJ_IS_MARKED(obj, true);
 
     // @TODO: don't add objs without outgoing refs (native, string)
 
@@ -1267,7 +1320,7 @@ static void blacken_obj(ctx_t const *ctx, vm_t *vm, obj_t *obj)
     disasm_value(ctx, OBJ_VAL(obj));
 #endif
     GC_LOG("");
-    switch (obj->type) {
+    switch (GET_OBJ_TYPE(obj)) {
     case e_ot_string:
     case e_ot_native:
         break;
@@ -1301,15 +1354,15 @@ static void sweep(ctx_t const *ctx, vm_t *vm)
     obj_t *prev = NULL;
     obj_t *obj = vm->objects;
     while (obj) {
-        if (obj->is_marked) {
-            obj->is_marked = false;
+        if (GET_OBJ_IS_MARKED(obj)) {
+            SET_OBJ_IS_MARKED(obj, false);
             prev = obj;
-            obj = obj->next;
+            obj = GET_NEXT_OBJ(obj);
         } else {
             obj_t *unreachable = obj;
-            obj = obj->next;
+            obj = GET_NEXT_OBJ(obj);
             if (prev)
-                prev->next = obj;
+                SET_NEXT_OBJ(prev, obj);
             else
                 vm->objects = obj;
             free_object(ctx, vm, unreachable);
@@ -1497,7 +1550,7 @@ static void free_vm(ctx_t const *ctx, vm_t *vm)
 
     obj_t *obj = vm->objects;
     while (obj) {
-        obj_t *next = obj->next;
+        obj_t *next = GET_NEXT_OBJ(obj);
         free_object(ctx, vm, obj);
         obj = next;
     }
@@ -4065,6 +4118,7 @@ static void run_file(ctx_t const *ctx, vm_t *vm, char const *fname)
 static int lox_main(ctx_t const *ctx)
 {
     (void)table_add_all;
+    (void)set_obj_type;
 
     vm_t vm = {0};
     init_vm(ctx, &vm);
