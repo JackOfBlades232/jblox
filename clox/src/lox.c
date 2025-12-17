@@ -162,17 +162,17 @@ typedef struct obj {
 } obj_t;
 
 static obj_t pack_obj_header(
-    ctx_t const *ctx, obj_type_t type, b32 is_marked, void const *next)
+    ctx_t const *ctx, obj_type_t type, b32 marked_bit, void const *next)
 {
     (void)ctx;
     u64 packed =
-        ((u64)((is_marked != 0) ? 1 : 0) << 63) |
+        ((u64)((marked_bit != 0) ? 1 : 0) << 63) |
         ((u64)(type & 0x7FFF) << 48) |
         ((u64)next & 0xFFFFFFFFFFFFlu);
     return (obj_t){packed};
 }
 
-static b32 get_obj_is_marked(ctx_t const *ctx, obj_t header)
+static b32 get_obj_marked_bit(ctx_t const *ctx, obj_t header)
 {
     (void)ctx;
     return (b32)(header.packed >> 63);
@@ -190,7 +190,7 @@ static obj_t *get_next_obj(ctx_t const *ctx, obj_t header)
     return (obj_t *)(header.packed & 0xFFFFFFFFFFFFlu);
 }
 
-static void set_obj_is_marked(ctx_t const *ctx, obj_t *header, b32 val)
+static void set_obj_marked_bit(ctx_t const *ctx, obj_t *header, b32 val)
 {
     (void)ctx;
     header->packed &= (1lu << 63) - 1;
@@ -211,10 +211,10 @@ static void set_next_obj(ctx_t const *ctx, obj_t *header, obj_t *next)
     header->packed |= ((u64)next & 0xFFFFFFFFFFFFlu);
 }
 
-#define GET_OBJ_IS_MARKED(o_) get_obj_is_marked(ctx, *(o_))
+#define GET_OBJ_MARKED_BIT(o_) get_obj_marked_bit(ctx, *(o_))
 #define GET_OBJ_TYPE(o_) get_obj_type(ctx, *(o_))
 #define GET_NEXT_OBJ(o_) get_next_obj(ctx, *(o_))
-#define SET_OBJ_IS_MARKED(o_, v_) set_obj_is_marked(ctx, (o_), (v_))
+#define SET_OBJ_MARKED_BIT(o_, v_) set_obj_marked_bit(ctx, (o_), (v_))
 #define SET_OBJ_TYPE(o_, v_) set_obj_type(ctx, (o_), (v_))
 #define SET_NEXT_OBJ(o_, v_) set_next_obj(ctx, (o_), (v_))
 
@@ -475,15 +475,6 @@ static obj_string_t *table_find_string(
         }
 
         idx = (idx + 1) % table->cap;
-    }
-}
-
-static void table_remove_white(ctx_t const *ctx, table_t *table)
-{
-    for (uint i = 0; i < table->cap; ++i) {
-        table_entry_t const *e = &table->entries[i];
-        if (e->key && !GET_OBJ_IS_MARKED(&e->key->obj))
-            table_delete(ctx, table, e->key);
     }
 }
 
@@ -1104,6 +1095,7 @@ typedef struct vm {
     value_array_t gvars;
     obj_upvalue_t *open_upvalues;
     obj_t *objects;
+    b32 current_marked_bit;
     uint gray_cnt, gray_cap;
     obj_t **gray_stack;
     usize bytes_allocated;
@@ -1126,7 +1118,6 @@ static inline void *reallocate(
         collect_garbage(ctx, vm);
     }
 
-
     if (new_size == 0) {
         gpa_deallocate(ctx, ctx->gpa, ptr);
         return NULL;
@@ -1143,6 +1134,17 @@ static inline void *reallocate(
     return res;
 }
 
+static void table_remove_white(ctx_t const *ctx, vm_t *vm, table_t *table)
+{
+    for (uint i = 0; i < table->cap; ++i) {
+        table_entry_t const *e = &table->entries[i];
+        if (e->key &&
+            GET_OBJ_MARKED_BIT(&e->key->obj) != vm->current_marked_bit)
+        {
+            table_delete(ctx, table, e->key);
+        }
+    }
+}
 
 static inline obj_t *allocate_obj(
     ctx_t const *ctx, vm_t *vm, usize sz, obj_type_t ot)
@@ -1244,14 +1246,14 @@ static void mark_obj(ctx_t const *ctx, vm_t *vm, obj_t *obj)
 {
     if (!obj)
         return;
-    if (GET_OBJ_IS_MARKED(obj))
+    if (GET_OBJ_MARKED_BIT(obj) == vm->current_marked_bit)
         return;
     GC_LOGF_NONL("%p mark ", obj);
 #if DEBUG_LOG_GC
     disasm_value(ctx, OBJ_VAL(obj));
 #endif
     GC_LOG("");
-    SET_OBJ_IS_MARKED(obj, true);
+    SET_OBJ_MARKED_BIT(obj, vm->current_marked_bit);
 
     // @TODO: don't add objs without outgoing refs (native, string)
 
@@ -1354,8 +1356,7 @@ static void sweep(ctx_t const *ctx, vm_t *vm)
     obj_t *prev = NULL;
     obj_t *obj = vm->objects;
     while (obj) {
-        if (GET_OBJ_IS_MARKED(obj)) {
-            SET_OBJ_IS_MARKED(obj, false);
+        if (GET_OBJ_MARKED_BIT(obj) == vm->current_marked_bit) {
             prev = obj;
             obj = GET_NEXT_OBJ(obj);
         } else {
@@ -1376,19 +1377,16 @@ static void collect_garbage(ctx_t const *ctx, vm_t *vm)
     if (vm->compiler)
         return;
 
-    static int gc_stack = 0;
-
-    ASSERT(gc_stack == 0);
-    ++gc_stack;
-
     GC_LOG("-- gc begin --");
     usize before = vm->bytes_allocated;
     (void)before;
 
     mark_roots(ctx, vm);
     trace_refs(ctx, vm);
-    table_remove_white(ctx, &vm->strings);
+    table_remove_white(ctx, vm, &vm->strings);
     sweep(ctx, vm);
+
+    vm->current_marked_bit = vm->current_marked_bit == 1 ? 0 : 1;
 
     vm->next_gc = MIN(
         GC_HEAP_GROWTH_FACTOR * vm->bytes_allocated,
@@ -1399,8 +1397,6 @@ static void collect_garbage(ctx_t const *ctx, vm_t *vm)
         "    collected %U bytes (from %U to %U) next at %U",
         before - vm->bytes_allocated, before, vm->bytes_allocated,
         vm->next_gc);
-
-    --gc_stack;
 }
 
 static inline obj_t *add_string_ref(
@@ -1519,6 +1515,7 @@ static void init_vm(ctx_t const *ctx, vm_t *vm)
     vm->gvar_map = make_table(ctx);
     vm->gvars = make_value_array(ctx);
     vm->objects = NULL;
+    vm->current_marked_bit = 1;
     vm->gray_cnt = vm->gray_cap = 0;
     vm->gray_stack = NULL;
     vm->bytes_allocated = 0;
