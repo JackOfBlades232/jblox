@@ -5,5 +5,6 @@ struct gpa;
 
 typedef struct {
     struct os_process_state *os;
-    struct gpa *gpa;
+    struct gpa *managed_heap;
+    struct gpa *unmanaged_heap;
 } ctx_t;

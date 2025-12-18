@@ -1081,19 +1081,22 @@ static value_t readch_native(int arg_count, value_t *args, native_ctx_t *nctx)
     return NUMBER_VAL((f64)res);
 }
 
-typedef struct compiler compiler_t;
-
 typedef struct vm {
     vm_stack_segment_t stack;
     vm_stack_segment_t *cur_stack_seg; 
     uint stack_seg_count;
     value_t *stack_head;
+
     call_frame_t *frame;
     uint frame_count;
+
     table_t strings;
+
     table_t gvar_map;
     value_array_t gvars;
+
     obj_upvalue_t *open_upvalues;
+
     obj_t *objects;
     b32 current_marked_bit;
     uint gray_cnt, gray_cap;
@@ -1101,8 +1104,9 @@ typedef struct vm {
     usize bytes_allocated;
     usize next_gc;
     usize heap_cap;
+    b32 gc_locked;
+
     native_ctx_t nctx;
-    compiler_t *compiler;    
 } vm_t;
 
 static inline void *reallocate(
@@ -1119,16 +1123,16 @@ static inline void *reallocate(
     }
 
     if (new_size == 0) {
-        gpa_deallocate(ctx, ctx->gpa, ptr);
+        gpa_deallocate(ctx, ctx->unmanaged_heap, ptr);
         return NULL;
     }
 
-    void *res = gpa_allocate(ctx, ctx->gpa, new_size);
+    void *res = gpa_allocate(ctx, ctx->unmanaged_heap, new_size);
     VERIFY(res, "Out of memory.");
 
     if (old_size) {
         memcpy(res, ptr, MIN(old_size, new_size));
-        gpa_deallocate(ctx, ctx->gpa, ptr);
+        gpa_deallocate(ctx, ctx->unmanaged_heap, ptr);
     }
 
     return res;
@@ -1261,11 +1265,11 @@ static void mark_obj(ctx_t const *ctx, vm_t *vm, obj_t *obj)
         vm->gray_cap = GROW_CAP(vm->gray_cap);
         obj_t **prev = vm->gray_stack;
         vm->gray_stack = (obj_t **)gpa_allocate(
-            ctx, ctx->gpa, vm->gray_cap * sizeof(*vm->gray_stack));
+            ctx, ctx->unmanaged_heap, vm->gray_cap * sizeof(*vm->gray_stack));
         VERIFY(vm->gray_stack, "Out of memory.");
         memcpy(vm->gray_stack, prev, vm->gray_cnt * sizeof(*vm->gray_stack));
         if (prev)
-            gpa_deallocate(ctx, ctx->gpa, prev);
+            gpa_deallocate(ctx, ctx->unmanaged_heap, prev);
     }
 
     vm->gray_stack[vm->gray_cnt++] = obj;
@@ -1374,7 +1378,7 @@ static void sweep(ctx_t const *ctx, vm_t *vm)
 
 static void collect_garbage(ctx_t const *ctx, vm_t *vm)
 {
-    if (vm->compiler)
+    if (vm->gc_locked)
         return;
 
     GC_LOG("-- gc begin --");
@@ -1520,13 +1524,15 @@ static void init_vm(ctx_t const *ctx, vm_t *vm)
     vm->gray_stack = NULL;
     vm->bytes_allocated = 0;
     vm->next_gc = 1 << 10;
-    vm->heap_cap = ctx->gpa->memory.len;
+    vm->heap_cap = ctx->unmanaged_heap->memory.len;
     vm->open_upvalues = NULL;
     vm->nctx.ctx = ctx;
     vm->nctx.vm = vm;
-    vm->compiler = NULL;
+
+    vm->gc_locked = true;
     define_native(ctx, vm, LITSTR("clock"), &clock_native, 0);
     define_native(ctx, vm, LITSTR("readch"), &readch_native, 0);
+    vm->gc_locked = false;
 }
 
 static void free_vm(ctx_t const *ctx, vm_t *vm)
@@ -1556,7 +1562,7 @@ static void free_vm(ctx_t const *ctx, vm_t *vm)
         "    collected %U bytes (from %U to %U) at shutdown",
         before - vm->bytes_allocated, before, vm->bytes_allocated);
 
-    gpa_deallocate(ctx, ctx->gpa, vm->gray_stack);
+    gpa_deallocate(ctx, ctx->unmanaged_heap, vm->gray_stack);
 }
 
 #define PUSH_STACK_SEG(vm_)                                             \
@@ -2639,7 +2645,9 @@ typedef struct {
     table_t map;
     int cnt_in_prev_blocks;
     uint initialized_cnt;
+
     uint_array_t captured_ids;
+
     lvar_scope_type_t type;
     uint loop_start_mark;
     uint loop_break_mark;
@@ -2686,11 +2694,15 @@ static inline void free_upvalue_array(
 typedef struct compiler {
     struct compiler *enclosing;
     parser_t *parser;
+
     obj_function_t *compiling_func;
     obj_function_type_t compiling_func_type;
+
     lvar_scope_t scope_lvars[256];
     int current_scope_depth;
+
     upvalue_array_t upvalues;
+
     lvar_scope_t *top_loop_block;
     uint top_loop_start_mark;
     uint top_loop_break_mark;
@@ -2965,8 +2977,6 @@ static void begin_compiler(
     compiler->top_loop_start_mark = (uint)(-1);
     compiler->top_loop_break_mark = (uint)(-1);
 
-    vm->compiler = compiler;
-
     uint dummy = register_lvar(
         ctx, compiler, vm, (token_t){(token_type_t)0, "", 0, 0}, true);
     mark_lvar_initialzied(ctx, compiler, dummy);
@@ -2989,8 +2999,6 @@ static obj_function_t *end_compiler(
             func->name ? OSTR_TO_STR(func->name) : LITSTR("<script>"));
     }
 #endif
-
-    vm->compiler = compiler->enclosing;
     
     return func;
 }
@@ -3991,11 +3999,11 @@ static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 
 static obj_function_t *compile(ctx_t const *ctx, string_t source, vm_t *vm)
 {
+    vm->gc_locked = true;
+
     scanner_t scanner = {source.p, source.p, source.p + source.len, 1}; 
     parser_t parser = {0};
     compiler_t compiler = {0};
-
-    vm->compiler = &compiler;
 
     parser.scanner = &scanner;
     compiler.parser = &parser;
@@ -4009,6 +4017,10 @@ static obj_function_t *compile(ctx_t const *ctx, string_t source, vm_t *vm)
         compile_decl(ctx, &compiler, vm);
 
     obj_function_t *func = end_compiler(ctx, vm, &compiler);
+
+    vm->gc_locked = false;
+    collect_garbage(ctx, vm);
+
     return parser.had_error ? NULL : func;
 }
 

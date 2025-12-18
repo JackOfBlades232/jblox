@@ -93,12 +93,21 @@ static inline void gpa_deallocate(ctx_t const *ctx, gpa_t *gpa, void const *p)
     gpa->head = free;
 }
 
+static inline void gpa_reset(ctx_t const *ctx, gpa_t *gpa)
+{
+    (void)ctx;
+    gpa_free_header_t *free = (gpa_free_header_t *)gpa->memory.data;
+    free->size = gpa->memory.len / GPA_ALIGNMENT;
+    free->next = NULL;
+    gpa->head = free;
+}
+
 static inline gpa_t gpa_make(ctx_t const *ctx, buffer_t mem)
 {
     ASSERT(mem.len >= GPA_ALIGNMENT);
     ASSERT(mem.len % GPA_ALIGNMENT == 0);
-    gpa_free_header_t *free = (gpa_free_header_t *)mem.data;
-    free->size = mem.len / GPA_ALIGNMENT;
-    free->next = NULL;
-    return (gpa_t){mem, free};
+    gpa_t gpa = {mem, NULL};
+    gpa_reset(ctx, &gpa);
+    return gpa;
 }
+

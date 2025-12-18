@@ -20,14 +20,22 @@ static int common_main(ctx_t const *ctx)
         buf_is_valid(ctx, &program_memory),
         "Failed to allocate program memory.");
 
-    gpa_t gpa = gpa_make(ctx, program_memory);
+    usize const managed_heap_size = program_memory.len / 2;
+    usize const unmanaged_heap_size = program_memory.len - managed_heap_size;
 
-    PUSH_CONTEXT(lox_ctx, ctx->os, &gpa);
+    gpa_t managed_heap = gpa_make(ctx, (buffer_t){
+        program_memory.data,
+        managed_heap_size,
+        program_memory.is_large_pages});
+    gpa_t unmanaged_heap = gpa_make(ctx, (buffer_t){
+        program_memory.data + managed_heap_size,
+        unmanaged_heap_size,
+        program_memory.is_large_pages});
+
+    PUSH_CONTEXT(lox_ctx, ctx->os, &managed_heap, &unmanaged_heap);
 
     return lox_main(&lox_ctx);
 }
-
-
 
 #if _WIN32
 
@@ -344,7 +352,7 @@ static void win32_main(void)
 
 #undef WIN32_BOOT_VERIFY
 
-    PUSH_CONTEXT(os_ctx, &os, NULL);
+    PUSH_CONTEXT(os_ctx, &os, NULL, NULL);
     SETUP_CONTEXT(os_ctx);
 
     VERIFY(os.sys.load_library_a =
@@ -447,7 +455,7 @@ static __attribute__((used)) int sys_main(int argc, char **argv)
 {
     os_process_state_t os = {0};
 
-    PUSH_CONTEXT(os_ctx, &os, NULL);
+    PUSH_CONTEXT(os_ctx, &os, NULL, NULL);
 
     os.argc = argc;
     os.argv = argv;
