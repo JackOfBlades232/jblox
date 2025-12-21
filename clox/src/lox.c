@@ -159,17 +159,19 @@ static char const *const c_obj_type_names[] =
 
 typedef struct obj {
     u64 packed;
+    void *prev_or_reloc;
 } obj_t;
 
 static obj_t pack_obj_header(
-    ctx_t const *ctx, obj_type_t type, b32 marked_bit, void const *next)
+    ctx_t const *ctx, obj_type_t type, b32 marked_bit,
+    void const *next, void *prev_or_reloc)
 {
     (void)ctx;
     u64 packed =
         ((u64)((marked_bit != 0) ? 1 : 0) << 63) |
         ((u64)(type & 0x7FFF) << 48) |
         ((u64)next & 0xFFFFFFFFFFFFlu);
-    return (obj_t){packed};
+    return (obj_t){packed, prev_or_reloc};
 }
 
 static b32 get_obj_marked_bit(ctx_t const *ctx, obj_t header)
@@ -214,9 +216,13 @@ static void set_next_obj(ctx_t const *ctx, obj_t *header, obj_t *next)
 #define GET_OBJ_MARKED_BIT(o_) get_obj_marked_bit(ctx, *(o_))
 #define GET_OBJ_TYPE(o_) get_obj_type(ctx, *(o_))
 #define GET_NEXT_OBJ(o_) get_next_obj(ctx, *(o_))
+#define GET_PREV_OBJ(o_) ((obj_t *)((o_)->prev_or_reloc))
+#define GET_RELOC_OBJ(o_) ((o_)->prev_or_reloc)
 #define SET_OBJ_MARKED_BIT(o_, v_) set_obj_marked_bit(ctx, (o_), (v_))
 #define SET_OBJ_TYPE(o_, v_) set_obj_type(ctx, (o_), (v_))
 #define SET_NEXT_OBJ(o_, v_) set_next_obj(ctx, (o_), (v_))
+#define SET_PREV_OBJ(o_, v_) ((o_)->prev_or_reloc = (v_))
+#define SET_RELOC_OBJ(o_, v_) ((o_)->prev_or_reloc = (v_))
 
 typedef enum {
     e_st_allocated,
@@ -1098,6 +1104,7 @@ typedef struct vm {
     obj_upvalue_t *open_upvalues;
 
     obj_t *objects;
+    obj_t *death_row;
     b32 current_marked_bit;
     uint gray_cnt, gray_cap;
     obj_t **gray_stack;
@@ -1155,7 +1162,10 @@ static inline obj_t *allocate_obj(
 {
     ASSERT(sz > sizeof(obj_t));
     obj_t *obj = (obj_t *)reallocate(ctx, vm, NULL, 0, sz);
-    *obj = pack_obj_header(ctx, ot, false, vm->objects);
+    *obj = pack_obj_header(
+        ctx, ot, vm->current_marked_bit == 1 ? 0 : 1, vm->objects, NULL);
+    if (vm->objects)
+        SET_PREV_OBJ(vm->objects, obj);
     vm->objects = obj;
 
     GC_LOGF("%p allocate %U for %s", obj, sz, c_obj_type_names[ot]);
@@ -1259,6 +1269,23 @@ static void mark_obj(ctx_t const *ctx, vm_t *vm, obj_t *obj)
     GC_LOG("");
     SET_OBJ_MARKED_BIT(obj, vm->current_marked_bit);
 
+    // Move to new objects list from death row
+    {
+        obj_t *prev = GET_PREV_OBJ(obj), *next = GET_NEXT_OBJ(obj);
+        if (next)
+            SET_PREV_OBJ(next, prev);
+        if (prev)
+            SET_NEXT_OBJ(prev, next);
+        else
+            vm->death_row = next;
+
+        SET_NEXT_OBJ(obj, vm->objects);
+        SET_PREV_OBJ(obj, NULL);
+        if (vm->objects)
+            SET_PREV_OBJ(vm->objects, obj);
+        vm->objects = obj;
+    }
+
     // @TODO: don't add objs without outgoing refs (native, string)
 
     if (vm->gray_cap <= vm->gray_cnt) {
@@ -1357,22 +1384,14 @@ static void trace_refs(ctx_t const *ctx, vm_t *vm)
 
 static void sweep(ctx_t const *ctx, vm_t *vm)
 {
-    obj_t *prev = NULL;
-    obj_t *obj = vm->objects;
+    obj_t *obj = vm->death_row;
     while (obj) {
-        if (GET_OBJ_MARKED_BIT(obj) == vm->current_marked_bit) {
-            prev = obj;
-            obj = GET_NEXT_OBJ(obj);
-        } else {
-            obj_t *unreachable = obj;
-            obj = GET_NEXT_OBJ(obj);
-            if (prev)
-                SET_NEXT_OBJ(prev, obj);
-            else
-                vm->objects = obj;
-            free_object(ctx, vm, unreachable);
-        }
+        ASSERT(GET_OBJ_MARKED_BIT(obj) != vm->current_marked_bit);
+        obj_t *unreachable = obj;
+        obj = GET_NEXT_OBJ(obj);
+        free_object(ctx, vm, unreachable);
     }
+    vm->death_row = NULL;
 }
 
 
@@ -1384,6 +1403,9 @@ static void collect_garbage(ctx_t const *ctx, vm_t *vm)
     GC_LOG("-- gc begin --");
     usize before = vm->bytes_allocated;
     (void)before;
+
+    ASSERT(!vm->death_row);
+    SWAP(vm->objects, vm->death_row, obj_t *);
 
     mark_roots(ctx, vm);
     trace_refs(ctx, vm);
@@ -1519,6 +1541,7 @@ static void init_vm(ctx_t const *ctx, vm_t *vm)
     vm->gvar_map = make_table(ctx);
     vm->gvars = make_value_array(ctx);
     vm->objects = NULL;
+    vm->death_row = NULL;
     vm->current_marked_bit = 1;
     vm->gray_cnt = vm->gray_cap = 0;
     vm->gray_stack = NULL;
@@ -2020,8 +2043,8 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
             if (IS_STRING(peek_stack(ctx, vm, 0)) &&
                 IS_STRING(peek_stack(ctx, vm, 1)))
             {
-                string_t a = AS_STRING(peek_stack(ctx, vm, 0));
-                string_t b = AS_STRING(peek_stack(ctx, vm, 1));
+                string_t a = AS_STRING(peek_stack(ctx, vm, 1));
+                string_t b = AS_STRING(peek_stack(ctx, vm, 0));
                 obj_string_t *c = ALLOCATE_STR((uint)(a.len + b.len), vm);
                 memcpy(c->p, a.p, a.len);
                 memcpy(c->p + a.len, b.p, b.len);
@@ -2029,14 +2052,14 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
                 c->hash = hash_string(ctx, c->p, c->len);
                 obj_string_t *str =
                     table_find_string(ctx, &vm->strings, c->p, c->len, c->hash);
-                if (str) {
-                    free_object(ctx, vm, (obj_t *)c);
-                } else {
+                if (!str)
                     str = c;
-                    table_set(ctx, vm, &vm->strings, str, NIL_VAL);
-                }
                 pop_stack(ctx, vm);
                 STACK_TOP(vm) = OBJ_VAL((obj_t *)str);
+                if (str == c)
+                    table_set(ctx, vm, &vm->strings, str, NIL_VAL);
+                else
+                    free_object(ctx, vm, (obj_t *)c);
             } else if (
                 IS_NUMBER(peek_stack(ctx, vm, 0)) &&
                 IS_NUMBER(peek_stack(ctx, vm, 1)))
@@ -4019,8 +4042,6 @@ static obj_function_t *compile(ctx_t const *ctx, string_t source, vm_t *vm)
     obj_function_t *func = end_compiler(ctx, vm, &compiler);
 
     vm->gc_locked = false;
-    collect_garbage(ctx, vm);
-
     return parser.had_error ? NULL : func;
 }
 
