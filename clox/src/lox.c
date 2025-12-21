@@ -29,18 +29,21 @@ static void collect_garbage(ctx_t const *ctx, vm_t *vm);
 #define GC_HEAP_GROWTH_FACTOR 2
 
 static inline void *reallocate(
-    ctx_t const *ctx, vm_t *vm, void const *ptr,
-    usize old_size, usize new_size);
+    ctx_t const *ctx, vm_t *vm, gpa_t *heap,
+    void const *ptr, usize old_size, usize new_size);
 
 #define ALLOCATE(type_, count_) \
-    (type_ *)reallocate(ctx, vm, NULL, 0, sizeof(type_) * (count_))
+    (type_ *)reallocate(        \
+        ctx, vm, ctx->unmanaged_heap, NULL, 0, sizeof(type_) * (count_))
 #define FREE(type_, ptr_, count_) \
-    reallocate(ctx, vm, ptr_, sizeof(type_) * (count_), 0)
+    reallocate(                   \
+        ctx, vm, ctx->unmanaged_heap, ptr_, sizeof(type_) * (count_), 0)
 
 #define GROW_CAP(cap_) ((cap_) < 8 ? 8 : 2 * (cap_))
 #define GROW_ARRAY(type_, ptr_, oldcap_, newcap_) \
     (type_ *)reallocate(                          \
-        ctx, vm, (ptr_), (oldcap_) * sizeof(type_), (newcap_) * sizeof(type_))
+        ctx, vm, ctx->unmanaged_heap,             \
+        (ptr_), (oldcap_) * sizeof(type_), (newcap_) * sizeof(type_))
 
 static inline u32 hash_string(ctx_t const *ctx, char const *p, uint len)
 {
@@ -213,16 +216,16 @@ static void set_next_obj(ctx_t const *ctx, obj_t *header, obj_t *next)
     header->packed |= ((u64)next & 0xFFFFFFFFFFFFlu);
 }
 
-#define GET_OBJ_MARKED_BIT(o_) get_obj_marked_bit(ctx, *(o_))
-#define GET_OBJ_TYPE(o_) get_obj_type(ctx, *(o_))
-#define GET_NEXT_OBJ(o_) get_next_obj(ctx, *(o_))
-#define GET_PREV_OBJ(o_) ((obj_t *)((o_)->prev_or_reloc))
-#define GET_RELOC_OBJ(o_) ((o_)->prev_or_reloc)
-#define SET_OBJ_MARKED_BIT(o_, v_) set_obj_marked_bit(ctx, (o_), (v_))
-#define SET_OBJ_TYPE(o_, v_) set_obj_type(ctx, (o_), (v_))
-#define SET_NEXT_OBJ(o_, v_) set_next_obj(ctx, (o_), (v_))
-#define SET_PREV_OBJ(o_, v_) ((o_)->prev_or_reloc = (v_))
-#define SET_RELOC_OBJ(o_, v_) ((o_)->prev_or_reloc = (v_))
+#define GET_OBJ_MARKED_BIT(o_) get_obj_marked_bit(ctx, *(obj_t *)(o_))
+#define GET_OBJ_TYPE(o_) get_obj_type(ctx, *(obj_t *)(o_))
+#define GET_NEXT_OBJ(o_) get_next_obj(ctx, *(obj_t *)(o_))
+#define GET_PREV_OBJ(o_) ((obj_t *)(((obj_t *)(o_))->prev_or_reloc))
+#define GET_RELOC_OBJ(o_) (((obj_t *)(o_))->prev_or_reloc)
+#define SET_OBJ_MARKED_BIT(o_, v_) set_obj_marked_bit(ctx, (obj_t *)(o_), (v_))
+#define SET_OBJ_TYPE(o_, v_) set_obj_type(ctx, (obj_t *)(o_), (v_))
+#define SET_NEXT_OBJ(o_, v_) set_next_obj(ctx, (obj_t *)(o_), (v_))
+#define SET_PREV_OBJ(o_, v_) (((obj_t *)(o_))->prev_or_reloc = (v_))
+#define SET_RELOC_OBJ(o_, v_) (((obj_t *)(o_))->prev_or_reloc = (v_))
 
 typedef enum {
     e_st_allocated,
@@ -665,6 +668,7 @@ static inline void free_chunk(ctx_t const *ctx, vm_t *vm, chunk_t *chunk)
 {
     if (!chunk)
         return;
+    LOGF("Free chunk %p of %U bytes", chunk, chunk->cap);
     if (chunk->code)
         FREE(u8, chunk->code, chunk->cap);
     free_value_array(ctx, vm, &chunk->constants);
@@ -1109,6 +1113,7 @@ typedef struct vm {
     uint gray_cnt, gray_cap;
     obj_t **gray_stack;
     usize bytes_allocated;
+    usize managed_bytes_allocated;
     usize next_gc;
     usize heap_cap;
     b32 gc_locked;
@@ -1117,10 +1122,12 @@ typedef struct vm {
 } vm_t;
 
 static inline void *reallocate(
-    ctx_t const *ctx, vm_t *vm, void const *ptr,
-    usize old_size, usize new_size)
+    ctx_t const *ctx, vm_t *vm, gpa_t *heap,
+    void const *ptr, usize old_size, usize new_size)
 {
     vm->bytes_allocated += new_size - old_size;
+    if (heap == ctx->managed_heap)
+        vm->managed_bytes_allocated += new_size - old_size;
 
     if (new_size) {
 #if !DEBUG_STRESS_GC
@@ -1130,16 +1137,16 @@ static inline void *reallocate(
     }
 
     if (new_size == 0) {
-        gpa_deallocate(ctx, ctx->unmanaged_heap, ptr);
+        gpa_deallocate(ctx, heap, ptr);
         return NULL;
     }
 
-    void *res = gpa_allocate(ctx, ctx->unmanaged_heap, new_size);
+    void *res = gpa_allocate(ctx, heap, new_size);
     VERIFY(res, "Out of memory.");
 
     if (old_size) {
         memcpy(res, ptr, MIN(old_size, new_size));
-        gpa_deallocate(ctx, ctx->unmanaged_heap, ptr);
+        gpa_deallocate(ctx, heap, ptr);
     }
 
     return res;
@@ -1161,7 +1168,7 @@ static inline obj_t *allocate_obj(
     ctx_t const *ctx, vm_t *vm, usize sz, obj_type_t ot)
 {
     ASSERT(sz > sizeof(obj_t));
-    obj_t *obj = (obj_t *)reallocate(ctx, vm, NULL, 0, sz);
+    obj_t *obj = (obj_t *)reallocate(ctx, vm, ctx->managed_heap, NULL, 0, sz);
     *obj = pack_obj_header(
         ctx, ot, vm->current_marked_bit == 1 ? 0 : 1, vm->objects, NULL);
     if (vm->objects)
@@ -1221,8 +1228,33 @@ static inline obj_upvalue_t *allocate_upvalue(ctx_t const *ctx, vm_t *vm)
     return uv;
 }
 
+static inline usize object_size(ctx_t const *ctx, obj_t *obj)
+{
+    switch (GET_OBJ_TYPE(obj)) {
+    case e_ot_string: {
+        obj_string_t *s = (obj_string_t *)obj;
+        if (s->type == e_st_allocated)
+            return sizeof(obj_string_t) + s->len + 1;
+        else
+            return sizeof(obj_string_t);
+    }
+    case e_ot_function:
+        return sizeof(obj_function_t);
+    case e_ot_native:
+        return sizeof(obj_native_t);
+    case e_ot_closure:
+        return sizeof(obj_closure_t);
+    case e_ot_upvalue:
+        return sizeof(obj_upvalue_t);
+    }
+}
+
 static inline void free_object(ctx_t const *ctx, vm_t *vm, obj_t *obj)
 {
+#define FREE_MANAGED(type_, ptr_, count_) \
+    reallocate(                           \
+        ctx, vm, ctx->managed_heap, ptr_, sizeof(type_) * (count_), 0)
+
     GC_LOGF_NONL("%p free type %s ", obj, c_obj_type_names[GET_OBJ_TYPE(obj)]);
 #if DEBUG_LOG_GC
     disasm_value(ctx, OBJ_VAL(obj));
@@ -1233,27 +1265,67 @@ static inline void free_object(ctx_t const *ctx, vm_t *vm, obj_t *obj)
     case e_ot_string: {
         obj_string_t *s = (obj_string_t *)obj;
         if (s->type == e_st_allocated)
-            FREE(u8, s, sizeof(obj_string_t) + s->len + 1);
+            FREE_MANAGED(u8, s, sizeof(obj_string_t) + s->len + 1);
         else
-            FREE(obj_string_t, s, 1);
+            FREE_MANAGED(obj_string_t, s, 1);
     } break;
     case e_ot_function: {
         obj_function_t *f = (obj_function_t *)obj;
         free_chunk(ctx, vm, &f->chunk);
-        FREE(obj_function_t, f, 1);
+        FREE_MANAGED(obj_function_t, f, 1);
     } break;
     case e_ot_native:
-        FREE(obj_native_t, (obj_native_t *)obj, 1);
+        FREE_MANAGED(obj_native_t, (obj_native_t *)obj, 1);
         break;
     case e_ot_closure: {
         obj_closure_t *c = (obj_closure_t *)obj;
         FREE(obj_upvalue_t *, c->upvalues, c->upvalue_cnt);
-        FREE(obj_closure_t, c, 1);
+        FREE_MANAGED(obj_closure_t, c, 1);
     } break;
     case e_ot_upvalue:
-        FREE(obj_upvalue_t, (obj_upvalue_t *)obj, 1);
+        FREE_MANAGED(obj_upvalue_t, (obj_upvalue_t *)obj, 1);
         break;
     }
+
+#undef FREE_MANAGED
+}
+
+static inline void cleanup_object(ctx_t const *ctx, vm_t *vm, obj_t *obj)
+{
+    switch (GET_OBJ_TYPE(obj)) {
+    case e_ot_string:
+        break;
+    case e_ot_function: {
+        obj_function_t *f = (obj_function_t *)obj;
+        free_chunk(ctx, vm, &f->chunk);
+    } break;
+    case e_ot_native:
+        break;
+    case e_ot_closure: {
+        obj_closure_t *c = (obj_closure_t *)obj;
+        FREE(obj_upvalue_t *, c->upvalues, c->upvalue_cnt);
+    } break;
+    case e_ot_upvalue:
+        break;
+    }
+
+#undef FREE_MANAGED
+}
+
+static void push_gray(ctx_t const *ctx, vm_t *vm, obj_t *obj)
+{
+    if (vm->gray_cap <= vm->gray_cnt) {
+        vm->gray_cap = GROW_CAP(vm->gray_cap);
+        obj_t **prev = vm->gray_stack;
+        vm->gray_stack = (obj_t **)gpa_allocate(
+            ctx, ctx->unmanaged_heap, vm->gray_cap * sizeof(*vm->gray_stack));
+        VERIFY(vm->gray_stack, "Out of memory.");
+        memcpy(vm->gray_stack, prev, vm->gray_cnt * sizeof(*vm->gray_stack));
+        if (prev)
+            gpa_deallocate(ctx, ctx->unmanaged_heap, prev);
+    }
+
+    vm->gray_stack[vm->gray_cnt++] = obj;
 }
 
 static void mark_obj(ctx_t const *ctx, vm_t *vm, obj_t *obj)
@@ -1288,18 +1360,7 @@ static void mark_obj(ctx_t const *ctx, vm_t *vm, obj_t *obj)
 
     // @TODO: don't add objs without outgoing refs (native, string)
 
-    if (vm->gray_cap <= vm->gray_cnt) {
-        vm->gray_cap = GROW_CAP(vm->gray_cap);
-        obj_t **prev = vm->gray_stack;
-        vm->gray_stack = (obj_t **)gpa_allocate(
-            ctx, ctx->unmanaged_heap, vm->gray_cap * sizeof(*vm->gray_stack));
-        VERIFY(vm->gray_stack, "Out of memory.");
-        memcpy(vm->gray_stack, prev, vm->gray_cnt * sizeof(*vm->gray_stack));
-        if (prev)
-            gpa_deallocate(ctx, ctx->unmanaged_heap, prev);
-    }
-
-    vm->gray_stack[vm->gray_cnt++] = obj;
+    push_gray(ctx, vm, obj);
 }
 
 static void mark_value(ctx_t const *ctx, vm_t *vm, value_t val)
@@ -1337,8 +1398,10 @@ static void mark_roots(ctx_t const *ctx, vm_t *vm)
         }
     }
 
-    for (call_frame_t *frame = vm->frame; frame; frame = frame->next)
+    for (call_frame_t *frame = vm->frame; frame; frame = frame->next) {
         mark_obj(ctx, vm, (obj_t *)frame->c);
+        mark_obj(ctx, vm, (obj_t *)frame->f);
+    }
     for (obj_upvalue_t *uv = vm->open_upvalues; uv; uv = uv->next)
         mark_obj(ctx, vm, (obj_t *)uv);
 
@@ -1389,11 +1452,13 @@ static void sweep(ctx_t const *ctx, vm_t *vm)
         ASSERT(GET_OBJ_MARKED_BIT(obj) != vm->current_marked_bit);
         obj_t *unreachable = obj;
         obj = GET_NEXT_OBJ(obj);
+#if GC_COMPACT
+        cleanup_object(ctx, vm, unreachable);
+#else
         free_object(ctx, vm, unreachable);
+#endif
     }
-    vm->death_row = NULL;
 }
-
 
 static void collect_garbage(ctx_t const *ctx, vm_t *vm)
 {
@@ -1410,8 +1475,187 @@ static void collect_garbage(ctx_t const *ctx, vm_t *vm)
     mark_roots(ctx, vm);
     trace_refs(ctx, vm);
     table_remove_white(ctx, vm, &vm->strings);
+
     sweep(ctx, vm);
 
+#if GC_COMPACT
+    // @TODO: compress code
+    if (vm->death_row) {
+        // @TEMP
+        ASSERT(vm->gray_cnt == 0);
+
+        {
+            obj_t *obj = vm->objects;
+            while (obj) {
+                push_gray(ctx, vm, obj);
+                obj = GET_NEXT_OBJ(obj);
+            }
+        }
+
+        // @TEMP Sort for correct relocations (@TODO: should be a macro on type)
+        for (
+            obj_t **r = vm->gray_stack + 1;
+            r < vm->gray_stack + vm->gray_cnt;
+            ++r)
+        {
+            obj_t **p;
+            for (p = r - 1; p >= vm->gray_stack; --p) {
+                if (*p < *r)
+                    break;
+            }
+            if (p < r - 1) {
+                obj_t *rr = *r;
+                obj_t **dst = r, **src = r - 1;
+                for (isize i = 0; i < (r - p - 1); ++i)
+                    *dst-- = *src--;
+                *(p + 1) = rr;
+            }
+        }
+
+        u8 *compacted = ctx->managed_heap->memory.data;
+
+        for (
+            obj_t **o = vm->gray_stack;
+            o < vm->gray_stack + vm->gray_cnt;
+            ++o)
+        {
+            obj_t *relocated = (obj_t *)(compacted + GPA_ALIGNMENT);
+            compacted += ROUND_UP(
+                GPA_ALIGNMENT + object_size(ctx, *o), GPA_ALIGNMENT);
+            SET_RELOC_OBJ(*o, relocated);
+        }
+
+        // @TEMP
+        for (vm_stack_segment_t *seg = &vm->stack; seg; seg = seg->next) {
+            for (
+                value_t *v = seg->values;
+                seg == vm->cur_stack_seg
+                    ? v < vm->stack_head
+                    : v < seg->values + VM_STACK_SEGMENT_SIZE;
+                ++v)
+            {
+                if (IS_OBJ(*v))
+                    *v = OBJ_VAL(GET_RELOC_OBJ(AS_OBJ(*v)));
+            }
+        }
+        for (call_frame_t *frame = vm->frame; frame; frame = frame->next) {
+            if (frame->c)
+                frame->c = (obj_closure_t *)GET_RELOC_OBJ(frame->c);
+            if (frame->f)
+                frame->f = (obj_function_t *)GET_RELOC_OBJ(frame->f);
+        }
+        if (vm->open_upvalues)
+            vm->open_upvalues = (obj_upvalue_t *)GET_RELOC_OBJ(vm->open_upvalues);
+        for (uint i = 0; i < vm->gvars.cnt; ++i) {
+            if (IS_OBJ(vm->gvars.values[i])) {
+                vm->gvars.values[i] =
+                    OBJ_VAL(GET_RELOC_OBJ(AS_OBJ(vm->gvars.values[i])));
+            }
+        }
+        for (uint i = 0; i < vm->gvar_map.cap; ++i) {
+            table_entry_t *e = &vm->gvar_map.entries[i];
+            if (e->key)
+                e->key = GET_RELOC_OBJ(e->key);
+            if (IS_OBJ(e->value))
+                e->value = OBJ_VAL(GET_RELOC_OBJ(AS_OBJ(e->value)));
+        }
+        for (uint i = 0; i < vm->strings.cap; ++i) {
+            table_entry_t *e = &vm->strings.entries[i];
+            if (e->key)
+                e->key = GET_RELOC_OBJ(e->key);
+        }
+
+        // @TEMP
+        if (vm->objects)
+            vm->objects = GET_RELOC_OBJ(vm->objects);
+        for (uint i = 0; i < vm->gray_cnt; ++i) {
+            obj_t *obj = vm->gray_stack[i];
+
+            obj_t *next = GET_NEXT_OBJ(obj);
+            if (next)
+                SET_NEXT_OBJ(obj, GET_RELOC_OBJ(next));
+            // prev fixup is a separate pass since we have reused the slot for reloc
+
+            switch (GET_OBJ_TYPE(obj)) {
+            case e_ot_string: {
+                obj_string_t *s = (obj_string_t *)obj;
+                if (s->type == e_st_allocated)
+                    s->p = (char *)((obj_string_t *)GET_RELOC_OBJ(s) + 1);
+            } break;
+            case e_ot_function: {
+                obj_function_t *f = (obj_function_t *)obj;
+                if (f->name)
+                    f->name = (obj_string_t *)GET_RELOC_OBJ(f->name);
+                for (uint i = 0; i < f->chunk.constants.cnt; ++i) {
+                    if (IS_OBJ(f->chunk.constants.values[i])) {
+                        f->chunk.constants.values[i] =
+                            OBJ_VAL(GET_RELOC_OBJ(AS_OBJ(f->chunk.constants.values[i])));
+                    }
+                }
+            } break;
+            case e_ot_native:
+                break;
+            case e_ot_closure: {
+                obj_closure_t *c = (obj_closure_t *)obj;
+                c->fn = (obj_function_t *)GET_RELOC_OBJ(c->fn);
+                for (uint i = 0; i < c->upvalue_cnt; ++i) {
+                    c->upvalues[i] =
+                        (obj_upvalue_t *)GET_RELOC_OBJ(c->upvalues[i]);
+                }
+            } break;
+            case e_ot_upvalue: {
+                obj_upvalue_t *uv = (obj_upvalue_t *)obj;
+                if (uv->location == &uv->closed) {
+                    uv->location = &((obj_upvalue_t *)GET_RELOC_OBJ(uv))->closed;
+                    if (IS_OBJ(uv->closed))
+                        uv->closed = OBJ_VAL(GET_RELOC_OBJ(AS_OBJ(uv->closed)));
+                }
+                if (uv->next)
+                    uv->next = (obj_upvalue_t *)GET_RELOC_OBJ(uv->next);
+            } break;
+            }
+        }
+
+        // @TEMP
+        gpa_reset(ctx, ctx->managed_heap);
+        usize new_managed_alloc = 0;
+        for (
+            obj_t **o = vm->gray_stack;
+            o < vm->gray_stack + vm->gray_cnt;
+            ++o)
+        {
+            usize sz = object_size(ctx, *o);
+            new_managed_alloc += sz;
+            obj_t *new = gpa_allocate(ctx, ctx->managed_heap, sz);
+            VERIFY(new, "Out of memory.");
+            ASSERT(new == GET_RELOC_OBJ(*o));
+            ASSERT(new <= *o);
+            if (new != *o)
+                memcpy(new, *o, sz);
+        }
+
+        GC_LOGF(
+            "compacted managed heap from %U bytes to %U bytes",
+            vm->managed_bytes_allocated, new_managed_alloc);
+
+        vm->bytes_allocated += new_managed_alloc - vm->managed_bytes_allocated;
+        vm->managed_bytes_allocated = new_managed_alloc;
+
+        vm->gray_cnt = 0;
+
+        // @TEMP
+        {
+            obj_t *prev = NULL, *cur = vm->objects;
+            while (cur) {
+                SET_PREV_OBJ(cur, prev);
+                prev = cur;
+                cur = GET_NEXT_OBJ(cur);
+            }
+        }
+    }
+#endif
+
+    vm->death_row = NULL;
     vm->current_marked_bit = vm->current_marked_bit == 1 ? 0 : 1;
 
     vm->next_gc = MIN(
@@ -1546,8 +1790,10 @@ static void init_vm(ctx_t const *ctx, vm_t *vm)
     vm->gray_cnt = vm->gray_cap = 0;
     vm->gray_stack = NULL;
     vm->bytes_allocated = 0;
+    vm->managed_bytes_allocated = 0;
     vm->next_gc = 1 << 10;
-    vm->heap_cap = ctx->unmanaged_heap->memory.len;
+    vm->heap_cap = MIN(
+        ctx->unmanaged_heap->memory.len, ctx->managed_heap->memory.len);
     vm->open_upvalues = NULL;
     vm->nctx.ctx = ctx;
     vm->nctx.vm = vm;
@@ -1577,9 +1823,18 @@ static void free_vm(ctx_t const *ctx, vm_t *vm)
     obj_t *obj = vm->objects;
     while (obj) {
         obj_t *next = GET_NEXT_OBJ(obj);
+#if GC_COMPACT
+        cleanup_object(ctx, vm, obj);
+#else
         free_object(ctx, vm, obj);
+#endif
         obj = next;
     }
+#if GC_COMPACT
+    vm->bytes_allocated -= vm->managed_bytes_allocated;
+    vm->managed_bytes_allocated = 0;
+    gpa_reset(ctx, ctx->managed_heap);
+#endif
 
     GC_LOGF(
         "    collected %U bytes (from %U to %U) at shutdown",
