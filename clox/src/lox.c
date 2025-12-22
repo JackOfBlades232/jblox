@@ -527,6 +527,10 @@ typedef enum {
     e_op_get_upvalue_long,
     e_op_set_upvalue,
     e_op_set_upvalue_long,
+    e_op_get_property,
+    e_op_get_property_long,
+    e_op_set_property,
+    e_op_set_property_long,
     e_op_closure,
     e_op_closure_long,
     e_op_class,
@@ -970,6 +974,18 @@ static uint disasm_instruction(
     case e_op_set_upvalue_long:
         return disasm_long_id_instruction(
             ctx, "OP_SET_UPVALUE_LONG", chunk, at);
+    case e_op_get_property:
+        return disasm_id_instruction(
+            ctx, "OP_GET_PROPERTY", chunk, at);
+    case e_op_get_property_long:
+        return disasm_long_id_instruction(
+            ctx, "OP_GET_PROPERTY_LONG", chunk, at);
+    case e_op_set_property:
+        return disasm_id_instruction(
+            ctx, "OP_SET_PROPERTY", chunk, at);
+    case e_op_set_property_long:
+        return disasm_long_id_instruction(
+            ctx, "OP_SET_PROPERTY_LONG", chunk, at);
     case e_op_closure:
         return disasm_upvalue_list(ctx, chunk, 
             disasm_constant_instruction(ctx, "OP_CLOSURE", chunk, at),
@@ -2075,6 +2091,65 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
             *frame->c->upvalues[READ_LONG()]->location = STACK_TOP(vm);
             break;
 
+        case e_op_get_property: {
+            if (!IS_INSTANCE(STACK_TOP(vm))) {
+                runtime_error(ctx, vm, "Only instances have properties.");
+                return e_interp_runtime_err;
+            }
+            obj_instance_t *instance = AS_INSTANCE(STACK_TOP(vm));
+            obj_string_t *name = READ_STRING();
+            value_t val;
+            if (table_get(ctx, &instance->fields, name, &val)) {
+                pop_stack(ctx, vm);
+                push_stack(ctx, vm, val);
+                break;
+            }
+            runtime_error(ctx, vm,
+                "Undefined property '%S'.", OSTR_TO_STR(name));
+            return e_interp_runtime_err;
+        } break;
+        case e_op_get_property_long: {
+            if (!IS_INSTANCE(STACK_TOP(vm))) {
+                runtime_error(ctx, vm, "Only instances have properties.");
+                return e_interp_runtime_err;
+            }
+            obj_instance_t *instance = AS_INSTANCE(STACK_TOP(vm));
+            obj_string_t *name = READ_STRING_LONG();
+            value_t val;
+            if (table_get(ctx, &instance->fields, name, &val)) {
+                pop_stack(ctx, vm);
+                push_stack(ctx, vm, val);
+                break;
+            }
+            runtime_error(ctx, vm,
+                "Undefined property '%S'.", OSTR_TO_STR(name));
+            return e_interp_runtime_err;
+        } break;
+        case e_op_set_property: {
+            if (!IS_INSTANCE(peek_stack(ctx, vm, 1))) {
+                runtime_error(ctx, vm, "Only instances have properties.");
+                return e_interp_runtime_err;
+            }
+            obj_instance_t *instance = AS_INSTANCE(peek_stack(ctx, vm, 1));
+            obj_string_t *name = READ_STRING();
+            table_set(ctx, vm, &instance->fields, name, STACK_TOP(vm));
+            value_t val = pop_stack(ctx, vm);
+            pop_stack(ctx, vm);
+            push_stack(ctx, vm, val);
+        } break;
+        case e_op_set_property_long: {
+            if (!IS_INSTANCE(peek_stack(ctx, vm, 1))) {
+                runtime_error(ctx, vm, "Only instances have properties.");
+                return e_interp_runtime_err;
+            }
+            obj_instance_t *instance = AS_INSTANCE(peek_stack(ctx, vm, 1));
+            obj_string_t *name = READ_STRING_LONG();
+            table_set(ctx, vm, &instance->fields, name, STACK_TOP(vm));
+            value_t val = pop_stack(ctx, vm);
+            pop_stack(ctx, vm);
+            push_stack(ctx, vm, val);
+        } break;
+
         case e_op_closure: {
             obj_function_t *fn = AS_FUNCTION(READ_CONSTANT());
             obj_closure_t *closure = allocate_closure(ctx, vm, fn->upvalue_cnt);
@@ -2834,8 +2909,7 @@ static void emit_byte(ctx_t const *ctx, vm_t *vm, u8 byte, compiler_t *compiler)
 static void emit_constant(
     ctx_t const *ctx, vm_t *vm, value_t val, compiler_t *compiler)
 {
-    write_constant(
-        ctx, vm, CUR_CHUNK(compiler),
+    write_constant( ctx, vm, CUR_CHUNK(compiler),
         e_op_constant, e_op_constant_long, val,
         (uint)compiler->parser->prev.line);
 }
@@ -2855,6 +2929,16 @@ static void emit_class(
     write_constant(
         ctx, vm, CUR_CHUNK(compiler),
         e_op_class, e_op_class_long, val,
+        (uint)compiler->parser->prev.line);
+}
+
+static void emit_gen_const(
+    ctx_t const *ctx, vm_t *vm, value_t val,
+    opcode_t op, opcode_t long_op,
+    compiler_t *compiler)
+{
+    write_constant(
+        ctx, vm, CUR_CHUNK(compiler), op, long_op, val,
         (uint)compiler->parser->prev.line);
 }
 
@@ -3298,6 +3382,8 @@ static void compile_call(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_unary(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+static void compile_dot(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_binary(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_ternary(
@@ -3313,7 +3399,7 @@ parse_rule_t const c_parse_rules[] = {
     [e_tt_left_brace]    = {NULL,              NULL,             e_prec_none  },
     [e_tt_right_brace]   = {NULL,              NULL,             e_prec_none  },
     [e_tt_comma]         = {NULL,              NULL,             e_prec_none  },
-    [e_tt_dot]           = {NULL,              NULL,             e_prec_none  },
+    [e_tt_dot]           = {NULL,              &compile_dot,     e_prec_call  },
     [e_tt_minus]         = {&compile_unary,    &compile_binary,  e_prec_term  },
     [e_tt_plus]          = {NULL,              &compile_binary,  e_prec_term  },
     [e_tt_semicolon]     = {NULL,              NULL,             e_prec_none  },
@@ -3544,6 +3630,24 @@ static void compile_unary(
     default:
         ASSERT(0);
         break;
+    }
+}
+
+static void compile_dot(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+{
+    parser_consume(ctx, e_tt_identifier,
+        "Expected property name after '.'.", compiler->parser);
+    obj_string_t *name = (obj_string_t *)add_string_ref(ctx, vm,
+        compiler->parser->prev.start, (uint)compiler->parser->prev.len);
+
+    if (can_assign && parser_match(ctx, e_tt_equal, compiler->parser)) {
+        compile_expression(ctx, compiler, vm);
+        emit_gen_const(ctx, vm,
+            OBJ_VAL(name), e_op_set_property, e_op_set_property_long, compiler);
+    } else {
+        emit_gen_const(ctx, vm,
+            OBJ_VAL(name), e_op_get_property, e_op_get_property_long, compiler);
     }
 }
 
