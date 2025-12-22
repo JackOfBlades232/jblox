@@ -10,6 +10,7 @@ call :RunTest functions.lox %*
 call :RunTest fib.lox %*
 call :RunTest closures.lox %*
 call :RunTest church.lox %*
+call :RunTest classes.lox %*
 
 popd
 exit /b

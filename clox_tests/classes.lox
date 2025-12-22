@@ -1,0 +1,8 @@
+class Empty {}
+print Empty;
+var OtherEmpty = class {};
+print OtherEmpty;
+OtherEmpty = 1;
+print OtherEmpty;
+let AnotherEmpty = class {};
+print AnotherEmpty;

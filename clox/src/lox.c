@@ -93,6 +93,7 @@ typedef struct obj_function obj_function_t;
 typedef struct obj_native obj_native_t;
 typedef struct obj_closure obj_closure_t;
 typedef struct obj_upvalue obj_upvalue_t;
+typedef struct obj_class obj_class_t;
 
 typedef struct value {
     value_type_t type;
@@ -146,6 +147,7 @@ typedef enum {
     e_ot_native,
     e_ot_closure,
     e_ot_upvalue,
+    e_ot_class,
 } obj_type_t;
 
 static char const *const c_obj_type_names[] =
@@ -154,7 +156,8 @@ static char const *const c_obj_type_names[] =
     "function",
     "native",
     "closure",
-    "upvalue"
+    "upvalue",
+    "class"
 };
 
 typedef struct obj {
@@ -269,6 +272,11 @@ typedef struct obj_upvalue {
     struct obj_upvalue *next;
 } obj_upvalue_t;
 
+typedef struct obj_class {
+    obj_t obj;
+    obj_string_t *name;
+} obj_class_t;
+
 static inline b32 is_obj_type(ctx_t const *ctx, value_t val, obj_type_t ot)
 {
     (void)ctx;
@@ -289,6 +297,8 @@ static inline string_t obj_as_string(ctx_t const *ctx, value_t val)
 #define IS_FUNCTION(value_)   (is_obj_type(ctx, (value_), e_ot_function))
 #define IS_NATIVE(value_)     (is_obj_type(ctx, (value_), e_ot_native))
 #define IS_CLOSURE(value_)    (is_obj_type(ctx, (value_), e_ot_closure))
+#define IS_UPVALUE(value_)    (is_obj_type(ctx, (value_), e_ot_upvalue))
+#define IS_CLASS(value_)      (is_obj_type(ctx, (value_), e_ot_class))
 
 #define AS_STRING_OBJ(value_) ((obj_string_t *)AS_OBJ(value_))
 #define AS_STRING(value_)     (obj_as_string(ctx, (value_)))
@@ -298,6 +308,7 @@ static inline string_t obj_as_string(ctx_t const *ctx, value_t val)
 #define AS_NATIVE(value_)     (((obj_native_t *)AS_OBJ(value_))->fn)
 #define AS_CLOSURE(value_)    ((obj_closure_t *)AS_OBJ(value_))
 #define AS_UPVALUE(value_)    ((obj_upvalue_t *)AS_OBJ(value_))
+#define AS_CLASS(value_)      ((obj_class_t *)AS_OBJ(value_))
 
 static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
 {
@@ -507,6 +518,8 @@ typedef enum {
     e_op_set_upvalue_long,
     e_op_closure,
     e_op_closure_long,
+    e_op_class,
+    e_op_class_long,
     e_op_close_upvalue,
     e_op_eq,
     e_op_eq_preserve_lhs,
@@ -692,6 +705,9 @@ static void print_obj(ctx_t const *ctx, io_handle_t *hnd, value_t val)
         break;
     case e_ot_upvalue:
         fmt_print(ctx, hnd, "<upvalue>");
+        break;
+    case e_ot_class:
+        fmt_print(ctx, hnd, "<class %S>", OSTR_TO_STR(AS_CLASS(val)->name));
         break;
     }
 }
@@ -946,6 +962,12 @@ static uint disasm_instruction(
         return disasm_upvalue_list(ctx, chunk, 
             disasm_long_constant_instruction(ctx, "OP_CLOSURE_LONG", chunk, at),
             disasm_peek_long_function(ctx, chunk, at)->upvalue_cnt);
+    case e_op_class:
+        return disasm_constant_instruction(
+            ctx, "OP_CLASS", chunk, at);
+    case e_op_class_long:
+        return disasm_long_constant_instruction(
+            ctx, "OP_CLASS_LONG", chunk, at);
     case e_op_close_upvalue:
         return disasm_simple_instruction(
             ctx, "OP_CLOSE_UPVALUE", at);
@@ -1219,6 +1241,14 @@ static inline obj_upvalue_t *allocate_upvalue(ctx_t const *ctx, vm_t *vm)
     return uv;
 }
 
+static inline obj_class_t *allocate_class(
+    ctx_t const *ctx, vm_t *vm, obj_string_t *name)
+{
+    obj_class_t *cls = ALLOCATE_OBJ(obj_class_t, e_ot_class, vm);
+    cls->name = name;
+    return cls;
+}
+
 static inline void free_object(ctx_t const *ctx, vm_t *vm, obj_t *obj)
 {
     GC_LOGF_NONL("%p free type %s ", obj, c_obj_type_names[GET_OBJ_TYPE(obj)]);
@@ -1250,6 +1280,9 @@ static inline void free_object(ctx_t const *ctx, vm_t *vm, obj_t *obj)
     } break;
     case e_ot_upvalue:
         FREE(obj_upvalue_t, (obj_upvalue_t *)obj, 1);
+        break;
+    case e_ot_class:
+        FREE(obj_class_t, (obj_class_t *)obj, 1);
         break;
     }
 }
@@ -1368,6 +1401,10 @@ static void blacken_obj(ctx_t const *ctx, vm_t *vm, obj_t *obj)
         mark_obj(ctx, vm, (obj_t *)cl->fn);
         for (uint i = 0; i < cl->upvalue_cnt; ++i)
             mark_obj(ctx, vm, (obj_t *)cl->upvalues[i]);
+    } break;
+    case e_ot_class: {
+        obj_class_t *cls = (obj_class_t *)obj;
+        mark_obj(ctx, vm, (obj_t *)cls->name);
     } break;
     }
 }
@@ -2005,6 +2042,16 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
             closure->fn = fn;
             push_stack(ctx, vm, OBJ_VAL(closure));
             CAPTURE_UPVALUES(closure);
+        } break;
+
+        case e_op_class:
+            push_stack(ctx, vm,
+                OBJ_VAL(allocate_class(ctx, vm, READ_STRING())));
+            break;
+        case e_op_class_long: {
+            push_stack(ctx, vm,
+                OBJ_VAL(allocate_class(ctx, vm, READ_STRING_LONG())));
+            break;
         } break;
 
         case e_op_close_upvalue:
@@ -2738,7 +2785,8 @@ static void emit_byte(ctx_t const *ctx, vm_t *vm, u8 byte, compiler_t *compiler)
         (uint)compiler->parser->prev.line);
 }
 
-static void emit_constant(ctx_t const *ctx, vm_t *vm, value_t val, compiler_t *compiler)
+static void emit_constant(
+    ctx_t const *ctx, vm_t *vm, value_t val, compiler_t *compiler)
 {
     write_constant(
         ctx, vm, CUR_CHUNK(compiler),
@@ -2752,6 +2800,15 @@ static void emit_closure(
     write_constant(
         ctx, vm, CUR_CHUNK(compiler),
         e_op_closure, e_op_closure_long, val,
+        (uint)compiler->parser->prev.line);
+}
+
+static void emit_class(
+    ctx_t const *ctx, vm_t *vm, value_t val, compiler_t *compiler)
+{
+    write_constant(
+        ctx, vm, CUR_CHUNK(compiler),
+        e_op_class, e_op_class_long, val,
         (uint)compiler->parser->prev.line);
 }
 
@@ -3185,6 +3242,8 @@ static void compile_literal(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_variable(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+static void compile_class(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_fun(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
 static void compile_grouping(
@@ -3228,7 +3287,7 @@ parse_rule_t const c_parse_rules[] = {
     [e_tt_string]        = {&compile_string,   NULL,             e_prec_none  },
     [e_tt_number]        = {&compile_number,   NULL,             e_prec_none  },
     [e_tt_and]           = {NULL,              &compile_and,     e_prec_and   },
-    [e_tt_class]         = {NULL,              NULL,             e_prec_none  },
+    [e_tt_class]         = {&compile_class,    NULL,             e_prec_none  },
     [e_tt_else]          = {NULL,              NULL,             e_prec_none  },
     [e_tt_false]         = {&compile_literal,  NULL,             e_prec_none  },
     [e_tt_for]           = {NULL,              NULL,             e_prec_none  },
@@ -3541,6 +3600,21 @@ static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
 static void compile_block(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
 static void compile_var_decl(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 is_const);
+
+static void compile_class(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+{
+    (void)can_assign;
+    obj_string_t *name = (obj_string_t *)add_string_ref(ctx, vm,
+        compiler->parser->prev.start, (uint)compiler->parser->prev.len);
+
+    emit_class(ctx, vm, OBJ_VAL(name), compiler);
+
+    parser_consume(ctx, e_tt_left_brace,
+        "Expected '{' before class body", compiler->parser);
+    parser_consume(ctx, e_tt_right_brace,
+        "Expected '}' after class body", compiler->parser);
+}
 
 static void compile_fun(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
@@ -3967,6 +4041,20 @@ static void compile_stmt(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     }
 }
 
+static void compile_class_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+{
+    uint vid = compile_new_variable(
+        ctx, compiler, vm, "Expected class name.", true);
+    mark_lvar_initialzied(ctx, compiler, vid);
+
+    compile_class(ctx, compiler, vm, false);
+
+    if (compiler->current_scope_depth == 0) {
+        emit_id_ref(
+            ctx, vm, vid, e_op_define_glob, e_op_define_glob_long, compiler);
+    }
+}
+
 static void compile_func_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
     uint vid = compile_new_variable(
@@ -4011,6 +4099,8 @@ static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         compile_var_decl(ctx, compiler, vm, true);
     else if (parser_match(ctx, e_tt_fun, compiler->parser))
         compile_func_decl(ctx, compiler, vm);
+    else if (parser_match(ctx, e_tt_class, compiler->parser))
+        compile_class_decl(ctx, compiler, vm);
     else
         compile_stmt(ctx, compiler, vm);
 
