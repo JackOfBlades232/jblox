@@ -18,6 +18,7 @@ function run_all_tests {
     run_test fib.lox
     run_test closures.lox
     run_test church.lox
+    run_test classes.lox
 }
 
 INTERP=../reference/craftinginterpreters/clox

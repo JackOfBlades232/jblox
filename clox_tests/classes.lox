@@ -6,3 +6,6 @@ OtherEmpty = 1;
 print OtherEmpty;
 let AnotherEmpty = class {};
 print AnotherEmpty;
+
+print Empty();
+print AnotherEmpty();

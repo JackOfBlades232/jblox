@@ -94,6 +94,7 @@ typedef struct obj_native obj_native_t;
 typedef struct obj_closure obj_closure_t;
 typedef struct obj_upvalue obj_upvalue_t;
 typedef struct obj_class obj_class_t;
+typedef struct obj_instance obj_instance_t;
 
 typedef struct value {
     value_type_t type;
@@ -141,6 +142,18 @@ static void define_native(
     ctx_t const *ctx, vm_t *vm, string_t name, native_fn_t fn, int arity);
 static void native_runtime_error(native_ctx_t *nctx, char const *fmt, ...);
 
+#define TABLE_MAX_LOAD_FACTOR 0.75
+
+typedef struct {
+    obj_string_t *key;
+    value_t value;
+} table_entry_t;
+
+typedef struct {
+    uint cnt, cap;
+    table_entry_t *entries;
+} table_t;
+
 typedef enum {
     e_ot_string,
     e_ot_function,
@@ -148,6 +161,7 @@ typedef enum {
     e_ot_closure,
     e_ot_upvalue,
     e_ot_class,
+    e_ot_instance,
 } obj_type_t;
 
 static char const *const c_obj_type_names[] =
@@ -157,7 +171,8 @@ static char const *const c_obj_type_names[] =
     "native",
     "closure",
     "upvalue",
-    "class"
+    "class",
+    "instance",
 };
 
 typedef struct obj {
@@ -277,6 +292,12 @@ typedef struct obj_class {
     obj_string_t *name;
 } obj_class_t;
 
+typedef struct obj_instance {
+    obj_t obj;
+    obj_class_t *cls;
+    table_t fields;
+} obj_instance_t;
+
 static inline b32 is_obj_type(ctx_t const *ctx, value_t val, obj_type_t ot)
 {
     (void)ctx;
@@ -299,6 +320,7 @@ static inline string_t obj_as_string(ctx_t const *ctx, value_t val)
 #define IS_CLOSURE(value_)    (is_obj_type(ctx, (value_), e_ot_closure))
 #define IS_UPVALUE(value_)    (is_obj_type(ctx, (value_), e_ot_upvalue))
 #define IS_CLASS(value_)      (is_obj_type(ctx, (value_), e_ot_class))
+#define IS_INSTANCE(value_)   (is_obj_type(ctx, (value_), e_ot_instance))
 
 #define AS_STRING_OBJ(value_) ((obj_string_t *)AS_OBJ(value_))
 #define AS_STRING(value_)     (obj_as_string(ctx, (value_)))
@@ -309,6 +331,7 @@ static inline string_t obj_as_string(ctx_t const *ctx, value_t val)
 #define AS_CLOSURE(value_)    ((obj_closure_t *)AS_OBJ(value_))
 #define AS_UPVALUE(value_)    ((obj_upvalue_t *)AS_OBJ(value_))
 #define AS_CLASS(value_)      ((obj_class_t *)AS_OBJ(value_))
+#define AS_INSTANCE(value_)   ((obj_instance_t *)AS_OBJ(value_))
 
 static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
 {
@@ -331,18 +354,6 @@ static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
         return false;
     }
 }
-
-#define TABLE_MAX_LOAD_FACTOR 0.75
-
-typedef struct {
-    obj_string_t *key;
-    value_t value;
-} table_entry_t;
-
-typedef struct {
-    uint cnt, cap;
-    table_entry_t *entries;
-} table_t;
 
 static table_t make_table(ctx_t const *ctx)
 {
@@ -707,7 +718,12 @@ static void print_obj(ctx_t const *ctx, io_handle_t *hnd, value_t val)
         fmt_print(ctx, hnd, "<upvalue>");
         break;
     case e_ot_class:
-        fmt_print(ctx, hnd, "<class %S>", OSTR_TO_STR(AS_CLASS(val)->name));
+        fmt_print(ctx, hnd, "<class %S>",
+            OSTR_TO_STR(AS_CLASS(val)->name));
+        break;
+    case e_ot_instance:
+        fmt_print(ctx, hnd, "<%S instance>",
+            OSTR_TO_STR(AS_INSTANCE(val)->cls->name));
         break;
     }
 }
@@ -1249,6 +1265,15 @@ static inline obj_class_t *allocate_class(
     return cls;
 }
 
+static inline obj_instance_t *allocate_instance(
+    ctx_t const *ctx, vm_t *vm, obj_class_t *cls)
+{
+    obj_instance_t *inst = ALLOCATE_OBJ(obj_instance_t, e_ot_instance, vm);
+    inst->cls = cls;
+    inst->fields = make_table(ctx);
+    return inst;
+}
+
 static inline void free_object(ctx_t const *ctx, vm_t *vm, obj_t *obj)
 {
     GC_LOGF_NONL("%p free type %s ", obj, c_obj_type_names[GET_OBJ_TYPE(obj)]);
@@ -1284,6 +1309,11 @@ static inline void free_object(ctx_t const *ctx, vm_t *vm, obj_t *obj)
     case e_ot_class:
         FREE(obj_class_t, (obj_class_t *)obj, 1);
         break;
+    case e_ot_instance: {
+        obj_instance_t *i = (obj_instance_t *)obj;
+        free_table(ctx, vm, &i->fields);
+        FREE(obj_instance_t, (obj_instance_t *)obj, 1);
+    } break;
     }
 }
 
@@ -1405,6 +1435,11 @@ static void blacken_obj(ctx_t const *ctx, vm_t *vm, obj_t *obj)
     case e_ot_class: {
         obj_class_t *cls = (obj_class_t *)obj;
         mark_obj(ctx, vm, (obj_t *)cls->name);
+    } break;
+    case e_ot_instance: {
+        obj_instance_t *inst = (obj_instance_t *)obj;
+        mark_obj(ctx, vm, (obj_t *)inst->cls);
+        mark_table(ctx, vm, &inst->fields);
     } break;
     }
 }
@@ -1693,23 +1728,28 @@ static value_t *at_stack(ctx_t const *ctx, vm_t *vm, uint at)
     return &seg->values[at - full_segments_size];
 }
 
-#define STACK_TOP(vm_) (*(vm->stack_head - 1))
-
-static value_t peek_stack(ctx_t const *ctx, vm_t const *vm, int dist)
+static value_t *at_stack_bw(ctx_t const *ctx, vm_t const *vm, int dist)
 {
     (void)ctx;
     if (dist == 0)
-        return STACK_TOP(vm);
+        return vm->stack_head - 1;
 
-    value_t const *p = vm->stack_head - 1;
-    vm_stack_segment_t const *s = vm->cur_stack_seg;
+    value_t *p = vm->stack_head - 1;
+    vm_stack_segment_t *s = vm->cur_stack_seg;
     while (s && p - s->values < dist) {
         dist -= (p - s->values);
         s = s->prev;
         p = &s->values[VM_STACK_SEGMENT_SIZE - 1];
     }
     ASSERT(s);
-    return p[-dist];
+    return &p[-dist];
+}
+
+#define STACK_TOP(vm_) (*(vm->stack_head - 1))
+
+static value_t peek_stack(ctx_t const *ctx, vm_t const *vm, int dist)
+{
+    return *at_stack_bw(ctx, vm, dist);
 }
 
 typedef enum {
@@ -1776,6 +1816,12 @@ static b32 call_value(
 {
     if (IS_OBJ(callee)) {
         switch (OBJ_TYPE(callee)) {
+        case e_ot_class: {
+            obj_class_t *cls = AS_CLASS(callee);
+            *at_stack_bw(ctx, vm, arg_count) =
+                OBJ_VAL(allocate_instance(ctx, vm, cls));
+            return true;
+        }
         case e_ot_closure:
             return callc(ctx, AS_CLOSURE(callee), (int)arg_count, vm);
         case e_ot_function:
