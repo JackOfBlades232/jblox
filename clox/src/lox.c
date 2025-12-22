@@ -188,7 +188,7 @@ static obj_t pack_obj_header(
     u64 packed =
         ((u64)((marked_bit != 0) ? 1 : 0) << 63) |
         ((u64)(type & 0x7FFF) << 48) |
-        ((u64)next & 0xFFFFFFFFFFFFlu);
+        ((u64)next & 0xFFFFFFFFFFFFllu);
     return (obj_t){packed, prev};
 }
 
@@ -207,28 +207,28 @@ static obj_type_t get_obj_type(ctx_t const *ctx, obj_t header)
 static obj_t *get_next_obj(ctx_t const *ctx, obj_t header)
 {
     (void)ctx;
-    return (obj_t *)(header.packed & 0xFFFFFFFFFFFFlu);
+    return (obj_t *)(header.packed & 0xFFFFFFFFFFFFllu);
 }
 
 static void set_obj_marked_bit(ctx_t const *ctx, obj_t *header, b32 val)
 {
     (void)ctx;
-    header->packed &= (1lu << 63) - 1;
+    header->packed &= (1llu << 63) - 1;
     header->packed |= (u64)(val ? 1 : 0) << 63;
 }
 
 static void set_obj_type(ctx_t const *ctx, obj_t *header, obj_type_t type)
 {
     (void)ctx;
-    header->packed &= (1lu << 63) | 0xFFFFFFFFFFFFlu;
+    header->packed &= (1llu << 63) | 0xFFFFFFFFFFFFllu;
     header->packed |= ((u64)(type & 0x7FFF) << 48);
 }
 
 static void set_next_obj(ctx_t const *ctx, obj_t *header, obj_t *next)
 {
     (void)ctx;
-    header->packed &= ~0xFFFFFFFFFFFFlu;
-    header->packed |= ((u64)next & 0xFFFFFFFFFFFFlu);
+    header->packed &= ~0xFFFFFFFFFFFFllu;
+    header->packed |= ((u64)next & 0xFFFFFFFFFFFFllu);
 }
 
 #define GET_OBJ_MARKED_BIT(o_) get_obj_marked_bit(ctx, *(o_))
@@ -1883,7 +1883,7 @@ static b32 call_value(
         switch (OBJ_TYPE(callee)) {
         case e_ot_class: {
             obj_class_t *cls = AS_CLASS(callee);
-            *at_stack_bw(ctx, vm, arg_count) =
+            *at_stack_bw(ctx, vm, (int)arg_count) =
                 OBJ_VAL(allocate_instance(ctx, vm, cls));
             return true;
         }
