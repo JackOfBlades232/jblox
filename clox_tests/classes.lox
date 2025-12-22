@@ -23,3 +23,14 @@ var pair = Pair();
 pair.first = 1;
 pair.second = 2;
 print pair.first + pair.second;
+
+print hasfield(pair, "first");
+print hasfield(pair, "second");
+print hasfield(pair, "third");
+
+print pair.("fir" + "st");
+let s = "second";
+print pair.(s);
+
+delfield(pair, "first");
+print hasfield(pair, "first");

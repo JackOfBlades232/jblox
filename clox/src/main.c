@@ -20,13 +20,11 @@ static int common_main(ctx_t const *ctx)
         buf_is_valid(ctx, &program_memory),
         "Failed to allocate program memory.");
 
-    usize const managed_heap_size = program_memory.len / 2;
-    usize const unmanaged_heap_size = program_memory.len - managed_heap_size;
+    // Defrag didn't work out due to pointers flying all over
+    usize const managed_heap_size = 0;
+    gpa_t managed_heap = {0};
 
-    gpa_t managed_heap = gpa_make(ctx, (buffer_t){
-        program_memory.data,
-        managed_heap_size,
-        program_memory.is_large_pages});
+    usize const unmanaged_heap_size = program_memory.len - managed_heap_size;
     gpa_t unmanaged_heap = gpa_make(ctx, (buffer_t){
         program_memory.data + managed_heap_size,
         unmanaged_heap_size,

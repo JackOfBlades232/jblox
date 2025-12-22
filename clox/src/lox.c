@@ -531,6 +531,8 @@ typedef enum {
     e_op_get_property_long,
     e_op_set_property,
     e_op_set_property_long,
+    e_op_get_property_dyn,
+    e_op_set_property_dyn,
     e_op_closure,
     e_op_closure_long,
     e_op_class,
@@ -986,6 +988,12 @@ static uint disasm_instruction(
     case e_op_set_property_long:
         return disasm_long_id_instruction(
             ctx, "OP_SET_PROPERTY_LONG", chunk, at);
+    case e_op_get_property_dyn:
+        return disasm_simple_instruction(
+            ctx, "OP_GET_PROPERTY_DYN", at);
+    case e_op_set_property_dyn:
+        return disasm_simple_instruction(
+            ctx, "OP_SET_PROPERTY_DYN", at);
     case e_op_closure:
         return disasm_upvalue_list(ctx, chunk, 
             disasm_constant_instruction(ctx, "OP_CLOSURE", chunk, at),
@@ -1137,6 +1145,45 @@ static value_t readch_native(int arg_count, value_t *args, native_ctx_t *nctx)
         return VACANT_VAL;
     }
     return NUMBER_VAL((f64)res);
+}
+
+static value_t hasfield_native(int arg_count, value_t *args, native_ctx_t *nctx)
+{
+    ctx_t const *ctx = nctx->ctx;
+    ASSERT(arg_count == 2);
+    if (!IS_INSTANCE(args[0])) {
+        native_runtime_error(nctx, "first arg must be an instance.");
+        return VACANT_VAL;
+    }
+    if (!IS_STRING(args[1])) {
+        native_runtime_error(nctx, "second arg must be a field name.");
+        return VACANT_VAL;
+    }
+    value_t val;
+    return BOOL_VAL(table_get(ctx,
+        &AS_INSTANCE(args[0])->fields, AS_STRING_OBJ(args[1]), &val));
+}
+
+static value_t delfield_native(int arg_count, value_t *args, native_ctx_t *nctx)
+{
+    ctx_t const *ctx = nctx->ctx;
+    ASSERT(arg_count == 2);
+    if (!IS_INSTANCE(args[0])) {
+        native_runtime_error(nctx, "first arg must be an instance.");
+        return VACANT_VAL;
+    }
+    if (!IS_STRING(args[1])) {
+        native_runtime_error(nctx, "second arg must be a field name.");
+        return VACANT_VAL;
+    }
+    if (
+        !table_delete(ctx,
+            &AS_INSTANCE(args[0])->fields, AS_STRING_OBJ(args[1])))
+    {
+        native_runtime_error(nctx, "Undefined field '%S'.", AS_STRING(args[1]));
+        return VACANT_VAL;
+    }
+    return NIL_VAL;
 }
 
 typedef struct vm {
@@ -1641,6 +1688,8 @@ static void init_vm(ctx_t const *ctx, vm_t *vm)
     vm->gc_locked = true;
     define_native(ctx, vm, LITSTR("clock"), &clock_native, 0);
     define_native(ctx, vm, LITSTR("readch"), &readch_native, 0);
+    define_native(ctx, vm, LITSTR("hasfield"), &hasfield_native, 2);
+    define_native(ctx, vm, LITSTR("delfield"), &delfield_native, 2);
     vm->gc_locked = false;
 }
 
@@ -2150,6 +2199,38 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
             push_stack(ctx, vm, val);
         } break;
 
+        case e_op_get_property_dyn: {
+            if (!IS_INSTANCE(peek_stack(ctx, vm, 1))) {
+                runtime_error(ctx, vm, "Only instances have properties.");
+                return e_interp_runtime_err;
+            }
+            obj_instance_t *instance = AS_INSTANCE(peek_stack(ctx, vm, 1));
+            obj_string_t *name = AS_STRING_OBJ(STACK_TOP(vm));
+            value_t val;
+            if (table_get(ctx, &instance->fields, name, &val)) {
+                pop_stack(ctx, vm);
+                pop_stack(ctx, vm);
+                push_stack(ctx, vm, val);
+                break;
+            }
+            runtime_error(ctx, vm,
+                "Undefined property '%S'.", OSTR_TO_STR(name));
+            return e_interp_runtime_err;
+        } break;
+        case e_op_set_property_dyn: {
+            if (!IS_INSTANCE(peek_stack(ctx, vm, 2))) {
+                runtime_error(ctx, vm, "Only instances have properties.");
+                return e_interp_runtime_err;
+            }
+            obj_instance_t *instance = AS_INSTANCE(peek_stack(ctx, vm, 2));
+            obj_string_t *name = AS_STRING_OBJ(peek_stack(ctx, vm, 1));
+            table_set(ctx, vm, &instance->fields, name, STACK_TOP(vm));
+            value_t val = pop_stack(ctx, vm);
+            pop_stack(ctx, vm);
+            pop_stack(ctx, vm);
+            push_stack(ctx, vm, val);
+        } break;
+
         case e_op_closure: {
             obj_function_t *fn = AS_FUNCTION(READ_CONSTANT());
             obj_closure_t *closure = allocate_closure(ctx, vm, fn->upvalue_cnt);
@@ -2224,8 +2305,6 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
                 STACK_TOP(vm) = OBJ_VAL((obj_t *)str);
                 if (str == c)
                     table_set(ctx, vm, &vm->strings, str, NIL_VAL);
-                else
-                    free_object(ctx, vm, (obj_t *)c);
             } else if (
                 IS_NUMBER(peek_stack(ctx, vm, 0)) &&
                 IS_NUMBER(peek_stack(ctx, vm, 1)))
@@ -3636,18 +3715,30 @@ static void compile_unary(
 static void compile_dot(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
 {
-    parser_consume(ctx, e_tt_identifier,
-        "Expected property name after '.'.", compiler->parser);
-    obj_string_t *name = (obj_string_t *)add_string_ref(ctx, vm,
-        compiler->parser->prev.start, (uint)compiler->parser->prev.len);
-
-    if (can_assign && parser_match(ctx, e_tt_equal, compiler->parser)) {
-        compile_expression(ctx, compiler, vm);
-        emit_gen_const(ctx, vm,
-            OBJ_VAL(name), e_op_set_property, e_op_set_property_long, compiler);
+    if (parser_match(ctx, e_tt_left_paren, compiler->parser)) {
+        compile_grouping(ctx, compiler, vm, false);
+        if (can_assign && parser_match(ctx, e_tt_equal, compiler->parser)) {
+            compile_expression(ctx, compiler, vm);
+            emit_byte(ctx, vm, e_op_set_property_dyn, compiler);
+        } else {
+            emit_byte(ctx, vm, e_op_get_property_dyn, compiler);
+        }
     } else {
-        emit_gen_const(ctx, vm,
-            OBJ_VAL(name), e_op_get_property, e_op_get_property_long, compiler);
+        parser_consume(ctx, e_tt_identifier,
+            "Expected property name after '.'.", compiler->parser);
+        obj_string_t *name = (obj_string_t *)add_string_ref(ctx, vm,
+            compiler->parser->prev.start, (uint)compiler->parser->prev.len);
+
+        if (can_assign && parser_match(ctx, e_tt_equal, compiler->parser)) {
+            compile_expression(ctx, compiler, vm);
+            emit_gen_const(ctx, vm,
+                OBJ_VAL(name), e_op_set_property, e_op_set_property_long,
+                compiler);
+        } else {
+            emit_gen_const(ctx, vm,
+                OBJ_VAL(name), e_op_get_property, e_op_get_property_long,
+                compiler);
+        }
     }
 }
 
