@@ -388,7 +388,7 @@ static table_entry_t *table_find_entry(
     obj_string_t const *key)
 {
     (void)ctx;
-    u32 idx = key->hash % cap;
+    u32 idx = key->hash & (cap - 1);
     table_entry_t const *tombstone = NULL;
     for (;;) {
         table_entry_t const *e = &entries[idx];
@@ -401,7 +401,7 @@ static table_entry_t *table_find_entry(
             return (table_entry_t *)e;
         }
 
-        idx = (idx + 1) % cap;
+        idx = (idx + 1) & (cap - 1);
     }
 }
 
@@ -498,7 +498,7 @@ static obj_string_t *table_find_string(
     (void)ctx;
     if (!table->cnt)
         return NULL;
-    u32 idx = hash % table->cap;
+    u32 idx = hash & (table->cap - 1);
     for (;;) {
         table_entry_t const *e = &table->entries[idx];
         if (!e->key) {
@@ -514,7 +514,7 @@ static obj_string_t *table_find_string(
             return e->key;
         }
 
-        idx = (idx + 1) % table->cap;
+        idx = (idx + 1) & (table->cap - 1);
     }
 }
 

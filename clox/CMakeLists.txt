@@ -7,8 +7,8 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/clox
     ${CMAKE_CURRENT_BINARY_DIR}/include)
 
-add_compile_options(-DDEBUG_TRACE_EXECUTION=1 -DDEBUG_PRINT_CODE=1)
-add_compile_options(-DDEBUG_STRESS_GC=1 -DDEBUG_LOG_GC=1)
+add_compile_options(-DDEBUG_TRACE_EXECUTION=0 -DDEBUG_PRINT_CODE=0)
+add_compile_options(-DDEBUG_STRESS_GC=0 -DDEBUG_LOG_GC=0)
 
 if (MSVC)
     # @TODO: bring up to speed
@@ -32,7 +32,7 @@ if (MSVC)
     add_compile_options(/Zi)
 
     # Opt
-    #add_compile_options(/Oi /O2 /Os)
+    add_compile_options(/Oi /O2 /Os)
 else()
     add_compile_options(
         -masm=intel
@@ -52,8 +52,8 @@ else()
     add_compile_options(-g)
 
     # Opt
-    #add_compile_options(-Os -O3 -flto)
-    #add_link_options(-flto)
+    add_compile_options(-Os -O3 -flto)
+    add_link_options(-flto)
 
     # Strip
     #add_link_options(-s)
