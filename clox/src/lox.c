@@ -552,6 +552,8 @@ typedef enum {
     e_op_get_super_dyn,
     e_op_invoke,
     e_op_invoke_long,
+    e_op_super_invoke,
+    e_op_super_invoke_long,
     e_op_closure,
     e_op_closure_long,
     e_op_class,
@@ -1081,7 +1083,13 @@ static uint disasm_instruction(
             ctx, "OP_INVOKE", chunk, at);
     case e_op_invoke_long:
         return disasm_invoke_long(
-            ctx, "OP_INVOKE", chunk, at);
+            ctx, "OP_INVOKE_LONG", chunk, at);
+    case e_op_super_invoke:
+        return disasm_invoke(
+            ctx, "OP_SUPER_INVOKE", chunk, at);
+    case e_op_super_invoke_long:
+        return disasm_invoke_long(
+            ctx, "OP_SUPER_INVOKE_LONG", chunk, at);
     case e_op_closure:
         return disasm_upvalue_list(ctx, chunk, 
             disasm_constant_instruction(ctx, "OP_CLOSURE", chunk, at),
@@ -2484,6 +2492,27 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
             obj_string_t *name = is_long ? READ_STRING_LONG() : READ_STRING();
             frame->ip = ip;
             if (!invoke(ctx, name, arg_count, vm))
+                return e_interp_runtime_err;
+            REINIT_CACHED_VARS();
+        } break;
+
+        case e_op_super_invoke: {
+            uint arg_count = READ_BYTE();
+            b32 is_long = READ_BYTE() == e_op_constant_long;
+            obj_string_t *name = is_long ? READ_STRING_LONG() : READ_STRING();
+            obj_class_t *cls = AS_CLASS(pop_stack(ctx, vm));
+            frame->ip = ip;
+            if (!invoke_from_class(ctx, cls, name, arg_count, vm))
+                return e_interp_runtime_err;
+            REINIT_CACHED_VARS();
+        } break;
+        case e_op_super_invoke_long: {
+            uint arg_count = READ_LONG();
+            b32 is_long = READ_BYTE() == e_op_constant_long;
+            obj_string_t *name = is_long ? READ_STRING_LONG() : READ_STRING();
+            obj_class_t *cls = AS_CLASS(pop_stack(ctx, vm));
+            frame->ip = ip;
+            if (!invoke_from_class(ctx, cls, name, arg_count, vm))
                 return e_interp_runtime_err;
             REINIT_CACHED_VARS();
         } break;
@@ -4371,10 +4400,20 @@ static void compile_super(
 
         compile_named_variable(ctx,
             compiler, vm, (token_t){e_tt_identifier, "this", 4, 0}, 0);
-        compile_named_variable(ctx,
-            compiler, vm, (token_t){e_tt_identifier, "super", 5, 0}, 0);
-        emit_gen_const(ctx, vm,
-            OBJ_VAL(name), e_op_get_super, e_op_get_super_long, compiler);
+        if (parser_match(ctx, e_tt_left_paren, compiler->parser)) {
+            uint arg_count = compile_arg_list(ctx, compiler, vm);
+            compile_named_variable(ctx,
+                compiler, vm, (token_t){e_tt_identifier, "super", 5, 0}, 0);
+            emit_id_ref(
+                ctx, vm, arg_count,
+                e_op_super_invoke, e_op_super_invoke_long, compiler);
+            emit_constant(ctx, vm, OBJ_VAL(name), compiler);
+        } else {
+            compile_named_variable(ctx,
+                compiler, vm, (token_t){e_tt_identifier, "super", 5, 0}, 0);
+            emit_gen_const(ctx, vm,
+                OBJ_VAL(name), e_op_get_super, e_op_get_super_long, compiler);
+        }
     }
 
 }
