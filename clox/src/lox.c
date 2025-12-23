@@ -53,7 +53,15 @@ static inline u32 hash_string(ctx_t const *ctx, char const *p, uint len)
      return hash;
 }
 
+#if NAN_BOXING
+
+typedef u64 value_t;
+
+#else
+
 typedef struct value value_t;
+
+#endif
 
 typedef struct {
     uint cnt, cap;
@@ -96,6 +104,71 @@ typedef struct obj_upvalue obj_upvalue_t;
 typedef struct obj_class obj_class_t;
 typedef struct obj_instance obj_instance_t;
 
+#if NAN_BOXING
+
+static inline u64 num_to_value(f64 num)
+{
+    union {
+        u64 v;
+        f64 n;
+    } u;
+    u.n = num;
+    return u.v;
+}
+
+static inline f64 value_to_num(u64 val)
+{
+    union {
+        u64 v;
+        f64 n;
+    } u;
+    u.v = val;
+    return u.n;
+}
+
+#define QNAN ((u64)0x7ffc000000000000)
+#define SBIT ((u64)0x8000000000000000)
+#define VBIT ((u64)1 << 48)
+#define TAG_NIL   1 // 01.
+#define TAG_FALSE 2 // 10.
+#define TAG_TRUE  3 // 11.
+
+#define NIL_VAL          ((value_t)(QNAN | TAG_NIL))
+#define FALSE_VAL        ((value_t)(QNAN | TAG_FALSE))
+#define TRUE_VAL         ((value_t)(QNAN | TAG_TRUE))
+#define BOOL_VAL(val_)   ((val_) ? TRUE_VAL : FALSE_VAL)
+#define NUMBER_VAL(val_) (num_to_value(val_))
+#define OBJ_VAL(val_)    (SBIT | QNAN | ((u64)(val_) & 0xFFFFFFFFFFFFllu))
+#define VACANT_VAL       (VBIT | QNAN)
+
+#define AS_BOOL(val_)    ((val_) == TRUE_VAL)
+#define AS_NUMBER(val_)  (value_to_num(val_))
+#define AS_OBJ(val_)     ((obj_t *)((val_) & ~(SBIT | VBIT | QNAN)))
+
+#define IS_NIL(val_)     ((val_) == NIL_VAL)
+#define IS_BOOL(val_)    (((val_) | 1) == TRUE_VAL)
+#define IS_NUMBER(val_)  (((val_) & QNAN) != QNAN)
+#define IS_OBJ(val_)     (((val_) & (SBIT | QNAN)) == (SBIT | QNAN))
+#define IS_VACANT(val_)  (((val_) & (VBIT | QNAN)) == (VBIT | QNAN))
+
+#define VACANT_VAL_NAMED(name_) \
+    (VBIT | QNAN | ((u64)(name_) & 0xFFFFFFFFFFFFllu))
+
+static value_type_t vt(value_t val)
+{
+    if (IS_NIL(val))
+        return e_vt_nil;
+    if (IS_BOOL(val))
+        return e_vt_bool;
+    if (IS_NUMBER(val))
+        return e_vt_number;
+    if (IS_OBJ(val))
+        return e_vt_obj;
+    return e_vt_vacant;
+}
+
+#else
+
 typedef struct value {
     value_type_t type;
     union {
@@ -122,6 +195,13 @@ typedef struct value {
 #define VACANT_VAL       ((value_t){e_vt_vacant, {.obj     = NULL          }})
 
 #define VACANT_VAL_NAMED(nm_obj_) ((value_t){e_vt_vacant, {.obj = (nm_obj_)}})
+
+static value_type_t vt(value_t val)
+{
+    return val.type;
+}
+
+#endif
 
 static b32 is_truthy(ctx_t const *ctx, value_t val)
 {
@@ -350,6 +430,12 @@ static inline string_t obj_as_string(ctx_t const *ctx, value_t val)
 static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
 {
     (void)ctx;
+#if NAN_BOXING
+    if (IS_NUMBER(v1) && IS_NUMBER(v2))
+        return ABS(AS_NUMBER(v1) - AS_NUMBER(v2)) < 1e-16;
+    else
+        return v1 == v2;
+#else
     if (v1.type != v2.type)
         return false;
 
@@ -367,6 +453,7 @@ static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
         ASSERT(0);
         return false;
     }
+#endif
 }
 
 static table_t make_table(ctx_t const *ctx)
@@ -409,7 +496,10 @@ static void table_adjust_cap(
     ctx_t const *ctx, vm_t *vm, table_t *table, uint new_cap)
 {
     table_entry_t *entries = ALLOCATE(table_entry_t, new_cap);
-    memset(entries, 0, new_cap * sizeof(table_entry_t));
+    for (uint i = 0; i < new_cap; ++i) {
+        entries[i].key = NULL;
+        entries[i].value = NIL_VAL;
+    }
 
     table->cnt = 0;
     for (uint i = 0; i < MIN(table->cap, new_cap); ++i) {
@@ -767,7 +857,7 @@ static void print_obj(ctx_t const *ctx, io_handle_t *hnd, value_t val)
 
 static void print_value(ctx_t const *ctx, value_t val)
 {
-    switch (val.type) {
+    switch (vt(val)) {
     case e_vt_bool:
         OUTPUTF("%s", AS_BOOL(val) ? "true" : "false");
         break;
@@ -790,7 +880,7 @@ static void print_value(ctx_t const *ctx, value_t val)
 
 static void disasm_value(ctx_t const *ctx, value_t val)
 {
-    switch (val.type) {
+    switch (vt(val)) {
     case e_vt_bool:
         LOGF_NONL("%s", AS_BOOL(val) ? "true" : "false");
         break;
@@ -2069,7 +2159,7 @@ static b32 call_value(
             for (uint d = arg_count - 1, s = 0; s < arg_count; --d, ++s)
                 args[d] = peek_stack(ctx, vm, (int)s);
             value_t res = native((int)arg_count, args, &vm->nctx);
-            if (res.type == e_vt_vacant)
+            if (IS_VACANT(res))
                 return false;
             popn_stack(ctx, vm, arg_count + 1);
             push_stack(ctx, vm, res);
@@ -3747,9 +3837,10 @@ static void end_scope(ctx_t const *ctx, vm_t *vm, compiler_t *compiler)
             compiler->top_loop_block = NULL;
     }
 
-    memset(
-        scope_lvar_table->entries, 0,
-        sizeof(table_entry_t) * scope_lvar_table->cap);
+    for (uint i = 0; i < scope_lvar_table->cap; ++i) {
+        scope_lvar_table->entries[i].key = NULL;
+        scope_lvar_table->entries[i].value = NIL_VAL;
+    }
     scope_lvar_table->cnt = 0;
     scope->initialized_cnt = 0;
 
@@ -4268,7 +4359,6 @@ static void compile_class(
         token_t super_token = (token_t){e_tt_identifier, "super", 5, 0};
         uint super_vid = register_lvar(ctx, compiler, vm, super_token, true);
         mark_lvar_initialzied(ctx, compiler, super_vid);
-        LOGF("%u", super_vid);
 
         compile_expression(ctx, compiler, vm);
         emit_byte(ctx, vm, e_op_inherit, compiler);

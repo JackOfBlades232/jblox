@@ -7,6 +7,8 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/clox
     ${CMAKE_CURRENT_BINARY_DIR}/include)
 
+add_compile_options(-DNAN_BOXING=1)
+
 add_compile_options(-DDEBUG_TRACE_EXECUTION=0 -DDEBUG_PRINT_CODE=0)
 add_compile_options(-DDEBUG_STRESS_GC=0 -DDEBUG_LOG_GC=0)
 
