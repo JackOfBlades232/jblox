@@ -792,7 +792,6 @@ static inline void write_id_ref(
         write_chunk(ctx, vm, chunk, (u8)((id >> 8) & 0xFF), line);
         write_chunk(ctx, vm, chunk, (u8)((id >> 16) & 0xFF), line);
     } else {
-        // @TODO: a more gracious error should be here
         PANIC(
             "Constants overflow: "
             "one chunk can't contain more than 16777215 consts/entities.");
@@ -1641,7 +1640,8 @@ static void mark_obj(ctx_t const *ctx, vm_t *vm, obj_t *obj)
         vm->objects = obj;
     }
 
-    // @TODO: don't add objs without outgoing refs (native, string)
+    if (GET_OBJ_TYPE(obj) == e_ot_native || GET_OBJ_TYPE(obj) == e_ot_string)
+        return;
 
     if (vm->gray_cap <= vm->gray_cnt) {
         vm->gray_cap = GROW_CAP(vm->gray_cap);
@@ -2739,7 +2739,11 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
             BINARY_OP(*, NUMBER_VAL);
             break;
         case e_op_divide:
-            BINARY_OP(/, NUMBER_VAL); // @TODO: zero div check
+            if (IS_NUMBER(STACK_TOP(vm)) && AS_NUMBER(STACK_TOP(vm)) == 0.0) {
+                runtime_error(ctx, vm, "Division by zero.");
+                return e_interp_runtime_err;
+            }
+            BINARY_OP(/, NUMBER_VAL);
             break;
 
         case e_op_not:
@@ -4394,7 +4398,6 @@ static void compile_func(
         : e_ft_function;
     push_compiler->in_class =
         (flags & f_cf_is_method) || compiler->in_class;
-    // @TODO check out if we allow silent shadowing of super in nested classes
     push_compiler->in_subclass =
         (flags & f_cf_in_subclass) ||
         (compiler->in_subclass && !(flags & f_cf_is_method));
@@ -4938,10 +4941,8 @@ static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         compile_var_decl(ctx, compiler, vm, false);
     else if (parser_match(ctx, e_tt_let, compiler->parser))
         compile_var_decl(ctx, compiler, vm, true);
-    // @TODO: allow lambda at the start of expr
     else if (parser_match(ctx, e_tt_fun, compiler->parser))
         compile_func_decl(ctx, compiler, vm);
-    // @TODO: allow anon class at the start of expr
     else if (parser_match(ctx, e_tt_class, compiler->parser))
         compile_class_decl(ctx, compiler, vm);
     else

@@ -74,3 +74,6 @@ class CoffeeMaker {
 var maker = CoffeeMaker("coffee and chicory");
 maker.brew();
 print maker.coffee;
+
+// No can do with the lookahead we have in the parser
+// class { print() { print "Print"; }}().print();
