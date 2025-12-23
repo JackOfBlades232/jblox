@@ -162,6 +162,7 @@ typedef enum {
     e_ot_upvalue,
     e_ot_class,
     e_ot_instance,
+    e_ot_bound_method,
 } obj_type_t;
 
 static char const *const c_obj_type_names[] =
@@ -173,6 +174,7 @@ static char const *const c_obj_type_names[] =
     "upvalue",
     "class",
     "instance",
+    "bound method",
 };
 
 typedef struct obj {
@@ -255,6 +257,8 @@ typedef struct obj_string {
 
 typedef enum {
     e_ft_function,
+    e_ft_method,
+    e_ft_initializer,
     e_ft_script
 } obj_function_type_t;
 
@@ -290,6 +294,7 @@ typedef struct obj_upvalue {
 typedef struct obj_class {
     obj_t obj;
     obj_string_t *name;
+    table_t methods;
 } obj_class_t;
 
 typedef struct obj_instance {
@@ -297,6 +302,12 @@ typedef struct obj_instance {
     obj_class_t *cls;
     table_t fields;
 } obj_instance_t;
+
+typedef struct obj_bound_method {
+    obj_t obj;
+    value_t receiver;
+    obj_t *method; // function or closure
+} obj_bound_method_t;
 
 static inline b32 is_obj_type(ctx_t const *ctx, value_t val, obj_type_t ot)
 {
@@ -321,6 +332,7 @@ static inline string_t obj_as_string(ctx_t const *ctx, value_t val)
 #define IS_UPVALUE(value_)    (is_obj_type(ctx, (value_), e_ot_upvalue))
 #define IS_CLASS(value_)      (is_obj_type(ctx, (value_), e_ot_class))
 #define IS_INSTANCE(value_)   (is_obj_type(ctx, (value_), e_ot_instance))
+#define IS_BOUND_METHOD(v_)   (is_obj_type(ctx, (v_),     e_ot_bound_method))
 
 #define AS_STRING_OBJ(value_) ((obj_string_t *)AS_OBJ(value_))
 #define AS_STRING(value_)     (obj_as_string(ctx, (value_)))
@@ -332,6 +344,7 @@ static inline string_t obj_as_string(ctx_t const *ctx, value_t val)
 #define AS_UPVALUE(value_)    ((obj_upvalue_t *)AS_OBJ(value_))
 #define AS_CLASS(value_)      ((obj_class_t *)AS_OBJ(value_))
 #define AS_INSTANCE(value_)   ((obj_instance_t *)AS_OBJ(value_))
+#define AS_BOUND_MEHOD(v_)    ((obj_bound_method_t *)AS_OBJ(v_))
 
 static b32 are_equal(ctx_t const *ctx, value_t v1, value_t v2)
 {
@@ -537,6 +550,8 @@ typedef enum {
     e_op_closure_long,
     e_op_class,
     e_op_class_long,
+    e_op_method,
+    e_op_method_long,
     e_op_close_upvalue,
     e_op_eq,
     e_op_eq_preserve_lhs,
@@ -730,6 +745,9 @@ static void print_obj(ctx_t const *ctx, io_handle_t *hnd, value_t val)
     case e_ot_instance:
         fmt_print(ctx, hnd, "<%S instance>",
             OSTR_TO_STR(AS_INSTANCE(val)->cls->name));
+        break;
+    case e_ot_bound_method:
+        print_obj(ctx, hnd, OBJ_VAL(AS_BOUND_MEHOD(val)->method));
         break;
     }
 }
@@ -977,16 +995,16 @@ static uint disasm_instruction(
         return disasm_long_id_instruction(
             ctx, "OP_SET_UPVALUE_LONG", chunk, at);
     case e_op_get_property:
-        return disasm_id_instruction(
+        return disasm_constant_instruction(
             ctx, "OP_GET_PROPERTY", chunk, at);
     case e_op_get_property_long:
-        return disasm_long_id_instruction(
+        return disasm_long_constant_instruction(
             ctx, "OP_GET_PROPERTY_LONG", chunk, at);
     case e_op_set_property:
-        return disasm_id_instruction(
+        return disasm_constant_instruction(
             ctx, "OP_SET_PROPERTY", chunk, at);
     case e_op_set_property_long:
-        return disasm_long_id_instruction(
+        return disasm_long_constant_instruction(
             ctx, "OP_SET_PROPERTY_LONG", chunk, at);
     case e_op_get_property_dyn:
         return disasm_simple_instruction(
@@ -1008,6 +1026,12 @@ static uint disasm_instruction(
     case e_op_class_long:
         return disasm_long_constant_instruction(
             ctx, "OP_CLASS_LONG", chunk, at);
+    case e_op_method:
+        return disasm_constant_instruction(
+            ctx, "OP_METHOD", chunk, at);
+    case e_op_method_long:
+        return disasm_long_constant_instruction(
+            ctx, "OP_METHOD_LONG", chunk, at);
     case e_op_close_upvalue:
         return disasm_simple_instruction(
             ctx, "OP_CLOSE_UPVALUE", at);
@@ -1196,6 +1220,7 @@ typedef struct vm {
     uint frame_count;
 
     table_t strings;
+    obj_string_t *init_str;
 
     table_t gvar_map;
     value_array_t gvars;
@@ -1325,6 +1350,7 @@ static inline obj_class_t *allocate_class(
 {
     obj_class_t *cls = ALLOCATE_OBJ(obj_class_t, e_ot_class, vm);
     cls->name = name;
+    cls->methods = make_table(ctx);
     return cls;
 }
 
@@ -1335,6 +1361,22 @@ static inline obj_instance_t *allocate_instance(
     inst->cls = cls;
     inst->fields = make_table(ctx);
     return inst;
+}
+
+static inline obj_bound_method_t *allocate_bound_method(
+    ctx_t const *ctx, vm_t *vm, value_t receiver, obj_t *method)
+{
+    ASSERT(
+        GET_OBJ_TYPE(method) == e_ot_closure ||
+        GET_OBJ_TYPE(method) == e_ot_function);
+
+    obj_bound_method_t *bm =
+        ALLOCATE_OBJ(obj_bound_method_t, e_ot_bound_method, vm);
+
+    bm->receiver = receiver;
+    bm->method = method;
+
+    return bm;
 }
 
 static inline void free_object(ctx_t const *ctx, vm_t *vm, obj_t *obj)
@@ -1369,14 +1411,19 @@ static inline void free_object(ctx_t const *ctx, vm_t *vm, obj_t *obj)
     case e_ot_upvalue:
         FREE(obj_upvalue_t, (obj_upvalue_t *)obj, 1);
         break;
-    case e_ot_class:
-        FREE(obj_class_t, (obj_class_t *)obj, 1);
-        break;
+    case e_ot_class: {
+        obj_class_t *c = (obj_class_t *)obj;
+        free_table(ctx, vm, &c->methods);
+        FREE(obj_class_t, c, 1);
+    } break;
     case e_ot_instance: {
         obj_instance_t *i = (obj_instance_t *)obj;
         free_table(ctx, vm, &i->fields);
         FREE(obj_instance_t, (obj_instance_t *)obj, 1);
     } break;
+    case e_ot_bound_method:
+        FREE(obj_bound_method_t, (obj_bound_method_t *)obj, 1);
+        break;
     }
 }
 
@@ -1466,6 +1513,8 @@ static void mark_roots(ctx_t const *ctx, vm_t *vm)
     for (obj_upvalue_t *uv = vm->open_upvalues; uv; uv = uv->next)
         mark_obj(ctx, vm, (obj_t *)uv);
 
+    mark_obj(ctx, vm, (obj_t *)vm->init_str);
+
     mark_value_array(ctx, vm, &vm->gvars);
     mark_table(ctx, vm, &vm->gvar_map);
 }
@@ -1498,11 +1547,17 @@ static void blacken_obj(ctx_t const *ctx, vm_t *vm, obj_t *obj)
     case e_ot_class: {
         obj_class_t *cls = (obj_class_t *)obj;
         mark_obj(ctx, vm, (obj_t *)cls->name);
+        mark_table(ctx, vm, &cls->methods);
     } break;
     case e_ot_instance: {
         obj_instance_t *inst = (obj_instance_t *)obj;
         mark_obj(ctx, vm, (obj_t *)inst->cls);
         mark_table(ctx, vm, &inst->fields);
+    } break;
+    case e_ot_bound_method: {
+        obj_bound_method_t *bm = (obj_bound_method_t *)obj;
+        mark_value(ctx, vm, bm->receiver);
+        mark_obj(ctx, vm, bm->method);
     } break;
     }
 }
@@ -1690,6 +1745,8 @@ static void init_vm(ctx_t const *ctx, vm_t *vm)
     define_native(ctx, vm, LITSTR("readch"), &readch_native, 0);
     define_native(ctx, vm, LITSTR("hasfield"), &hasfield_native, 2);
     define_native(ctx, vm, LITSTR("delfield"), &delfield_native, 2);
+    vm->init_str = (obj_string_t *)add_string_ref(
+        ctx, vm, LITSTR("init").p, (uint)LITSTR("init").len);
     vm->gc_locked = false;
 }
 
@@ -1881,10 +1938,23 @@ static b32 call_value(
 {
     if (IS_OBJ(callee)) {
         switch (OBJ_TYPE(callee)) {
+        case e_ot_bound_method: {
+            obj_bound_method_t *bm = AS_BOUND_MEHOD(callee);
+            *at_stack_bw(ctx, vm, (int)arg_count) = bm->receiver;
+            return call_value(ctx, OBJ_VAL(bm->method), arg_count, vm);
+        }
         case e_ot_class: {
             obj_class_t *cls = AS_CLASS(callee);
             *at_stack_bw(ctx, vm, (int)arg_count) =
                 OBJ_VAL(allocate_instance(ctx, vm, cls));
+            value_t init;
+            if (table_get(ctx, &cls->methods, vm->init_str, &init)) {
+                return call_value(ctx, init, arg_count, vm);
+            } else if (arg_count != 0) {
+                runtime_error(
+                    ctx, vm, "Expected 0 arguments, got %d.", arg_count);
+                return false;
+            }
             return true;
         }
         case e_ot_closure:
@@ -1956,6 +2026,34 @@ static void close_upvalues(ctx_t const *ctx, vm_t *vm, uint last)
          upvalue->location = &upvalue->closed;
          vm->open_upvalues = upvalue->next;
     }
+}
+
+static void define_method(ctx_t const *ctx, vm_t *vm, obj_string_t *name)
+{
+    value_t m = peek_stack(ctx, vm, 0);
+    obj_class_t *cls = AS_CLASS(peek_stack(ctx, vm, 1));
+    table_set(ctx, vm, &cls->methods, name, m);
+    pop_stack(ctx, vm);
+}
+
+static b32 bind_method(
+    ctx_t const *ctx, vm_t *vm,
+    obj_class_t *cls, obj_string_t *name, b32 pop_dyn_name)
+{
+    value_t method;
+    if (!table_get(ctx, &cls->methods, name, &method)) {
+        runtime_error(ctx, vm,
+            "Undefined property '%S'.", OSTR_TO_STR(name));
+        return false;
+    }
+    
+    obj_bound_method_t *bm =
+        allocate_bound_method(ctx, vm, STACK_TOP(vm), AS_OBJ(method));
+    pop_stack(ctx, vm);
+    if (pop_dyn_name)
+        pop_stack(ctx, vm);
+    push_stack(ctx, vm, OBJ_VAL(bm));
+    return true;
 }
 
 static interp_result_t run(ctx_t const *ctx, vm_t *vm)
@@ -2153,9 +2251,8 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
                 push_stack(ctx, vm, val);
                 break;
             }
-            runtime_error(ctx, vm,
-                "Undefined property '%S'.", OSTR_TO_STR(name));
-            return e_interp_runtime_err;
+            if (!bind_method(ctx, vm, instance->cls, name, false))
+                return e_interp_runtime_err;
         } break;
         case e_op_get_property_long: {
             if (!IS_INSTANCE(STACK_TOP(vm))) {
@@ -2170,9 +2267,8 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
                 push_stack(ctx, vm, val);
                 break;
             }
-            runtime_error(ctx, vm,
-                "Undefined property '%S'.", OSTR_TO_STR(name));
-            return e_interp_runtime_err;
+            if (!bind_method(ctx, vm, instance->cls, name, false))
+                return e_interp_runtime_err;
         } break;
         case e_op_set_property: {
             if (!IS_INSTANCE(peek_stack(ctx, vm, 1))) {
@@ -2213,9 +2309,8 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
                 push_stack(ctx, vm, val);
                 break;
             }
-            runtime_error(ctx, vm,
-                "Undefined property '%S'.", OSTR_TO_STR(name));
-            return e_interp_runtime_err;
+            if (!bind_method(ctx, vm, instance->cls, name, true))
+                return e_interp_runtime_err;
         } break;
         case e_op_set_property_dyn: {
             if (!IS_INSTANCE(peek_stack(ctx, vm, 2))) {
@@ -2255,6 +2350,13 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
                 OBJ_VAL(allocate_class(ctx, vm, READ_STRING_LONG())));
             break;
         } break;
+
+        case e_op_method:
+            define_method(ctx, vm, READ_STRING());
+            break;
+        case e_op_method_long:
+            define_method(ctx, vm, READ_STRING_LONG());
+            break;
 
         case e_op_close_upvalue:
             close_upvalues(ctx, vm, stack_size(ctx, vm) - 1);
@@ -2971,6 +3073,8 @@ typedef struct compiler {
 
     upvalue_array_t upvalues;
 
+    b32 in_class;
+
     lvar_scope_t *top_loop_block;
     uint top_loop_start_mark;
     uint top_loop_break_mark;
@@ -3063,7 +3167,10 @@ static void emit_loop(ctx_t const *ctx, vm_t *vm, uint at, compiler_t *compiler)
 
 static void emit_return(ctx_t const *ctx, vm_t *vm, compiler_t *compiler)
 {
-    emit_byte(ctx, vm, e_op_nil, compiler);
+    if (compiler->compiling_func_type == e_ft_initializer)
+        emit_id_ref(ctx, vm, 0, e_op_get_loc, e_op_get_loc_long, compiler);
+    else
+        emit_byte(ctx, vm, e_op_nil, compiler);
     emit_byte(ctx, vm, e_op_return, compiler);
 }
 
@@ -3166,7 +3273,7 @@ static var_info_t resolve_lvar(
         return (var_info_t){(uint)(-1), true, false};
     obj_string_t *str =
         (obj_string_t *)add_string_ref(ctx, vm, name.start, (uint)(name.len));
-    for (int i = compiler->current_scope_depth; i >= 1; --i) {
+    for (int i = compiler->current_scope_depth; i >= 0; --i) {
         lvar_scope_t *scope = &compiler->scope_lvars[i];
         value_t id_val;
         if (table_get(ctx, &scope->map, str, &id_val)) {
@@ -3264,9 +3371,15 @@ static void begin_compiler(
     compiler->top_loop_start_mark = (uint)(-1);
     compiler->top_loop_break_mark = (uint)(-1);
 
-    uint dummy = register_lvar(
-        ctx, compiler, vm, (token_t){(token_type_t)0, "", 0, 0}, true);
-    mark_lvar_initialzied(ctx, compiler, dummy);
+    token_t this_token =
+        (
+            compiler->compiling_func_type == e_ft_method ||
+            compiler->compiling_func_type == e_ft_initializer
+        )
+        ? (token_t){e_tt_identifier, "this", 4, 0}
+        : (token_t){(token_type_t)0, "", 0, 0};
+    register_lvar(ctx, compiler, vm, this_token, true);
+    ++compiler->scope_lvars[0].initialized_cnt;
 }
 
 static obj_function_t *end_compiler(
@@ -3440,37 +3553,45 @@ typedef struct {
     precedence_t precedence;
 } parse_rule_t;
 
+typedef enum {
+    f_cf_can_assign = 1,
+    f_cf_is_method = 1 << 1,
+    f_cf_is_initializer = 1 << 2
+} compile_flags_t;
+
 static void compile_expression(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
 
 static void compile_number(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 static void compile_string(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 static void compile_literal(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 static void compile_variable(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 static void compile_class(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
-static void compile_fun(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
+static void compile_func(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
+static void compile_this(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 static void compile_grouping(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 static void compile_call(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 static void compile_unary(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 static void compile_dot(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 static void compile_binary(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 static void compile_ternary(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 static void compile_and(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 static void compile_or(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign);
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 
 parse_rule_t const c_parse_rules[] = {
     [e_tt_left_paren]    = {&compile_grouping, &compile_call,    e_prec_call  },
@@ -3502,14 +3623,14 @@ parse_rule_t const c_parse_rules[] = {
     [e_tt_else]          = {NULL,              NULL,             e_prec_none  },
     [e_tt_false]         = {&compile_literal,  NULL,             e_prec_none  },
     [e_tt_for]           = {NULL,              NULL,             e_prec_none  },
-    [e_tt_fun]           = {&compile_fun,      NULL,             e_prec_none  },
+    [e_tt_fun]           = {&compile_func,     NULL,             e_prec_none  },
     [e_tt_if]            = {NULL,              NULL,             e_prec_none  },
     [e_tt_nil]           = {&compile_literal,  NULL,             e_prec_none  },
     [e_tt_or]            = {NULL,              &compile_or,      e_prec_or    },
     [e_tt_print]         = {NULL,              NULL,             e_prec_none  },
     [e_tt_return]        = {NULL,              NULL,             e_prec_none  },
     [e_tt_super]         = {NULL,              NULL,             e_prec_none  },
-    [e_tt_this]          = {NULL,              NULL,             e_prec_none  },
+    [e_tt_this]          = {&compile_this,     NULL,             e_prec_none  },
     [e_tt_true]          = {&compile_literal,  NULL,             e_prec_none  },
     [e_tt_var]           = {NULL,              NULL,             e_prec_none  },
     [e_tt_let]           = {NULL,              NULL,             e_prec_none  },
@@ -3540,13 +3661,14 @@ static void compile_precedence(
     }
 
     b32 can_assign = prec <= e_prec_assignment;
-    prefix_rule(ctx, compiler, vm, can_assign);
+    u32 flags = can_assign ? f_cf_can_assign : 0;
+    prefix_rule(ctx, compiler, vm, flags);
 
     while (prec <= get_rule(ctx, compiler->parser->cur.type)->precedence) {
         parser_advance(ctx, compiler->parser);
         parse_fn_t infix_rule =
             get_rule(ctx, compiler->parser->prev.type)->infix;
-        infix_rule(ctx, compiler, vm, can_assign);
+        infix_rule(ctx, compiler, vm, flags);
     }
 
     if (can_assign && parser_match(ctx, e_tt_equal, compiler->parser))
@@ -3554,10 +3676,10 @@ static void compile_precedence(
 }
 
 static void compile_number(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
 {
     (void)vm;
-    (void)can_assign;
+    (void)flags;
     char const *str = compiler->parser->prev.start;
     f64 num = 0.0;
     while (IS_DIGIT(*str))
@@ -3575,9 +3697,9 @@ static void compile_number(
 }
 
 static void compile_string(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
 {
-    (void)can_assign;
+    (void)flags;
     obj_t *str = add_string_ref(
         ctx, vm, compiler->parser->prev.start + 1,
         (uint)(compiler->parser->prev.len - 2));
@@ -3585,10 +3707,10 @@ static void compile_string(
 }
 
 static void compile_literal(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
 {
     (void)vm;
-    (void)can_assign;
+    (void)flags;
     switch (compiler->parser->prev.type) {
     case e_tt_false:
         emit_byte(ctx, vm, e_op_false, compiler);
@@ -3606,7 +3728,7 @@ static void compile_literal(
 
 static void compile_named_variable(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm,
-    token_t name, b32 can_assign)
+    token_t name, u32 flags)
 {
     u8 get_op, set_op, get_lop, set_lop;
     var_info_t resolved = resolve_lvar(ctx, compiler, vm, name, false);
@@ -3631,7 +3753,10 @@ static void compile_named_variable(
         set_lop = e_op_set_glob_long;
     }
 
-    if (can_assign && parser_match(ctx, e_tt_equal, compiler->parser)) {
+    if (
+        (flags & f_cf_can_assign) &&
+        parser_match(ctx, e_tt_equal, compiler->parser))
+    {
         if (resolved.is_const) {
             parser_error(
                 ctx, "Can't assign to an immutable variable.",
@@ -3646,10 +3771,10 @@ static void compile_named_variable(
 }
 
 static void compile_variable(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
 {
     compile_named_variable(
-        ctx, compiler, vm, compiler->parser->prev, can_assign);
+        ctx, compiler, vm, compiler->parser->prev, flags);
 }
 
 static void compile_expression(
@@ -3659,9 +3784,9 @@ static void compile_expression(
 }
 
 static void compile_grouping(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
 {
-    (void)can_assign;
+    (void)flags;
     compile_expression(ctx, compiler, vm);
     parser_consume(
         ctx, e_tt_right_paren, "Expect ')' after expression.",
@@ -3684,17 +3809,17 @@ static uint compile_arg_list(
 }
 
 static void compile_call(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
 {
-    (void)can_assign;
+    (void)flags;
     uint arg_count = compile_arg_list(ctx, compiler, vm);
     emit_id_ref(ctx, vm, arg_count, e_op_call, e_op_call_long, compiler);
 }
 
 static void compile_unary(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
 {
-    (void)can_assign;
+    (void)flags;
     token_type_t tt = compiler->parser->prev.type;
 
     compile_precedence(ctx, e_prec_unary, compiler, vm);
@@ -3713,14 +3838,19 @@ static void compile_unary(
 }
 
 static void compile_dot(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
 {
     if (parser_match(ctx, e_tt_left_paren, compiler->parser)) {
-        compile_grouping(ctx, compiler, vm, false);
-        if (can_assign && parser_match(ctx, e_tt_equal, compiler->parser)) {
+        compile_grouping(ctx, compiler, vm, 0);
+        if (
+            (flags & f_cf_can_assign) &&
+            parser_match(ctx, e_tt_equal, compiler->parser))
+        {
             compile_expression(ctx, compiler, vm);
             emit_byte(ctx, vm, e_op_set_property_dyn, compiler);
-        } else {
+        }
+        else
+        {
             emit_byte(ctx, vm, e_op_get_property_dyn, compiler);
         }
     } else {
@@ -3729,12 +3859,17 @@ static void compile_dot(
         obj_string_t *name = (obj_string_t *)add_string_ref(ctx, vm,
             compiler->parser->prev.start, (uint)compiler->parser->prev.len);
 
-        if (can_assign && parser_match(ctx, e_tt_equal, compiler->parser)) {
+        if (
+            (flags & f_cf_can_assign) &&
+            parser_match(ctx, e_tt_equal, compiler->parser))
+        {
             compile_expression(ctx, compiler, vm);
             emit_gen_const(ctx, vm,
                 OBJ_VAL(name), e_op_set_property, e_op_set_property_long,
                 compiler);
-        } else {
+        }
+        else
+        {
             emit_gen_const(ctx, vm,
                 OBJ_VAL(name), e_op_get_property, e_op_get_property_long,
                 compiler);
@@ -3743,9 +3878,9 @@ static void compile_dot(
 }
 
 static void compile_binary(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
 {
-    (void)can_assign;
+    (void)flags;
     token_type_t tt = compiler->parser->prev.type;
     parse_rule_t const *rule = get_rule(ctx, tt);
     compile_precedence(ctx, (precedence_t)(rule->precedence + 1), compiler, vm);
@@ -3788,9 +3923,9 @@ static void compile_binary(
 }
 
 static void compile_ternary(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
 {
-    (void)can_assign;
+    (void)flags;
     token_type_t tt = compiler->parser->prev.type;
     ASSERT(tt == e_tt_question);
     parse_rule_t const *rule = get_rule(ctx, tt);
@@ -3813,9 +3948,9 @@ static void compile_ternary(
 }
 
 static void compile_and(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
 {
-    (void)can_assign;
+    (void)flags;
     uint end_jump = emit_jump(ctx, vm, e_op_jump_if_false, compiler);
     emit_byte(ctx, vm, e_op_pop, compiler);
 
@@ -3825,9 +3960,9 @@ static void compile_and(
 }
 
 static void compile_or(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
 {
-    (void)can_assign;
+    (void)flags;
     uint end_jump = emit_jump(ctx, vm, e_op_jump_if_true, compiler);
     emit_byte(ctx, vm, e_op_pop, compiler);
 
@@ -3842,29 +3977,57 @@ static void compile_block(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
 static void compile_var_decl(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 is_const);
 
-static void compile_class(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+static void compile_method(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 {
-    (void)can_assign;
+    parser_consume(ctx, e_tt_identifier,
+        "Expected method name.", compiler->parser);
+
+    obj_string_t *name = (obj_string_t *)add_string_ref(ctx, vm,
+        compiler->parser->prev.start, (uint)compiler->parser->prev.len);
+
+    // @SPEED: there is a redundant add_string_ref inside the compile_func call
+    compile_func(ctx, compiler, vm,
+        f_cf_is_method | (name == vm->init_str ? f_cf_is_initializer : 0));
+
+    emit_gen_const(
+        ctx, vm, OBJ_VAL(name), e_op_method, e_op_method_long, compiler);
+}
+
+static void compile_class(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
+{
+    (void)flags;
     obj_string_t *name = (obj_string_t *)add_string_ref(ctx, vm,
         compiler->parser->prev.start, (uint)compiler->parser->prev.len);
 
     emit_class(ctx, vm, OBJ_VAL(name), compiler);
 
     parser_consume(ctx, e_tt_left_brace,
-        "Expected '{' before class body", compiler->parser);
+        "Expected '{' before class body.", compiler->parser);
+
+    while (
+        !parser_check(ctx, e_tt_right_brace, compiler->parser) &&
+        !parser_check(ctx, e_tt_eof, compiler->parser))
+    {
+        compile_method(ctx, compiler, vm);
+    }
+
     parser_consume(ctx, e_tt_right_brace,
-        "Expected '}' after class body", compiler->parser);
+        "Expected '}' after class body.", compiler->parser);
 }
 
-static void compile_fun(
-    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 can_assign)
+static void compile_func(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
 {
-    (void)can_assign;
+    (void)flags;
     compiler_t *push_compiler = ALLOCATE(compiler_t, 1);
     push_compiler->parser = compiler->parser;
     push_compiler->compiling_func = allocate_function(ctx, vm);
-    push_compiler->compiling_func_type = e_ft_function;
+    push_compiler->compiling_func_type =
+        (flags & f_cf_is_method)
+        ? ((flags & f_cf_is_initializer) ? e_ft_initializer : e_ft_method)
+        : e_ft_function;
+    push_compiler->in_class = (flags & f_cf_is_method) || compiler->in_class;
 
     push_compiler->compiling_func->name =
         (obj_string_t *)add_string_ref(
@@ -3923,6 +4086,18 @@ static void compile_fun(
     }
 
     FREE(compiler_t, push_compiler, 1);
+}
+
+static void compile_this(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
+{
+    (void)flags; // can't assign to this
+    if (!compiler->in_class) {
+        parser_error(
+            ctx, "Can't use this outside of a class.", compiler->parser);
+        return;
+    }
+    compile_named_variable(ctx, compiler, vm, compiler->parser->prev, 0);
 }
 
 static uint compile_new_variable(
@@ -4027,6 +4202,11 @@ static void compile_return(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     if (parser_match(ctx, e_tt_semicolon, compiler->parser)) {
         emit_return(ctx, vm, compiler);
     } else {
+        if (compiler->compiling_func_type == e_ft_initializer) {
+            parser_error(
+                ctx, "Can't return a value from init.", compiler->parser);
+            return;
+        }
         compile_expression(ctx, compiler, vm);
         parser_consume(ctx, e_tt_semicolon,
             "Expected ';' after return value.", compiler->parser);
@@ -4302,7 +4482,7 @@ static void compile_func_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         ctx, compiler, vm, "Expected function name.", true);
     mark_lvar_initialzied(ctx, compiler, vid);
 
-    compile_fun(ctx, compiler, vm, false);
+    compile_func(ctx, compiler, vm, 0);
 
     if (compiler->current_scope_depth == 0) {
         emit_id_ref(
@@ -4338,8 +4518,10 @@ static void compile_decl(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
         compile_var_decl(ctx, compiler, vm, false);
     else if (parser_match(ctx, e_tt_let, compiler->parser))
         compile_var_decl(ctx, compiler, vm, true);
+    // @TODO: allow lambda at the start of expr
     else if (parser_match(ctx, e_tt_fun, compiler->parser))
         compile_func_decl(ctx, compiler, vm);
+    // @TODO: allow anon class at the start of expr
     else if (parser_match(ctx, e_tt_class, compiler->parser))
         compile_class_decl(ctx, compiler, vm);
     else
@@ -4361,6 +4543,7 @@ static obj_function_t *compile(ctx_t const *ctx, string_t source, vm_t *vm)
     compiler.parser = &parser;
     compiler.compiling_func = allocate_function(ctx, vm);
     compiler.compiling_func_type = e_ft_script;
+    compiler.in_class = false;
 
     begin_compiler(ctx, &compiler, vm, NULL);
 

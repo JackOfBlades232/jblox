@@ -34,3 +34,43 @@ print pair.(s);
 
 delfield(pair, "first");
 print hasfield(pair, "first");
+
+class Scone {
+    topping(first, second) {
+        print "scone with " + first + " and " + second;
+    }
+}
+
+var scone = Scone();
+scone.topping("berries", "cream");
+var toppingm = scone.topping;
+toppingm("choco", "banana");
+
+class Nested {
+    method() {
+        fun function() {
+            print this;
+        }
+
+        function();
+    }
+}
+
+Nested().method();
+
+class CoffeeMaker {
+    init(coffee) {
+        this.coffee = coffee;
+    }
+
+    brew() {
+        print "Enjoy your cup of " + this.coffee;
+
+        // No reusing the grounds!
+        this.coffee = nil;
+    }
+}
+
+var maker = CoffeeMaker("coffee and chicory");
+maker.brew();
+print maker.coffee;
