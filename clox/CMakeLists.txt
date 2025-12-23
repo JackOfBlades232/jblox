@@ -8,7 +8,7 @@ include_directories(
     ${CMAKE_CURRENT_BINARY_DIR}/include)
 
 add_compile_options(-DDEBUG_TRACE_EXECUTION=1 -DDEBUG_PRINT_CODE=1)
-add_compile_options(-DDEBUG_STRESS_GC=1 -DDEBUG_LOG_GC=1)
+add_compile_options(-DDEBUG_STRESS_GC=1 -DDEBUG_LOG_GC=0)
 
 if (MSVC)
     # @TODO: bring up to speed

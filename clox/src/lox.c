@@ -547,15 +547,22 @@ typedef enum {
     e_op_set_property_long,
     e_op_get_property_dyn,
     e_op_set_property_dyn,
+    e_op_get_super,
+    e_op_get_super_long,
+    e_op_get_super_dyn,
     e_op_invoke,
     e_op_invoke_long,
     e_op_closure,
     e_op_closure_long,
     e_op_class,
     e_op_class_long,
+    e_op_inherit,
     e_op_init_method,
     e_op_method,
     e_op_method_long,
+    e_op_subclass_init_method,
+    e_op_subclass_method,
+    e_op_subclass_method_long,
     e_op_close_upvalue,
     e_op_eq,
     e_op_eq_preserve_lhs,
@@ -1060,6 +1067,15 @@ static uint disasm_instruction(
     case e_op_set_property_dyn:
         return disasm_simple_instruction(
             ctx, "OP_SET_PROPERTY_DYN", at);
+    case e_op_get_super:
+        return disasm_constant_instruction(
+            ctx, "OP_GET_SUPER", chunk, at);
+    case e_op_get_super_long:
+        return disasm_long_constant_instruction(
+            ctx, "OP_GET_SUPER_LONG", chunk, at);
+    case e_op_get_super_dyn:
+        return disasm_simple_instruction(
+            ctx, "OP_GET_SUPER_DYN", at);
     case e_op_invoke:
         return disasm_invoke(
             ctx, "OP_INVOKE", chunk, at);
@@ -1080,6 +1096,9 @@ static uint disasm_instruction(
     case e_op_class_long:
         return disasm_long_constant_instruction(
             ctx, "OP_CLASS_LONG", chunk, at);
+    case e_op_inherit:
+        return disasm_simple_instruction(
+            ctx, "OP_INHERIT", at);
     case e_op_init_method:
         return disasm_simple_instruction(
             ctx, "OP_METHOD", at);
@@ -1089,6 +1108,15 @@ static uint disasm_instruction(
     case e_op_method_long:
         return disasm_long_constant_instruction(
             ctx, "OP_METHOD_LONG", chunk, at);
+    case e_op_subclass_init_method:
+        return disasm_simple_instruction(
+            ctx, "OP_SUBCLASS_METHOD", at);
+    case e_op_subclass_method:
+        return disasm_constant_instruction(
+            ctx, "OP_SUBCLASS_METHOD", chunk, at);
+    case e_op_subclass_method_long:
+        return disasm_long_constant_instruction(
+            ctx, "OP_SUBCLASS_METHOD_LONG", chunk, at);
     case e_op_close_upvalue:
         return disasm_simple_instruction(
             ctx, "OP_CLOSE_UPVALUE", at);
@@ -2114,17 +2142,18 @@ static void close_upvalues(ctx_t const *ctx, vm_t *vm, uint last)
 {
     (void)ctx;
     while (vm->open_upvalues && vm->open_upvalues->stack_location >= last) {
-         obj_upvalue_t *upvalue = vm->open_upvalues;
-         upvalue->closed = *upvalue->location;
-         upvalue->location = &upvalue->closed;
-         vm->open_upvalues = upvalue->next;
+        obj_upvalue_t *upvalue = vm->open_upvalues;
+        upvalue->closed = *upvalue->location;
+        upvalue->location = &upvalue->closed;
+        vm->open_upvalues = upvalue->next;
     }
 }
 
-static void define_method(ctx_t const *ctx, vm_t *vm, obj_string_t *name)
+static void define_method(
+    ctx_t const *ctx, vm_t *vm, obj_string_t *name, int class_offset)
 {
     value_t m = peek_stack(ctx, vm, 0);
-    obj_class_t *cls = AS_CLASS(peek_stack(ctx, vm, 1));
+    obj_class_t *cls = AS_CLASS(peek_stack(ctx, vm, class_offset));
     table_set(ctx, vm, &cls->methods, name, m);
     pop_stack(ctx, vm);
 }
@@ -2421,6 +2450,25 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
             push_stack(ctx, vm, val);
         } break;
 
+        case e_op_get_super: {
+            obj_string_t *name = READ_STRING();
+            obj_class_t *superclass = AS_CLASS(pop_stack(ctx, vm));
+            if (!bind_method(ctx, vm, superclass, name, false))
+                return e_interp_runtime_err;
+        } break;
+        case e_op_get_super_long: {
+            obj_string_t *name = READ_STRING_LONG();
+            obj_class_t *superclass = AS_CLASS(pop_stack(ctx, vm));
+            if (!bind_method(ctx, vm, superclass, name, false))
+                return e_interp_runtime_err;
+        } break;
+        case e_op_get_super_dyn: {
+            obj_string_t *name = AS_STRING_OBJ(peek_stack(ctx, vm, 2));
+            obj_class_t *superclass = AS_CLASS(pop_stack(ctx, vm));
+            if (!bind_method(ctx, vm, superclass, name, true))
+                return e_interp_runtime_err;
+        } break;
+
         case e_op_invoke: {
             uint arg_count = READ_BYTE();
             b32 is_long = READ_BYTE() == e_op_constant_long;
@@ -2459,10 +2507,24 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
             push_stack(ctx, vm,
                 OBJ_VAL(allocate_class(ctx, vm, READ_STRING())));
             break;
-        case e_op_class_long: {
+        case e_op_class_long:
             push_stack(ctx, vm,
                 OBJ_VAL(allocate_class(ctx, vm, READ_STRING_LONG())));
             break;
+
+        case e_op_inherit: {
+            value_t superclass = STACK_TOP(vm);
+            if (!IS_CLASS(superclass)) {
+                runtime_error(ctx, vm, "Superclass must be a class.");
+                return e_interp_runtime_err;
+            }
+            obj_class_t *subclass = AS_CLASS(peek_stack(ctx, vm, 1));
+            if (AS_CLASS(superclass) == subclass) {
+                runtime_error(ctx, vm, "Class can't inherit from itself.");
+                return e_interp_runtime_err;
+            }
+            table_add_all(
+                ctx, vm, &subclass->methods, &AS_CLASS(superclass)->methods);
         } break;
 
         case e_op_init_method: {
@@ -2472,10 +2534,23 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
             pop_stack(ctx, vm);
         } break;
         case e_op_method:
-            define_method(ctx, vm, READ_STRING());
+            define_method(ctx, vm, READ_STRING(), 1);
             break;
         case e_op_method_long:
-            define_method(ctx, vm, READ_STRING_LONG());
+            define_method(ctx, vm, READ_STRING_LONG(), 1);
+            break;
+
+        case e_op_subclass_init_method: {
+            value_t m = peek_stack(ctx, vm, 0);
+            obj_class_t *cls = AS_CLASS(peek_stack(ctx, vm, 2));
+            cls->init = m;
+            pop_stack(ctx, vm);
+        } break;
+        case e_op_subclass_method:
+            define_method(ctx, vm, READ_STRING(), 2);
+            break;
+        case e_op_subclass_method_long:
+            define_method(ctx, vm, READ_STRING_LONG(), 2);
             break;
 
         case e_op_close_upvalue:
@@ -3194,6 +3269,7 @@ typedef struct compiler {
     upvalue_array_t upvalues;
 
     b32 in_class;
+    b32 in_subclass;
 
     lvar_scope_t *top_loop_block;
     uint top_loop_start_mark;
@@ -3448,6 +3524,12 @@ static var_info_t resolve_upvalue(
         return (var_info_t){(uint)(-1), true, false};
 
     var_info_t lres = resolve_lvar(ctx, compiler->enclosing, vm, name, true);
+    if (string_eq(
+        (string_t){"super", 5},
+        (string_t){(char *)name.start, (usize)name.len}))
+    {
+        ++lres.vid;
+    }
     if (lres.vid != (uint)(-1))
         return add_upvalue(ctx, vm, compiler, lres.vid, true, lres.is_const);
 
@@ -3676,7 +3758,8 @@ typedef struct {
 typedef enum {
     f_cf_can_assign = 1,
     f_cf_is_method = 1 << 1,
-    f_cf_is_initializer = 1 << 2
+    f_cf_is_initializer = 1 << 2,
+    f_cf_in_subclass = 1 << 3,
 } compile_flags_t;
 
 static void compile_expression(
@@ -3693,6 +3776,8 @@ static void compile_variable(
 static void compile_class(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 static void compile_func(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
+static void compile_super(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
 static void compile_this(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags);
@@ -3749,7 +3834,7 @@ parse_rule_t const c_parse_rules[] = {
     [e_tt_or]            = {NULL,              &compile_or,      e_prec_or    },
     [e_tt_print]         = {NULL,              NULL,             e_prec_none  },
     [e_tt_return]        = {NULL,              NULL,             e_prec_none  },
-    [e_tt_super]         = {NULL,              NULL,             e_prec_none  },
+    [e_tt_super]         = {&compile_super,    NULL,             e_prec_none  },
     [e_tt_this]          = {&compile_this,     NULL,             e_prec_none  },
     [e_tt_true]          = {&compile_literal,  NULL,             e_prec_none  },
     [e_tt_var]           = {NULL,              NULL,             e_prec_none  },
@@ -4106,7 +4191,8 @@ static void compile_block(ctx_t const *ctx, compiler_t *compiler, vm_t *vm);
 static void compile_var_decl(
     ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 is_const);
 
-static void compile_method(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
+static void compile_method(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, b32 is_subclass)
 {
     parser_consume(ctx, e_tt_identifier,
         "Expected method name.", compiler->parser);
@@ -4118,13 +4204,21 @@ static void compile_method(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
 
     // @SPEED: there is a redundant add_string_ref inside the compile_func call
     compile_func(ctx, compiler, vm,
-        f_cf_is_method | (is_init ? f_cf_is_initializer : 0));
+        f_cf_is_method
+        | (is_init ? f_cf_is_initializer : 0)
+        | (is_subclass ? f_cf_in_subclass : 0));
 
     if (is_init) {
-        emit_byte(ctx, vm, e_op_init_method, compiler);
+        emit_byte(
+            ctx, vm,
+            is_subclass ? e_op_subclass_init_method : e_op_init_method,
+            compiler);
     } else {
         emit_gen_const(
-            ctx, vm, OBJ_VAL(name), e_op_method, e_op_method_long, compiler);
+            ctx, vm, OBJ_VAL(name),
+            is_subclass ? e_op_subclass_method : e_op_method,
+            is_subclass ? e_op_subclass_method_long : e_op_method_long,
+            compiler);
     }
 }
 
@@ -4134,8 +4228,22 @@ static void compile_class(
     (void)flags;
     obj_string_t *name = (obj_string_t *)add_string_ref(ctx, vm,
         compiler->parser->prev.start, (uint)compiler->parser->prev.len);
+    b32 is_subclass = false;
 
     emit_class(ctx, vm, OBJ_VAL(name), compiler);
+
+    if (parser_match(ctx, e_tt_less, compiler->parser)) {
+        is_subclass = true;
+
+        begin_scope(ctx, compiler, e_lst_block);
+        token_t super_token = (token_t){e_tt_identifier, "super", 5, 0};
+        uint super_vid = register_lvar(ctx, compiler, vm, super_token, true);
+        mark_lvar_initialzied(ctx, compiler, super_vid);
+        LOGF("%u", super_vid);
+
+        compile_expression(ctx, compiler, vm);
+        emit_byte(ctx, vm, e_op_inherit, compiler);
+    }
 
     parser_consume(ctx, e_tt_left_brace,
         "Expected '{' before class body.", compiler->parser);
@@ -4144,11 +4252,14 @@ static void compile_class(
         !parser_check(ctx, e_tt_right_brace, compiler->parser) &&
         !parser_check(ctx, e_tt_eof, compiler->parser))
     {
-        compile_method(ctx, compiler, vm);
+        compile_method(ctx, compiler, vm, is_subclass);
     }
 
     parser_consume(ctx, e_tt_right_brace,
         "Expected '}' after class body.", compiler->parser);
+
+    if (is_subclass)
+        end_scope(ctx, vm, compiler);
 }
 
 static void compile_func(
@@ -4162,7 +4273,12 @@ static void compile_func(
         (flags & f_cf_is_method)
         ? ((flags & f_cf_is_initializer) ? e_ft_initializer : e_ft_method)
         : e_ft_function;
-    push_compiler->in_class = (flags & f_cf_is_method) || compiler->in_class;
+    push_compiler->in_class =
+        (flags & f_cf_is_method) || compiler->in_class;
+    // @TODO check out if we allow silent shadowing of super in nested classes
+    push_compiler->in_subclass =
+        (flags & f_cf_in_subclass) ||
+        (compiler->in_subclass && !(flags & f_cf_is_method));
 
     push_compiler->compiling_func->name =
         (obj_string_t *)add_string_ref(
@@ -4221,6 +4337,46 @@ static void compile_func(
     }
 
     FREE(compiler_t, push_compiler, 1);
+}
+
+static void compile_super(
+    ctx_t const *ctx, compiler_t *compiler, vm_t *vm, u32 flags)
+{
+    (void)flags; // can't assign to super
+    if (!compiler->in_class) {
+        parser_error(ctx,
+            "Can't use super outside of a class.", compiler->parser);
+        return;
+    } else if (!compiler->in_subclass) {
+        parser_error(ctx,
+            "Can't use suport outside without a superclass.", compiler->parser);
+        return;
+    }
+    parser_consume(ctx,
+        e_tt_dot, "Expected '.' after 'super'.", compiler->parser);
+
+    if (parser_match(ctx, e_tt_left_paren, compiler->parser)) {
+        compile_grouping(ctx, compiler, vm, 0);
+        compile_named_variable(ctx,
+            compiler, vm, (token_t){e_tt_identifier, "this", 4, 0}, 0);
+        compile_named_variable(ctx,
+            compiler, vm, (token_t){e_tt_identifier, "super", 5, 0}, 0);
+        emit_byte(ctx, vm, e_op_get_super_dyn, compiler);
+    } else {
+        parser_consume(ctx,
+            e_tt_identifier, "Expected property name or name expression.",
+            compiler->parser);
+        obj_string_t *name = (obj_string_t *)add_string_ref(ctx, vm,
+            compiler->parser->prev.start, (uint)compiler->parser->prev.len);
+
+        compile_named_variable(ctx,
+            compiler, vm, (token_t){e_tt_identifier, "this", 4, 0}, 0);
+        compile_named_variable(ctx,
+            compiler, vm, (token_t){e_tt_identifier, "super", 5, 0}, 0);
+        emit_gen_const(ctx, vm,
+            OBJ_VAL(name), e_op_get_super, e_op_get_super_long, compiler);
+    }
+
 }
 
 static void compile_this(
@@ -4679,6 +4835,7 @@ static obj_function_t *compile(ctx_t const *ctx, string_t source, vm_t *vm)
     compiler.compiling_func = allocate_function(ctx, vm);
     compiler.compiling_func_type = e_ft_script;
     compiler.in_class = false;
+    compiler.in_subclass = false;
 
     begin_compiler(ctx, &compiler, vm, NULL);
 
@@ -4794,7 +4951,6 @@ static void run_file(ctx_t const *ctx, vm_t *vm, char const *fname)
 
 static int lox_main(ctx_t const *ctx)
 {
-    (void)table_add_all;
     (void)set_obj_type;
 
     vm_t vm = {0};
