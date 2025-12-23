@@ -1,0 +1,22 @@
+class C {
+    m() {}
+}
+
+let c = C();
+let start = clock();
+
+// 1'000'000 calls, unrolled to remove loop overhead
+for (var i = 0; i < 100000; i = i + 1) {
+    c.m();    
+    c.m();    
+    c.m();    
+    c.m();    
+    c.m();    
+    c.m();    
+    c.m();    
+    c.m();    
+    c.m();    
+    c.m();    
+}
+
+print clock() - start;

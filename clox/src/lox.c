@@ -546,6 +546,8 @@ typedef enum {
     e_op_set_property_long,
     e_op_get_property_dyn,
     e_op_set_property_dyn,
+    e_op_invoke,
+    e_op_invoke_long,
     e_op_closure,
     e_op_closure_long,
     e_op_class,
@@ -879,6 +881,50 @@ static uint disasm_upvalue_list(
     return at;
 }
 
+static uint disasm_invoke(
+    ctx_t const *ctx, char const *name, chunk_t const *chunk, uint at)
+{
+    ++at;
+    u8 arg_count = chunk->code[at++];
+    u8 name_instr = chunk->code[at++];
+    uint constant;
+    if (name_instr == e_op_constant) {
+        constant = chunk->code[at++];
+    } else {
+        constant = 0;
+        constant |= chunk->code[at++];
+        constant |= (uint)chunk->code[at++] << 8;
+        constant |= (uint)chunk->code[at++] << 16;
+    }
+    LOGF_NONL("%s %u ", name, constant);
+    disasm_value(ctx, chunk->constants.values[constant]);
+    LOGF(" %u ", arg_count);
+    return at;
+}
+
+static uint disasm_invoke_long(
+    ctx_t const *ctx, char const *name, chunk_t const *chunk, uint at)
+{
+    ++at;
+    u8 arg_count = chunk->code[at++];
+    arg_count |= (uint)chunk->code[at++] << 8;
+    arg_count |= (uint)chunk->code[at++] << 16;
+    u8 name_instr = chunk->code[at++];
+    uint constant;
+    if (name_instr == e_op_constant) {
+        constant = chunk->code[at++];
+    } else {
+        constant = 0;
+        constant |= chunk->code[at++];
+        constant |= (uint)chunk->code[at++] << 8;
+        constant |= (uint)chunk->code[at++] << 16;
+    }
+    LOGF_NONL("%s %u ", name, constant);
+    disasm_value(ctx, chunk->constants.values[constant]);
+    LOGF(" %u ", arg_count);
+    return at;
+}
+
 static obj_function_t *disasm_peek_function(
     ctx_t const *ctx, chunk_t const *chunk, uint at)
 {
@@ -1012,6 +1058,12 @@ static uint disasm_instruction(
     case e_op_set_property_dyn:
         return disasm_simple_instruction(
             ctx, "OP_SET_PROPERTY_DYN", at);
+    case e_op_invoke:
+        return disasm_invoke(
+            ctx, "OP_INVOKE", chunk, at);
+    case e_op_invoke_long:
+        return disasm_invoke_long(
+            ctx, "OP_INVOKE", chunk, at);
     case e_op_closure:
         return disasm_upvalue_list(ctx, chunk, 
             disasm_constant_instruction(ctx, "OP_CLOSURE", chunk, at),
@@ -1765,6 +1817,7 @@ static void free_vm(ctx_t const *ctx, vm_t *vm)
         pop_frame(ctx, vm);
 
     usize before = vm->bytes_allocated;
+    (void)before;
 
     obj_t *obj = vm->objects;
     while (obj) {
@@ -1989,6 +2042,38 @@ static b32 call_value(
 
     runtime_error(ctx, vm, "Can only call functions and classes.");
     return false;
+}
+
+static b32 invoke_from_class(
+    ctx_t const *ctx, obj_class_t *cls, obj_string_t *name,
+    uint arg_count, vm_t *vm)
+{
+    value_t method;
+    if (!table_get(ctx, &cls->methods, name, &method)) {
+        runtime_error(ctx, vm,
+            "Undefined property '%S'.", OSTR_TO_STR(name));
+        return false;
+    }
+
+    return call_value(ctx, method, arg_count, vm);
+}
+
+static b32 invoke(
+    ctx_t const *ctx, obj_string_t *name,
+    uint arg_count, vm_t *vm)
+{
+    value_t rec = peek_stack(ctx, vm, arg_count);
+    if (!IS_INSTANCE(rec)) {
+        runtime_error(ctx, vm, "Only instances have methods.");
+        return false;
+    }
+    obj_instance_t *inst = AS_INSTANCE(rec);
+    value_t val;
+    if (table_get(ctx, &inst->fields, name, &val)) {
+        *at_stack_bw(ctx, vm, (int)arg_count) = val;
+        return call_value(ctx, val, arg_count, vm);
+    }
+    return invoke_from_class(ctx, inst->cls, name, arg_count, vm); 
 }
 
 static obj_upvalue_t *capture_upvalue(ctx_t const *ctx, vm_t *vm, uint at)
@@ -2324,6 +2409,25 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
             pop_stack(ctx, vm);
             pop_stack(ctx, vm);
             push_stack(ctx, vm, val);
+        } break;
+
+        case e_op_invoke: {
+            uint arg_count = READ_BYTE();
+            b32 is_long = READ_BYTE() == e_op_constant_long;
+            obj_string_t *name = is_long ? READ_STRING_LONG() : READ_STRING();
+            frame->ip = ip;
+            if (!invoke(ctx, name, arg_count, vm))
+                return e_interp_runtime_err;
+            REINIT_CACHED_VARS();
+        } break;
+        case e_op_invoke_long: {
+            uint arg_count = READ_LONG();
+            b32 is_long = READ_BYTE() == e_op_constant_long;
+            obj_string_t *name = is_long ? READ_STRING_LONG() : READ_STRING();
+            frame->ip = ip;
+            if (!invoke(ctx, name, arg_count, vm))
+                return e_interp_runtime_err;
+            REINIT_CACHED_VARS();
         } break;
 
         case e_op_closure: {
@@ -3867,6 +3971,15 @@ static void compile_dot(
             emit_gen_const(ctx, vm,
                 OBJ_VAL(name), e_op_set_property, e_op_set_property_long,
                 compiler);
+        }
+        else if (parser_match(ctx, e_tt_left_paren, compiler->parser))
+        {
+            // Only optimizing the static invoke path
+            uint arg_count = compile_arg_list(ctx, compiler, vm);
+            emit_id_ref(
+                ctx, vm, arg_count,
+                e_op_invoke, e_op_invoke_long, compiler);
+            emit_constant(ctx, vm, OBJ_VAL(name), compiler);
         }
         else
         {
