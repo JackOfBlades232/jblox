@@ -295,6 +295,7 @@ typedef struct obj_class {
     obj_t obj;
     obj_string_t *name;
     table_t methods;
+    value_t init;
 } obj_class_t;
 
 typedef struct obj_instance {
@@ -552,6 +553,7 @@ typedef enum {
     e_op_closure_long,
     e_op_class,
     e_op_class_long,
+    e_op_init_method,
     e_op_method,
     e_op_method_long,
     e_op_close_upvalue,
@@ -1078,6 +1080,9 @@ static uint disasm_instruction(
     case e_op_class_long:
         return disasm_long_constant_instruction(
             ctx, "OP_CLASS_LONG", chunk, at);
+    case e_op_init_method:
+        return disasm_simple_instruction(
+            ctx, "OP_METHOD", at);
     case e_op_method:
         return disasm_constant_instruction(
             ctx, "OP_METHOD", chunk, at);
@@ -1403,6 +1408,7 @@ static inline obj_class_t *allocate_class(
     obj_class_t *cls = ALLOCATE_OBJ(obj_class_t, e_ot_class, vm);
     cls->name = name;
     cls->methods = make_table(ctx);
+    cls->init = NIL_VAL;
     return cls;
 }
 
@@ -1599,6 +1605,7 @@ static void blacken_obj(ctx_t const *ctx, vm_t *vm, obj_t *obj)
     case e_ot_class: {
         obj_class_t *cls = (obj_class_t *)obj;
         mark_obj(ctx, vm, (obj_t *)cls->name);
+        mark_value(ctx, vm, cls->init);
         mark_table(ctx, vm, &cls->methods);
     } break;
     case e_ot_instance: {
@@ -2000,9 +2007,8 @@ static b32 call_value(
             obj_class_t *cls = AS_CLASS(callee);
             *at_stack_bw(ctx, vm, (int)arg_count) =
                 OBJ_VAL(allocate_instance(ctx, vm, cls));
-            value_t init;
-            if (table_get(ctx, &cls->methods, vm->init_str, &init)) {
-                return call_value(ctx, init, arg_count, vm);
+            if (!IS_NIL(cls->init)) {
+                return call_value(ctx, cls->init, arg_count, vm);
             } else if (arg_count != 0) {
                 runtime_error(
                     ctx, vm, "Expected 0 arguments, got %d.", arg_count);
@@ -2048,8 +2054,10 @@ static b32 invoke_from_class(
     ctx_t const *ctx, obj_class_t *cls, obj_string_t *name,
     uint arg_count, vm_t *vm)
 {
-    value_t method;
-    if (!table_get(ctx, &cls->methods, name, &method)) {
+    value_t method = NIL_VAL;
+    if (name == vm->init_str)
+        method = cls->init;
+    if (IS_NIL(method) && !table_get(ctx, &cls->methods, name, &method)) {
         runtime_error(ctx, vm,
             "Undefined property '%S'.", OSTR_TO_STR(name));
         return false;
@@ -2125,8 +2133,10 @@ static b32 bind_method(
     ctx_t const *ctx, vm_t *vm,
     obj_class_t *cls, obj_string_t *name, b32 pop_dyn_name)
 {
-    value_t method;
-    if (!table_get(ctx, &cls->methods, name, &method)) {
+    value_t method = NIL_VAL;
+    if (name == vm->init_str)
+        method = cls->init;
+    if (IS_NIL(method) && !table_get(ctx, &cls->methods, name, &method)) {
         runtime_error(ctx, vm,
             "Undefined property '%S'.", OSTR_TO_STR(name));
         return false;
@@ -2455,6 +2465,12 @@ static interp_result_t run(ctx_t const *ctx, vm_t *vm)
             break;
         } break;
 
+        case e_op_init_method: {
+            value_t m = peek_stack(ctx, vm, 0);
+            obj_class_t *cls = AS_CLASS(peek_stack(ctx, vm, 1));
+            cls->init = m;
+            pop_stack(ctx, vm);
+        } break;
         case e_op_method:
             define_method(ctx, vm, READ_STRING());
             break;
@@ -4098,12 +4114,18 @@ static void compile_method(ctx_t const *ctx, compiler_t *compiler, vm_t *vm)
     obj_string_t *name = (obj_string_t *)add_string_ref(ctx, vm,
         compiler->parser->prev.start, (uint)compiler->parser->prev.len);
 
+    b32 is_init = name == vm->init_str;
+
     // @SPEED: there is a redundant add_string_ref inside the compile_func call
     compile_func(ctx, compiler, vm,
-        f_cf_is_method | (name == vm->init_str ? f_cf_is_initializer : 0));
+        f_cf_is_method | (is_init ? f_cf_is_initializer : 0));
 
-    emit_gen_const(
-        ctx, vm, OBJ_VAL(name), e_op_method, e_op_method_long, compiler);
+    if (is_init) {
+        emit_byte(ctx, vm, e_op_init_method, compiler);
+    } else {
+        emit_gen_const(
+            ctx, vm, OBJ_VAL(name), e_op_method, e_op_method_long, compiler);
+    }
 }
 
 static void compile_class(
