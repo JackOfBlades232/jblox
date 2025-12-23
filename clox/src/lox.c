@@ -2070,7 +2070,7 @@ static b32 invoke(
     ctx_t const *ctx, obj_string_t *name,
     uint arg_count, vm_t *vm)
 {
-    value_t rec = peek_stack(ctx, vm, arg_count);
+    value_t rec = peek_stack(ctx, vm, (int)arg_count);
     if (!IS_INSTANCE(rec)) {
         runtime_error(ctx, vm, "Only instances have methods.");
         return false;
@@ -4198,12 +4198,12 @@ static void compile_func(
 
         for (uint i = 0; i < func->upvalue_cnt; ++i) {
             uint vid = push_compiler->upvalues.uvs[i].vid;
-            u8 flags = 0;
-            flags |= push_compiler->upvalues.uvs[i].is_local ? f_uv_local : 0;
-            flags |= vid > 255 ? f_uv_long : 0;
-            emit_byte(ctx, vm, flags, compiler);
+            u8 uflags = 0;
+            uflags |= push_compiler->upvalues.uvs[i].is_local ? f_uv_local : 0;
+            uflags |= vid > 255 ? f_uv_long : 0;
+            emit_byte(ctx, vm, uflags, compiler);
             emit_byte(ctx, vm, (u8)(vid & 0xFF), compiler);
-            if (flags & f_uv_long) {
+            if (uflags & f_uv_long) {
                 if (vid > 16777215) {
                     parser_error(
                             ctx, "Can't have more than 16777215 upvalues",
