@@ -30,5 +30,4 @@ In addition:
 + Runtime evaluated propery names as `inst.(expression)`
 + Intrinsics for io and working with class instances.
 
-As the implementation may not be conformant in the end, and is very unlikely
-to be copied 1-to-1 from the book, the jb- prefix is added.
+As the implementation is not entirely conformant, the jb- prefix is added.
